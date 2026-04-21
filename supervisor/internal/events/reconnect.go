@@ -60,9 +60,7 @@ func Run(ctx context.Context, deps Deps) error {
 	if err != nil {
 		return fmt.Errorf("events: initial recovery: %w", err)
 	}
-	if n > 0 {
-		deps.Logger.Info("startup recovery reconciled stale running rows", "count", n)
-	}
+	deps.Logger.Info("startup recovery ran", "reconciled", n)
 
 	conn := deps.InitialListenConn
 	initial := true
@@ -82,6 +80,8 @@ func Run(ctx context.Context, deps Deps) error {
 		if _, err := pollOnce(ctx, deps.Queries, deps.State, deps.Dispatcher); err != nil {
 			deps.Logger.Error("initial poll failed", "error", err)
 			// Fall through to LISTEN; the ticker in runPollTicker will retry.
+		} else if initial {
+			deps.Logger.Info("initial fallback poll ran")
 		}
 
 		// Step 5–6: LISTEN until error or ctx cancel; ticker-driven polls
@@ -117,7 +117,6 @@ func Run(ctx context.Context, deps Deps) error {
 		bo.Reset()
 		conn = newConn
 		initial = false
-		_ = initial // purely documentary — reconnect path intentionally skips recovery
 	}
 }
 
@@ -133,7 +132,7 @@ func runListenWithPollTicker(ctx context.Context, conn *pgx.Conn, deps Deps) err
 	listenDone := make(chan error, 1)
 	pollDone := make(chan error, 1)
 
-	go func() { listenDone <- listen(subCtx, conn, deps.Dispatcher) }()
+	go func() { listenDone <- listen(subCtx, conn, deps.Dispatcher, deps.Logger) }()
 	go func() { pollDone <- runPollTicker(subCtx, deps) }()
 
 	select {

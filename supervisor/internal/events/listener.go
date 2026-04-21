@@ -3,6 +3,7 @@ package events
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -22,7 +23,7 @@ import (
 // listen does not own the conn's lifecycle — the caller closes the conn on
 // return, which implicitly releases the advisory lock (plan.md §"pg_notify
 // listener connection lifecycle" step 7).
-func listen(ctx context.Context, conn *pgx.Conn, dispatcher *Dispatcher) error {
+func listen(ctx context.Context, conn *pgx.Conn, dispatcher *Dispatcher, logger *slog.Logger) error {
 	for _, ch := range dispatcher.Channels() {
 		// pgx sanitises channel names in the positional path, but LISTEN does
 		// not accept parameters; we must inject the channel literal. Channels
@@ -32,6 +33,9 @@ func listen(ctx context.Context, conn *pgx.Conn, dispatcher *Dispatcher) error {
 		stmt := fmt.Sprintf(`LISTEN "%s"`, ch)
 		if _, err := conn.Exec(ctx, stmt); err != nil {
 			return fmt.Errorf("events: LISTEN %q: %w", ch, err)
+		}
+		if logger != nil {
+			logger.Info("LISTEN started", "channel", ch)
 		}
 	}
 	for {

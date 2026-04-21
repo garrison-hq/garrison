@@ -39,6 +39,11 @@ func (realDialer) DialConn(ctx context.Context, url string) (*pgx.Conn, error) {
 	return pgx.Connect(ctx, url)
 }
 
+// NewRealDialer returns the production Dialer that wraps pgxpool.New and
+// pgx.Connect. Exported so cmd/supervisor (T012) can pass one to events.Run
+// for its reconnect loop without needing to re-derive the pgx wiring.
+func NewRealDialer() Dialer { return realDialer{} }
+
 // Connect establishes the shared pool and the dedicated LISTEN connection,
 // retrying with the FR-017 100ms→30s exponential backoff until success or ctx
 // cancellation. The returned *pgx.Conn is the connection on which callers will

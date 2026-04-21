@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -34,6 +35,12 @@ type Deps struct {
 	FakeAgentCmd      string
 	SubprocessTimeout time.Duration
 	Logger            *slog.Logger
+	// SigkillEscalations counts subprocesses the supervisor had to escalate
+	// from SIGTERM to SIGKILL on shutdown (NFR-005 timeout). nil is tolerated
+	// (tests skip tracking); production wires an atomic counter so
+	// cmd/supervisor can return exit code 5 per contracts/cli.md when
+	// counter > 0 at shutdown.
+	SigkillEscalations *atomic.Int64
 }
 
 // Spawn handles one work.ticket.created event end-to-end per plan.md
@@ -209,6 +216,10 @@ func Spawn(ctx context.Context, deps Deps, eventID pgtype.UUID) error {
 
 	exitCode, signalName := extractExit(cmd.ProcessState)
 	cls := Classify(exitCode, signalName, ctxErr, shutdownSigkilled)
+
+	if shutdownSigkilled && deps.SigkillEscalations != nil {
+		deps.SigkillEscalations.Add(1)
+	}
 
 	// Step 7: single terminal tx — UpdateInstanceTerminal + MarkEventProcessed.
 	// Use the supervisor root ctx (not execCtx) so the terminal write still

@@ -1,15 +1,24 @@
-.PHONY: build test test-integration test-chaos sqlc migrate run docker lint clean
+.PHONY: build test test-integration test-chaos sqlc migrate run docker lint clean copy-migrations
 
-build:
+# copy-migrations stages the repo-root migrations/ into cmd/supervisor/migrations/
+# so `go:embed migrations/*.sql` in cmd/supervisor/migrate.go can find them
+# (embed paths are relative to the source file's package). The staged copy
+# is gitignored — the canonical source lives at the repo root so a future
+# Drizzle-based dashboard can consume it without a Go dep.
+copy-migrations:
+	mkdir -p cmd/supervisor/migrations
+	cp -r ../migrations/*.sql cmd/supervisor/migrations/ 2>/dev/null || true
+
+build: copy-migrations
 	CGO_ENABLED=0 go build -o bin/supervisor ./cmd/supervisor
 
 test:
 	go test ./...
 
-test-integration:
+test-integration: copy-migrations
 	go test -tags=integration ./...
 
-test-chaos:
+test-chaos: copy-migrations
 	go test -tags=chaos ./...
 
 sqlc:
@@ -21,7 +30,7 @@ migrate: build
 run: build
 	./bin/supervisor
 
-docker:
+docker: copy-migrations
 	docker build -t garrison/supervisor:dev .
 
 lint:
@@ -29,4 +38,4 @@ lint:
 	@if [ -n "$$(gofmt -l .)" ]; then gofmt -l .; exit 1; fi
 
 clean:
-	rm -rf bin/
+	rm -rf bin/ migrations/ cmd/supervisor/migrations/
