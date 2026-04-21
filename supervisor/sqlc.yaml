@@ -1,0 +1,14 @@
+version: "2"
+sql:
+  - engine: postgresql
+    queries: ../migrations/queries
+    schema:
+      - ../migrations/20260421000001_initial_schema.sql
+      - ../migrations/20260421000002_event_trigger.sql
+    gen:
+      go:
+        package: store
+        out: internal/store
+        sql_package: pgx/v5
+        emit_json_tags: false
+        emit_pointers_for_null_types: true
