@@ -2,7 +2,10 @@ module github.com/garrison-hq/garrison/supervisor
 
 go 1.25.0
 
-require github.com/jackc/pgx/v5 v5.9.2
+require (
+	github.com/google/shlex v0.0.0-20191202100458-e7afc7fbc510
+	github.com/jackc/pgx/v5 v5.9.2
+)
 
 require (
 	github.com/jackc/pgpassfile v1.0.0 // indirect
