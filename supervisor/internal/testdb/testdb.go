@@ -1,4 +1,4 @@
-//go:build integration
+//go:build integration || chaos
 
 // Package testdb provides a shared Postgres harness for integration tests
 // (T013). A single testcontainers-go postgres:17 container is booted lazily
@@ -18,8 +18,8 @@ import (
 	"testing"
 	"time"
 
-	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/jackc/pgx/v5/pgxpool"
+	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
@@ -27,10 +27,11 @@ import (
 )
 
 var (
-	initOnce   sync.Once
-	initErr    error
-	sharedPool *pgxpool.Pool
-	sharedURL  string
+	initOnce        sync.Once
+	initErr         error
+	sharedPool      *pgxpool.Pool
+	sharedURL       string
+	sharedContainer testcontainers.Container
 )
 
 // Start returns a migrated *pgxpool.Pool backed by a shared postgres:17
@@ -60,6 +61,19 @@ func URL(t *testing.T) string {
 		t.Fatalf("testdb: init: %v", initErr)
 	}
 	return sharedURL
+}
+
+// Container exposes the underlying testcontainers-go handle so chaos tests
+// can Stop/Start the Postgres container to simulate outages. Callers that
+// stop the container are responsible for restarting it before the test
+// finishes — otherwise the shared harness is unusable by subsequent tests.
+func Container(t *testing.T) testcontainers.Container {
+	t.Helper()
+	initOnce.Do(func() { initErr = bootContainer() })
+	if initErr != nil {
+		t.Fatalf("testdb: init: %v", initErr)
+	}
+	return sharedContainer
 }
 
 func bootContainer() error {
@@ -95,6 +109,7 @@ func bootContainer() error {
 
 	sharedPool = pool
 	sharedURL = url
+	sharedContainer = pgC
 	return nil
 }
 

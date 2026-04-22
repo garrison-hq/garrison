@@ -98,24 +98,28 @@ func Run(ctx context.Context, deps Deps) error {
 		// LISTEN returned an error — treat as a reconnect signal.
 		deps.Logger.Warn("LISTEN loop exited; will reconnect", "error", listenErr)
 
-		// NFR-002 backoff before redialing.
-		wait := bo.Next()
-		deps.Logger.Info("reconnect backoff", "wait", wait)
-		timer := time.NewTimer(wait)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return nil
-		case <-timer.C:
-		}
+		// Dial loop: back off, dial, repeat until we get a conn or ctx is
+		// cancelled. A dial failure must NOT fall through to pollOnce/listen
+		// with a nil conn — that would deref and panic.
+		for conn == nil {
+			wait := bo.Next()
+			deps.Logger.Info("reconnect backoff", "wait", wait)
+			timer := time.NewTimer(wait)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return nil
+			case <-timer.C:
+			}
 
-		newConn, err := deps.Dialer.DialConn(ctx, deps.DatabaseURL)
-		if err != nil {
-			deps.Logger.Error("reconnect dial failed", "error", err)
-			continue // backoff doubles on next loop iteration
+			newConn, err := deps.Dialer.DialConn(ctx, deps.DatabaseURL)
+			if err != nil {
+				deps.Logger.Error("reconnect dial failed", "error", err)
+				continue
+			}
+			bo.Reset()
+			conn = newConn
 		}
-		bo.Reset()
-		conn = newConn
 		initial = false
 	}
 }

@@ -26,6 +26,12 @@ import (
 // escalation that follows. Not operator-tunable in M1.
 const ShutdownSignalGrace = 5 * time.Second
 
+// TerminalWriteGrace bounds the final UpdateInstanceTerminal+MarkEventProcessed
+// tx after the subprocess exits. The root ctx is already cancelled on
+// shutdown, so writeTerminal runs against a detached ctx — this cap keeps a
+// stuck DB from holding the supervisor past the operator's shutdown budget.
+const TerminalWriteGrace = 5 * time.Second
+
 // Deps bundles Spawn's runtime collaborators. Constructed once in
 // cmd/supervisor (T012) and handed to the dispatcher (T010) so every event
 // invocation shares the same pool, logger, and config.
@@ -222,9 +228,14 @@ func Spawn(ctx context.Context, deps Deps, eventID pgtype.UUID) error {
 	}
 
 	// Step 7: single terminal tx — UpdateInstanceTerminal + MarkEventProcessed.
-	// Use the supervisor root ctx (not execCtx) so the terminal write still
-	// runs during shutdown, up to the shutdown-grace budget enforced above.
-	return writeTerminal(ctx, deps, instanceID, eventID, cls.Status, cls.ExitReason)
+	// ctx is cancelled on shutdown, which would cause tx.Begin to fail with
+	// context.Canceled and leave agent_instances.status='running'. Detach via
+	// WithoutCancel + a bounded budget so the terminal write still lands even
+	// when the supervisor is tearing down, but a wedged DB can't hold the
+	// process open past shutdown-grace.
+	termCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), TerminalWriteGrace)
+	defer cancel()
+	return writeTerminal(termCtx, deps, instanceID, eventID, cls.Status, cls.ExitReason)
 }
 
 // Classification is the (status, exit_reason) pair written to agent_instances.
