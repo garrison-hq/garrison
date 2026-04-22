@@ -21,14 +21,17 @@ other work by one person. Production use at your own risk.
 
 ## Why this exists
 
-The previous generation of this system (Paperclip) ran seven agent
-daemons on cron heartbeats. Six of them woke every minute, checked a
-queue, found nothing, and went back to sleep — burning tokens to
-produce no output. The long-running processes also meant every
-restart dropped conversation context, and the "memory" was whatever
-happened to be in a running agent's window.
+Before Garrison, I was running several AI agents as long-lived
+processes on cron heartbeats and hit an efficiency wall: most
+agents spent most of their time waking up on schedule, checking for
+work, finding nothing, and going back to sleep — burning tokens to
+produce no output. Idle cost scaled with the number of agents, not
+with the amount of actual work happening. Garrison is the
+rebuild: drop the heartbeat loop, spawn agents only when something
+real changed, and keep memory in a durable store instead of in
+whatever process happens to be running.
 
-Garrison flips both defaults:
+Two defaults flip:
 
 - **Events, not heartbeats.** Agents spawn when something actually
   changed. No work means no processes, no token burn.
