@@ -1,0 +1,8 @@
+# T016 TestM21UnknownMCPStatusFailsClosed fixture: init emits the postgres
+# MCP server with a status ("banana") that is not in the connected/failed/
+# needs-auth enum. CheckMCPHealth fails closed (FR-108); the supervisor
+# signals the process group and records exit_reason=mcp_postgres_banana.
+# The script sleeps after init so the mock stays alive long enough for
+# the supervisor's SIGTERM to land (verifies NFR-106 path, not latency).
+{"type":"system","subtype":"init","session_id":"mock-bail","model":"claude-haiku-4-5-20251001","cwd":"/workspaces/engineering","tools":["Read","Write"],"mcp_servers":[{"name":"postgres","status":"banana"}]}
+#sleep 15s

@@ -3,31 +3,90 @@
 package supervisor_test
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/garrison-hq/garrison/supervisor/internal/store"
 	"github.com/garrison-hq/garrison/supervisor/internal/testdb"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // supervisorOpts bundles the common env overrides tests need. Any field
-// left blank gets the supervisor's default.
+// left blank gets the supervisor's default. M2.1 fields (RealClaude*,
+// AgentROPassword, MCPConfigDir) are only relevant when FakeAgentCmd is
+// empty — setting both selects the real-Claude codepath.
 type supervisorOpts struct {
 	FakeAgentCmd      string
 	PollInterval      string
 	SubprocessTimeout string
 	ShutdownGrace     string
 	LogLevel          string
+
+	// Real-Claude mode — leave ClaudeBin and AgentROPassword unset to
+	// stay in fake-agent mode (FakeAgentCmd above).
+	ClaudeBin        string
+	AgentROPassword  string
+	MCPConfigDir     string
+	MockClaudeScript string // forwarded as GARRISON_MOCK_CLAUDE_SCRIPT
+	SignalMarker     string // forwarded as GARRISON_MOCK_CLAUDE_SIGNAL_MARKER
+
+	// HomeOverride sets HOME for the supervisor subprocess (used by the
+	// session-persistence test to scope claude's writes under a tempdir).
+	HomeOverride string
+
+	// SupervisorBinOverride forwards GARRISON_SUPERVISOR_BIN_OVERRIDE
+	// into the daemon env. T018 BrokenMCPConfig test points this at
+	// /bin/does-not-exist so the MCP server command in the per-spawn
+	// config is unrunnable, forcing Claude to report postgres.status
+	// =failed at init.
+	SupervisorBinOverride string
+
+	// PgmcpPIDFile forwards GARRISON_PGMCP_PID_FILE so the pgmcp
+	// subcommand writes its own PID to the file on startup. T018
+	// ChaosPgmcpDiesMidRun reads the file to externally kill the
+	// subprocess and observe Claude's response.
+	PgmcpPIDFile string
+
+	// LogSink, if non-nil, receives a copy of the supervisor's stdout
+	// alongside os.Stdout so tests can assert on structured log lines.
+	// Writes are serialised via safeBuffer because the integration test
+	// suite may have multiple goroutines Read()ing the captured stream
+	// while the subprocess Write()s new lines.
+	LogSink *safeBuffer
+}
+
+// safeBuffer is a mutex-guarded bytes.Buffer. Used by LogSink so the
+// supervisor's JSON-per-line stdout can be written by cmd and read
+// by the test without racing.
+type safeBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (s *safeBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.Write(p)
+}
+
+func (s *safeBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.String()
 }
 
 // startSupervisor builds the binary, execs it with a free /health port
@@ -43,9 +102,11 @@ func startSupervisor(t *testing.T, opts supervisorOpts) (int, *exec.Cmd) {
 
 	env := append(os.Environ(),
 		"GARRISON_DATABASE_URL="+url,
-		"GARRISON_FAKE_AGENT_CMD="+opts.FakeAgentCmd,
 		fmt.Sprintf("GARRISON_HEALTH_PORT=%d", port),
 	)
+	if opts.FakeAgentCmd != "" {
+		env = append(env, "GARRISON_FAKE_AGENT_CMD="+opts.FakeAgentCmd)
+	}
 	if opts.PollInterval != "" {
 		env = append(env, "GARRISON_POLL_INTERVAL="+opts.PollInterval)
 	}
@@ -58,10 +119,46 @@ func startSupervisor(t *testing.T, opts supervisorOpts) (int, *exec.Cmd) {
 	if opts.LogLevel != "" {
 		env = append(env, "GARRISON_LOG_LEVEL="+opts.LogLevel)
 	}
+	if opts.ClaudeBin != "" {
+		env = append(env, "GARRISON_CLAUDE_BIN="+opts.ClaudeBin)
+	}
+	if opts.AgentROPassword != "" {
+		env = append(env, "GARRISON_AGENT_RO_PASSWORD="+opts.AgentROPassword)
+	}
+	if opts.MCPConfigDir != "" {
+		env = append(env, "GARRISON_MCP_CONFIG_DIR="+opts.MCPConfigDir)
+	}
+	if opts.MockClaudeScript != "" {
+		env = append(env, "GARRISON_MOCK_CLAUDE_SCRIPT="+opts.MockClaudeScript)
+	}
+	if opts.SignalMarker != "" {
+		env = append(env, "GARRISON_MOCK_CLAUDE_SIGNAL_MARKER="+opts.SignalMarker)
+	}
+	if opts.SupervisorBinOverride != "" {
+		env = append(env, "GARRISON_SUPERVISOR_BIN_OVERRIDE="+opts.SupervisorBinOverride)
+	}
+	if opts.PgmcpPIDFile != "" {
+		env = append(env, "GARRISON_PGMCP_PID_FILE="+opts.PgmcpPIDFile)
+	}
+	if opts.HomeOverride != "" {
+		// Strip any existing HOME entry before appending so the override
+		// wins regardless of the parent shell's HOME.
+		filtered := env[:0]
+		for _, kv := range env {
+			if !startsWith(kv, "HOME=") {
+				filtered = append(filtered, kv)
+			}
+		}
+		env = append(filtered, "HOME="+opts.HomeOverride)
+	}
 
 	cmd := exec.Command(bin)
 	cmd.Env = env
-	cmd.Stdout = os.Stdout
+	if opts.LogSink != nil {
+		cmd.Stdout = io.MultiWriter(os.Stdout, opts.LogSink)
+	} else {
+		cmd.Stdout = os.Stdout
+	}
 	cmd.Stderr = os.Stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
@@ -102,6 +199,41 @@ func buildSupervisorBinary(t *testing.T) string {
 		t.Fatalf("go build supervisor: %v", err)
 	}
 	return out
+}
+
+// buildMockClaudeBinary compiles the integration-test stand-in for the
+// real claude binary (supervisor/internal/spawn/mockclaude). Returns the
+// absolute path of the produced binary; the t.TempDir it writes into is
+// cleaned up automatically on test end.
+func buildMockClaudeBinary(t *testing.T) string {
+	t.Helper()
+	_, thisFile, _, _ := runtime.Caller(0)
+	supervisorDir := filepath.Dir(thisFile)
+	out := filepath.Join(t.TempDir(), "mockclaude")
+	cmd := exec.Command("go", "build", "-o", out, "./internal/spawn/mockclaude")
+	cmd.Dir = supervisorDir
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("go build mockclaude: %v", err)
+	}
+	return out
+}
+
+// mockClaudeScriptPath returns the absolute path to a fixture NDJSON
+// script under supervisor/internal/spawn/mockclaude/scripts/. Relative
+// paths break when the test binary runs from an unusual cwd (go test -c
+// then ./pkg.test, bazel-style sandboxes), so compose the canonical
+// absolute path once.
+func mockClaudeScriptPath(t *testing.T, name string) string {
+	t.Helper()
+	_, thisFile, _, _ := runtime.Caller(0)
+	supervisorDir := filepath.Dir(thisFile)
+	p := filepath.Join(supervisorDir, "internal", "spawn", "mockclaude", "scripts", name)
+	if _, err := os.Stat(p); err != nil {
+		t.Fatalf("mockclaude script %s: %v", p, err)
+	}
+	return p
 }
 
 func mustFreePort(t *testing.T) int {
@@ -190,6 +322,41 @@ func sampleMaxRunning(t *testing.T, pool *pgxpool.Pool, within time.Duration) in
 	return peak
 }
 
+// terminalRow is the shape waitForTerminalByTicket returns — the four
+// fields failure-path assertions care about. Moved to test_helpers_test
+// so both integration_test.go and chaos_test.go can reach it without
+// duplicating the SELECT.
+type terminalRow struct {
+	Status     string
+	ExitReason *string
+	Pid        *int32
+	Cost       *string
+}
+
+// waitForTerminalByTicket polls for any non-running agent_instance row
+// against the supplied ticket_id and returns status/exit_reason/pid/
+// cost. Fails the test if no terminal row lands within the budget.
+func waitForTerminalByTicket(t *testing.T, pool *pgxpool.Pool, ticketID pgtype.UUID, within time.Duration) terminalRow {
+	t.Helper()
+	ctx := context.Background()
+	deadline := time.Now().Add(within)
+	var row terminalRow
+	for time.Now().Before(deadline) {
+		err := pool.QueryRow(ctx, `
+			SELECT status, exit_reason, pid, total_cost_usd::text
+			FROM agent_instances
+			WHERE ticket_id = $1 AND status <> 'running'`,
+			ticketID,
+		).Scan(&row.Status, &row.ExitReason, &row.Pid, &row.Cost)
+		if err == nil {
+			return row
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("no terminal agent_instance row for ticket %v within %s", ticketID, within)
+	return row
+}
+
 // waitForRunningCount polls until COUNT(agent_instances WHERE status='running')
 // reaches want, or the deadline elapses. Used by chaos tests that need a
 // running subprocess to hook into before injecting a fault.
@@ -208,3 +375,45 @@ func waitForRunningCount(t *testing.T, pool *pgxpool.Pool, want int64, within ti
 	}
 	t.Fatalf("timed out waiting for %d running rows; got %d", want, got)
 }
+
+// startsWith is strings.HasPrefix aliased for readability at call site.
+func startsWith(s, prefix string) bool { return strings.HasPrefix(s, prefix) }
+
+// newLogSink allocates a fresh safeBuffer for a test that wants to
+// inspect supervisor log lines.
+func newLogSink() *safeBuffer {
+	return &safeBuffer{}
+}
+
+// waitForLogSubstring polls the supplied sink until every substring in
+// subs appears on the same log line, or the deadline elapses. Returns
+// the first matching line. Fails the test on timeout.
+func waitForLogSubstring(t *testing.T, sink *safeBuffer, within time.Duration, subs ...string) string {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for time.Now().Before(deadline) {
+		for _, line := range strings.Split(sink.String(), "\n") {
+			if line == "" {
+				continue
+			}
+			ok := true
+			for _, s := range subs {
+				if !strings.Contains(line, s) {
+					ok = false
+					break
+				}
+			}
+			if ok {
+				return line
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for log line containing %v within %s", subs, within)
+	return ""
+}
+
+// discardUnused pins the bytes import in tests that do not directly
+// reference it, since bytes.Buffer is only referenced by the safeBuffer
+// type field.
+var _ = bytes.NewBuffer

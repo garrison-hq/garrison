@@ -1,0 +1,7 @@
+# T016 TestM21NoResultEventFailsClosed fixture: init + an assistant event,
+# then the mock exits cleanly with code 0 WITHOUT ever emitting a result
+# event. Adjudicate falls into the no_result branch (clarify Q3 — cost
+# stays NULL because no result event was parsed). No hello.txt, no
+# ticket_transitions row.
+{"type":"system","subtype":"init","session_id":"mock-noresult","model":"claude-haiku-4-5-20251001","cwd":"/workspaces/engineering","tools":[],"mcp_servers":[{"name":"postgres","status":"connected"}]}
+{"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","content":[{"type":"text","text":"silently exiting"}]}}

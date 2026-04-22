@@ -1,6 +1,9 @@
 -- name: GetDepartmentByID :one
 SELECT * FROM departments WHERE id = $1;
 
+-- name: GetDepartmentBySlug :one
+SELECT * FROM departments WHERE slug = $1;
+
 -- name: InsertDepartment :one
 INSERT INTO departments (slug, name, concurrency_cap)
 VALUES ($1, $2, $3)

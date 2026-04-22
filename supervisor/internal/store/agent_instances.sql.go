@@ -77,3 +77,45 @@ func (q *Queries) UpdateInstanceTerminal(ctx context.Context, arg UpdateInstance
 	_, err := q.db.Exec(ctx, updateInstanceTerminal, arg.ID, arg.Status, arg.ExitReason)
 	return err
 }
+
+const updateInstanceTerminalWithCost = `-- name: UpdateInstanceTerminalWithCost :exec
+UPDATE agent_instances
+SET status = $2,
+    finished_at = NOW(),
+    exit_reason = $3,
+    total_cost_usd = $4
+WHERE id = $1
+`
+
+type UpdateInstanceTerminalWithCostParams struct {
+	ID           pgtype.UUID
+	Status       string
+	ExitReason   *string
+	TotalCostUsd pgtype.Numeric
+}
+
+func (q *Queries) UpdateInstanceTerminalWithCost(ctx context.Context, arg UpdateInstanceTerminalWithCostParams) error {
+	_, err := q.db.Exec(ctx, updateInstanceTerminalWithCost,
+		arg.ID,
+		arg.Status,
+		arg.ExitReason,
+		arg.TotalCostUsd,
+	)
+	return err
+}
+
+const updatePID = `-- name: UpdatePID :exec
+UPDATE agent_instances
+SET pid = $2
+WHERE id = $1
+`
+
+type UpdatePIDParams struct {
+	ID  pgtype.UUID
+	Pid *int32
+}
+
+func (q *Queries) UpdatePID(ctx context.Context, arg UpdatePIDParams) error {
+	_, err := q.db.Exec(ctx, updatePID, arg.ID, arg.Pid)
+	return err
+}

@@ -5,6 +5,7 @@ sql:
     schema:
       - ../migrations/20260421000001_initial_schema.sql
       - ../migrations/20260421000002_event_trigger.sql
+      - ../migrations/20260422000003_m2_1_claude_invocation.sql
     gen:
       go:
         package: store

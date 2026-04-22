@@ -1,0 +1,9 @@
+# T017 TestM21TimeoutFiresProcessGroupKill fixture: init, then a long
+# sleep that outlives any reasonable subprocess-timeout budget. The
+# test overrides GARRISON_SUBPROCESS_TIMEOUT to 2s; exec.CommandContext's
+# deadline fires, cmd.Cancel → killProcessGroup(SIGTERM), WaitDelay
+# escalation to SIGKILL if the mock doesn't exit within the grace.
+# The mock's SIGTERM handler writes GARRISON_MOCK_CLAUDE_SIGNAL_MARKER
+# so the test can confirm the whole process group was signalled.
+{"type":"system","subtype":"init","session_id":"mock-timeout","model":"claude-haiku-4-5-20251001","cwd":"/workspaces/engineering","tools":[],"mcp_servers":[{"name":"postgres","status":"connected"}]}
+#sleep 30s

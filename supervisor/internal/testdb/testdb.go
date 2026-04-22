@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
@@ -35,20 +36,95 @@ var (
 )
 
 // Start returns a migrated *pgxpool.Pool backed by a shared postgres:17
-// container. The first call boots the container and applies both M1
-// migrations; later calls reuse the same pool. Every caller registers a
-// TRUNCATE-on-Cleanup so tests do not observe each other's rows.
+// container. The first call boots the container and applies every
+// migration (M1 + M2.1); later calls reuse the same pool. Each Start
+// call both TRUNCATEs eagerly (so tests are order-independent regardless
+// of migration seeds) and registers a post-test TRUNCATE via t.Cleanup
+// (so the next test still starts clean even if the pool grew new rows
+// this run). M2.1 tables (agents, companies, ticket_transitions) are
+// included so CASCADE semantics wipe the full working set.
 func Start(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	initOnce.Do(func() { initErr = bootContainer() })
 	if initErr != nil {
 		t.Fatalf("testdb: init: %v", initErr)
 	}
-	t.Cleanup(func() {
+	truncate := func() {
 		_, _ = sharedPool.Exec(context.Background(),
-			"TRUNCATE agent_instances, event_outbox, tickets, departments RESTART IDENTITY CASCADE")
-	})
+			"TRUNCATE agent_instances, event_outbox, tickets, ticket_transitions, agents, departments, companies RESTART IDENTITY CASCADE")
+	}
+	truncate()
+	t.Cleanup(truncate)
 	return sharedPool
+}
+
+// SetAgentROPassword ALTERs the garrison_agent_ro role created by the
+// M2.1 migration to use the supplied password. Tests that run real
+// Claude + real pgmcp must call this with the same password they hand
+// the supervisor via GARRISON_AGENT_RO_PASSWORD, otherwise pgmcp will
+// fail to connect (the migration creates the role with LOGIN but no
+// password — operators are expected to run the equivalent ALTER in
+// production).
+//
+// Uses the shared pool directly (not via Start) so repeated helper
+// calls do not re-TRUNCATE and wipe rows the caller just seeded.
+func SetAgentROPassword(t *testing.T, password string) {
+	t.Helper()
+	initOnce.Do(func() { initErr = bootContainer() })
+	if initErr != nil {
+		t.Fatalf("testdb: init: %v", initErr)
+	}
+	if _, err := sharedPool.Exec(context.Background(),
+		fmt.Sprintf(`ALTER ROLE garrison_agent_ro WITH PASSWORD '%s'`, password),
+	); err != nil {
+		t.Fatalf("SetAgentROPassword: %v", err)
+	}
+}
+
+// SeedM21 inserts the M2.1 minimum working set: one company, one
+// engineering department with the supplied workspace_path, and one
+// active engineer agent row whose listens_for matches the supervisor's
+// registered channel. Returns the engineering department ID so tests
+// can compose tickets against it.
+//
+// The agent seed carries a non-trivial agent_md so checkHelloTxt-style
+// length assertions (e.g. T010 integration test) have something to
+// match. Model is pinned to the M2.1 default so the spawn argv carries
+// the value operators expect in production logs.
+func SeedM21(t *testing.T, workspacePath string) pgtype.UUID {
+	t.Helper()
+	pool := Start(t)
+	ctx := context.Background()
+	var companyID pgtype.UUID
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO companies (id, name) VALUES (gen_random_uuid(), 'garrison test co') RETURNING id`,
+	).Scan(&companyID); err != nil {
+		t.Fatalf("SeedM21: insert company: %v", err)
+	}
+	var deptID pgtype.UUID
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO departments (id, company_id, slug, name, concurrency_cap, workspace_path)
+		VALUES (gen_random_uuid(), $1, 'engineering', 'Engineering', 1, $2)
+		RETURNING id`,
+		companyID, workspacePath,
+	).Scan(&deptID); err != nil {
+		t.Fatalf("SeedM21: insert department: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO agents (id, department_id, role_slug, agent_md, model, skills, mcp_tools, listens_for, palace_wing, status)
+		VALUES (
+			gen_random_uuid(), $1, 'engineer',
+			'# Engineer (M2.1)\n\nIntegration-test seed body — the real agent_md ships via T003.',
+			'claude-haiku-4-5-20251001',
+			'[]'::jsonb, '[]'::jsonb,
+			'["work.ticket.created.engineering.todo"]'::jsonb,
+			NULL, 'active'
+		)`,
+		deptID,
+	); err != nil {
+		t.Fatalf("SeedM21: insert agent: %v", err)
+	}
+	return deptID
 }
 
 // URL exposes the shared postgres connection string so tests that need to

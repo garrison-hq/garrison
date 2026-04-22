@@ -39,9 +39,11 @@ func TestInsertAndGetDepartment(t *testing.T) {
 	}
 }
 
-// TestSelectUnprocessedEvents relies on the emit_ticket_created trigger
-// installed in migration 0002: inserting a ticket must write one
-// event_outbox row with channel=work.ticket.created, and
+// TestSelectUnprocessedEvents relies on the emit_ticket_created trigger.
+// Starting with M2.1 (migration 0003) the trigger emits a qualified channel
+// of shape work.ticket.created.<dept_slug>.<column_slug>; this test inserts
+// a department with slug="eng" and a ticket whose column_slug defaults to
+// 'todo', so the expected channel is work.ticket.created.eng.todo.
 // SelectUnprocessedEvents must return exactly that row.
 func TestSelectUnprocessedEvents(t *testing.T) {
 	pool := testdb.Start(t)
@@ -70,8 +72,8 @@ func TestSelectUnprocessedEvents(t *testing.T) {
 	if len(events) != 1 {
 		t.Fatalf("expected 1 event, got %d", len(events))
 	}
-	if events[0].Channel != "work.ticket.created" {
-		t.Fatalf("expected channel work.ticket.created, got %q", events[0].Channel)
+	if events[0].Channel != "work.ticket.created.eng.todo" {
+		t.Fatalf("expected channel work.ticket.created.eng.todo, got %q", events[0].Channel)
 	}
 
 	if err := q.MarkEventProcessed(ctx, events[0].ID); err != nil {

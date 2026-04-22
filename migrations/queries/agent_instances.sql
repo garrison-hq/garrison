@@ -10,6 +10,19 @@ SET status = $2,
     exit_reason = $3
 WHERE id = $1;
 
+-- name: UpdateInstanceTerminalWithCost :exec
+UPDATE agent_instances
+SET status = $2,
+    finished_at = NOW(),
+    exit_reason = $3,
+    total_cost_usd = $4
+WHERE id = $1;
+
+-- name: UpdatePID :exec
+UPDATE agent_instances
+SET pid = $2
+WHERE id = $1;
+
 -- name: CountRunningByDepartment :one
 SELECT COUNT(*) FROM agent_instances
 WHERE department_id = $1 AND status = 'running';

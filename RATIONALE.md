@@ -23,6 +23,8 @@ Read this before proposing changes. Most "wouldn't it be better if..." questions
 
 **Trade-off accepted**: pg_notify is not at-least-once by default. Notifications are lost during reconnects. We pay for this with a `processed_at` column and a fallback poll that catches missed events. This is a small amount of extra code for a meaningful reduction in infrastructure complexity.
 
+**Validated by M1**: the pattern works correctly in production; however M1 surfaced a specific race condition between the dedupe transaction commit and the terminal transaction commit that required in-memory deduplication on top of `processed_at`. See M1 retro §1.
+
 ---
 
 ## 2. Why ephemeral agents instead of long-running ones
@@ -62,6 +64,8 @@ Read this before proposing changes. Most "wouldn't it be better if..." questions
 - MCP-native, so every agent gets it through the same baseline tool set.
 
 **Trade-off accepted**: MemPalace's retrieval quality depends entirely on what gets written. Soft gates (see §5) mean write quality is not enforced. We mitigate this with the completion protocol in each agent.md and the memory hygiene dashboard — but ultimately if the operator doesn't maintain the palace, the CEO gets dumber over time. This is a known risk and a weekly-review discipline, not a solved problem.
+
+**Status**: thesis, not yet validated. M2.2 is the milestone where this thesis becomes testable. If M2.2 ships and the palace produces useful cross-agent memory under real work, the architecture's core bet is validated. If not, the entire downstream roadmap is reconsidered.
 
 ---
 
@@ -180,6 +184,8 @@ Read this before proposing changes. Most "wouldn't it be better if..." questions
 - No shared types with the dashboard. Mitigated by using `sqlc` on the Go side and Drizzle on the TS side, both deriving from the same SQL migrations. The SQL is the shared contract, not the type definitions.
 - The ecosystem for AI tooling is thinner than Python's. Accepted because the supervisor does not do AI work — it supervises processes. If AI work needs to happen inside the supervisor itself, it's done by spawning an agent, not by calling an LLM library directly.
 
+**Validated by M1**: M1 shipped an 18MB static binary from a 10-line Dockerfile, concurrency bugs were caught at compile time, and the locked dependency list held with one honest exception (`github.com/google/shlex` for POSIX-like argv splitting, justified in the M1 retro).
+
 ---
 
 ## 10. Why specs-first instead of code-first
@@ -198,6 +204,8 @@ Read this before proposing changes. Most "wouldn't it be better if..." questions
 - Writing the spec forces the design work to happen before implementation. Code-first tends to bake in decisions by accident.
 
 **Trade-off accepted**: Spec-writing adds time at the start of each milestone. We accept this because the alternative is correcting misaligned implementations after the fact, which is more expensive. If a spec is producing too much paralysis, the remedy is to narrow the spec further, not to abandon spec-first.
+
+**Validated by M1**: the M1 retro's "what the spec got wrong" section contained six items; none were architectural drift, all were edge cases below the spec's level of abstraction. The spec landed at the right grain. Chaos tests caught the gaps before ship.
 
 ---
 
@@ -235,6 +243,33 @@ Collected from the decisions above. These are the things someone might reasonabl
 
 ---
 
+## 13. Why a research spike precedes a spec for milestones with external unknowns
+
+**Decision**: When a milestone's spec depends on how an external tool actually behaves (not how its documentation says it behaves), a time-boxed research spike precedes the spec. The spike produces a `docs/research/m{N}-spike.md` characterizing observed behavior. That document is binding input to the milestone's context file.
+
+**Alternatives considered**:
+- Write the spec from documentation alone, fix discrepancies during implement phase
+- Include "characterization" as a phase within the spec itself
+- Build a prototype (not a spike) as the first task in the spec's task list
+
+**Why spike-before-spec won**:
+- Documentation describes intent; behavior is ground truth. A spec that assumes an exit code or output format the tool doesn't actually use is a spec that implement-phase agents can't satisfy, and the operator discovers this mid-implementation when rework is expensive.
+- The spike is bounded: 2-4 hours, exploratory, throwaway code. A prototype is unbounded and accretes — the boundary between "prototype" and "production" is fuzzy and projects routinely ship prototypes by accident.
+- Spikes produce documentation that compounds. The findings in `m2-spike.md` feed M2.1 and M2.2 context files but also remain available to M5, M7, and any future work that touches Claude Code or MemPalace.
+- Empirical surprise is the spike's core value. The "surprises" section of a spike doc is where the highest-leverage spec inputs come from — things the operator didn't know to ask about until the spike revealed them.
+
+**When to spike vs. spec directly**:
+- Spike first when: the milestone depends on a tool's behavior (Claude Code invocation, MemPalace MCP semantics, third-party CLI integrations).
+- Spec directly when: the milestone is built on well-characterized primitives (Postgres, Go stdlib, pgx/v5 patterns) the operator and the installed skills already have ground truth for.
+
+M1 did not need a spike because pg_notify, Go subprocess management, and Postgres concurrency are all well-characterized — the operator had ground truth from 15 years of software experience and the skills library filled any gaps. M2.1 and M2.2 need spikes because Claude Code's non-interactive mode and MemPalace's concurrent-access MCP behavior are not adequately described by their documentation.
+
+**Trade-off accepted**: Spikes add 2-4 hours of exploratory work per affected milestone and produce throwaway code. We accept this because the alternative — speccing from documentation alone — shifts the same discovery work into implement phase where it's far more expensive. Better to find surprises in a scratch directory than in a half-built supervisor.
+
+**Not retrofittable**: decisions already settled in earlier milestones do not get spiked retroactively. If M1 got something wrong, it's in the retro and fixed in forward work, not re-litigated.
+
+---
+
 ## Meta: when to update this document
 
 Update RATIONALE.md when:
@@ -242,6 +277,7 @@ Update RATIONALE.md when:
 - A decision is reversed (delete the old rationale, write the new one, note the reversal)
 - A trade-off you accepted becomes intolerable in practice (write why and what changed)
 - A new decision is made that future you or future contributors will want to understand
+- A milestone's retro validates or falsifies a decision — add a "Validated by M{N}" or "Falsified by M{N}" note to the affected decision
 
 Do not update this document when:
 

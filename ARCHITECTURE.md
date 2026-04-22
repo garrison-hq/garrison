@@ -1,4 +1,4 @@
-# Garrison — Architecture v0.2
+# Garrison — Architecture v0.3
 
 A zero-human company driver. Event-driven agent organization backed by Postgres + MemPalace, orchestrating Claude Code subprocesses as ephemeral workers. A rebuild after pain points I hit running multiple agents efficiently in an earlier setup: cheap when idle, fast to configure, with genuine institutional memory across restarts.
 
@@ -34,6 +34,10 @@ A single long-running Go binary. Its job:
 The supervisor does not reason. It is a process manager.
 
 **Stack**: Go 1.23+, `jackc/pgx/v5` for Postgres and LISTEN/NOTIFY, `sqlc` for typed query generation, `log/slog` for structured logging, `golang.org/x/sync/errgroup` for concurrent subsystem management, stdlib `os/exec` with `CommandContext` for subprocess lifecycle. Deployed as a single static binary via Docker on Hetzner + Coolify. The allowed-dependency list is locked — agents implementing the supervisor cannot add dependencies without an explicit hiring-style proposal.
+
+**Subprocess lifecycle**: Claude Code subprocesses are spawned under their own process group (`SysProcAttr.Setpgid = true`) and signaled by process group, not PID. This is required because Claude Code may spawn child processes (MCP servers, tool executions) that must be terminated alongside the parent. PID-level signals are insufficient. This rule applies to all subprocesses from M2.1 onwards.
+
+**MCP health detection**: the supervisor does not manage MCP servers directly. Each Claude subprocess spawns its own MCP servers per the `--mcp-config` file. To detect broken MCP servers, the supervisor parses Claude Code's `system`/`init` event (first NDJSON line of stdout in stream-json mode) and checks the `mcp_servers[]` array — any server whose `status` is not `"connected"` causes the supervisor to kill the Claude process group immediately and mark the agent_instance as failed. Claude Code's exit code is not a reliable MCP health signal; broken MCP servers produce `exit 0` with `--strict-mcp-config`. This contract is binding from M2.1 onwards and was characterized in `docs/research/m2-spike.md`.
 
 **Missed-event handling**: LISTEN is the fast path, but notifications are lost during reconnects. The event tables include a `processed_at` column, and the supervisor runs a fallback poll (`SELECT ... WHERE processed_at IS NULL LIMIT N`) every N seconds as a safety net.
 
@@ -410,11 +414,19 @@ agents:
 
 ## Build plan — milestones
 
-Specs first, code second. Each milestone is scoped to a single specify-cli spec that produces an implementable, end-to-end-functional chunk. No milestone ships half-built scaffolding; each one must be usable on a real Hey Anton workstream before moving to the next. The discipline: each milestone ends with a retro written to `wing_company / hall_events` in MemPalace, so the system dogfoods its own memory contract from day one.
+Specs first, code second. Each milestone is scoped to a single specify-cli spec that produces an implementable, end-to-end-functional chunk. No milestone ships half-built scaffolding; each one must be usable on a real Hey Anton workstream before moving to the next. The discipline: each milestone ends with a retro — M1 retros live in `docs/retros/m1.md` as plain markdown; from M2.2 onwards retros write to `wing_company / hall_events` in MemPalace, because that is the milestone that makes writing-to-MemPalace possible.
 
-**M1 — Event bus + supervisor core.** Spec the pg_notify contract, the processed_at fallback, concurrency accounting, and the subprocess spawn contract. Deliverable: a Go binary that listens on a channel, spawns a fake agent (`echo "hello from ticket $TICKET_ID"`), respects concurrency caps, handles timeouts and cleanup. No Claude Code yet, no MemPalace. Proves the plumbing and establishes the Go idioms before real agent work lands.
+Some milestones carry genuine external unknowns — how a tool actually behaves in practice, rather than how the docs describe it. Those milestones begin with a research spike (see RATIONALE §13). The spike produces a `docs/research/m{N}-spike.md` that becomes binding input to the milestone's context file. Spikes are exploratory and time-boxed; they do not produce production code.
 
-**M2 — First real agent loop.** Swap the fake spawn for actual Claude Code invocation with a minimal `agent.md`, one department (engineering), one trivial workflow, MemPalace MCP wired in. Create a ticket manually via SQL, watch an agent pick it up, do trivial work (write a hello-world file), write to the palace, move the ticket. This is the moment of truth for the architecture — if this works, everything else is extension. If it doesn't, the architecture is wrong and better to find out here than in M7.
+**M1 — Event bus + supervisor core.** ✅ Shipped 2026-04-22. Spec the pg_notify contract, the processed_at fallback, concurrency accounting, and the subprocess spawn contract. Deliverable: a Go binary that listens on a channel, spawns a fake agent (`echo "hello from ticket $TICKET_ID"`), respects concurrency caps, handles timeouts and cleanup. No Claude Code yet, no MemPalace. Proves the plumbing and establishes the Go idioms before real agent work lands. Retro: `docs/retros/m1.md`.
+
+**M2 — First real agent loop.** Split into M2.1 and M2.2 because carrying both Claude Code and MemPalace unknowns through a single spec is a scope-creep forcing function. Each sub-milestone is independently shippable. The M2 research spike (`docs/research/m2-spike.md`) produced binding characterization for both; no additional spike is needed.
+
+**M2.1 — Claude Code invocation.** Swap the M1 fake subprocess for actual Claude Code invocation with a minimal `agent.md`, one department (engineering), one trivial workflow. No MemPalace yet — M2.1 agents do not write to the palace, they just exist and exit cleanly. Create a ticket manually via SQL, watch an agent pick it up, do trivial work (write a hello-world file to its workspace), exit successfully. The M1 deferred items re-enter here: real runtime base image, `agent_instances.pid` backfill, acceptance step 9 clarification, and the SIGTERM-to-pgid fix surfaced in the M1 retro addendum.
+
+**M2.2 — MemPalace MCP wiring.** Wire MemPalace into every spawn — MCP tool always available, wake-up context injection, the completion protocol writes from `agent.md` become real. The palace is bootstrapped at a dedicated path outside any git-tracked directory (per the spike's finding that `init` mutates `.gitignore`). The hygiene dashboard concept appears first here as a read-only query ("which transitions are missing expected writes?"); the full hygiene UI waits for M3.
+
+After M2.2 ships, the architecture's memory thesis is validated or falsified. If agents reliably write useful diaries and the palace makes future agents smarter, the rest of the roadmap is extension. If the write contract produces thin or useless entries, everything downstream has to be reconsidered before it's built.
 
 **M3 — Dashboard read-only.** Next.js 16 + React 19 app reading from Postgres, showing department Kanban, ticket detail, agent activity feed. No mutations yet. Read-only-first forces you to actually watch the system behave for a few days before giving yourself (and agents) the ability to change state — which is when you catch the "oh, the event payload shape is wrong" class of bugs cheaply.
 
@@ -432,7 +444,7 @@ Specs first, code second. Each milestone is scoped to a single specify-cli spec 
 
 ## Spec-first workflow
 
-Specs are produced with `specify-cli` and live in a dedicated `specs/` directory in the repo. Each milestone has one spec. Specs are scoped narrowly — the M1 spec covers the event bus and supervisor core only, not the full system. A 40-page monolithic spec is an antipattern; it produces paralysis rather than code.
+Specs are produced with `specify-cli` and live in a dedicated `specs/` directory in the repo. Each milestone has one spec (sub-milestones get their own specs — `specs/002-m2-1-claude-code/`, `specs/003-m2-2-mempalace/`). Specs are scoped narrowly — the M1 spec covers the event bus and supervisor core only, not the full system. A 40-page monolithic spec is an antipattern; it produces paralysis rather than code.
 
 Each spec is accompanied by a short `RATIONALE.md` capturing the decisions and trade-offs — the "why" that pure specify-cli output omits. Example rationales to capture: why soft gates instead of hard gates, why summoned CEO instead of long-running, why skills.sh instead of a curated library, why Go instead of Python/TS for the supervisor.
 
@@ -449,33 +461,46 @@ Each spec is accompanied by a short `RATIONALE.md` capturing the decisions and t
 - Individual agent.md contents (prompts, not code — evolve empirically)
 - CEO conversational behavior (emerges from prompt + tools, not spec-able)
 
+**What gets spiked before specified:** any milestone whose spec depends on external tool behavior that isn't characterized yet. See RATIONALE §13.
+
 ---
 
 ## Open source
 
-The project is intended for open source release. The specs are the primary contribution — more valuable than the code itself, because the code can be regenerated from good specs in a weekend, but the specs encode the architectural thinking that's hard to reproduce.
+The project is intended for open source release (currently at `github.com/garrison-hq/garrison`). The specs are the primary contribution — more valuable than the code itself, because the code can be regenerated from good specs in a weekend, but the specs encode the architectural thinking that's hard to reproduce.
 
 **Repo layout:**
 ```
 garrison/
 ├── specs/              # specify-cli output, one dir per milestone
-│   ├── m1-event-bus/
-│   ├── m2-agent-loop/
-│   └── ...
+│   ├── 001-m1-event-bus/
+│   ├── 002-m2-1-claude-code/
+│   ├── 003-m2-2-mempalace/
+│   └── _context/
+│       ├── m1-context.md
+│       ├── m2-1-context.md
+│       └── m2-2-context.md
+├── docs/
+│   ├── research/       # spike outputs feeding later milestones
+│   │   └── m2-spike.md
+│   └── retros/
+│       └── m1.md
 ├── supervisor/         # Go binary
-├── dashboard/          # Next.js 16 app
+├── dashboard/          # Next.js 16 app (M3)
 ├── migrations/         # SQL, consumed by both Go (sqlc) and TS (Drizzle)
 ├── examples/           # toy company YAML, example agent.md files
-├── RATIONALE.md        # top-level design rationale
-├── CONTRIBUTING.md     # explicit about response times and scope
+├── ARCHITECTURE.md     # this file
+├── RATIONALE.md
+├── AGENTS.md
+├── CONTRIBUTING.md
 └── README.md
 ```
 
 Real Hey Anton configs (`company.md`, `agents/*`, workspaces) live outside the repo. Example configs in `examples/` use a fictitious company so the public repo is clonable and runnable without containing operator-specific data.
 
-**Licensing:** specs under CC-BY or MIT (propagate freely), code under a license TBD based on solo-founder protection needs (MIT if permissive, AGPL or BSL if protecting against cloud reselling). Specs and code can have different licenses — this is intentional.
+**Licensing:** specs under CC-BY-4.0 (propagate freely), code under AGPL-3.0-only (protects against cloud reselling). Specs and code have different licenses intentionally.
 
-**Contribution stance:** explicit in CONTRIBUTING.md that response times are measured in weeks and the project is driven by a solo founder. Open to source-available-not-collaborative if contribution overhead eats too much time; no shame in that stance.
+**Contribution stance:** explicit in CONTRIBUTING.md that response times are measured in weeks and the project is driven by a solo founder.
 
 ---
 
@@ -489,7 +514,7 @@ The UI is the product. Views to build across M3 and M4:
 4. **CEO chat** — conversation panel, tool-call traces visible (see what the CEO queried), ability to start new threads
 5. **Hiring queue** — proposed hires, side-by-side editor, approve/reject (M7)
 6. **Skill library** — installed skills per department, browse skills.sh inline, install/uninstall (M7)
-7. **Memory hygiene** — tickets with thin or missing writes, clickable to see the transition and jump to the palace wing to backfill (M6)
+7. **Memory hygiene** — tickets with thin or missing writes, clickable to see the transition and jump to the palace wing to backfill (M2.2 produces the data; M3/M6 build the UI)
 8. **Settings per agent** — edit agent.md, model, skills, concurrency override, listens_for patterns
 
 ---
@@ -497,11 +522,11 @@ The UI is the product. Views to build across M3 and M4:
 ## Open questions for later
 
 - **Runaway control**: agent-spawned tickets can fan out. A per-department weekly ticket-creation budget, visible in the dashboard, covered in M8.
-- **Cost accounting**: per-ticket and per-agent-instance token burn. Log from the Claude Code SDK's response, roll up in the dashboard. Add in M6 alongside hygiene.
+- **Cost accounting**: per-ticket and per-agent-instance token burn. The M2 spike established that Claude Code emits `total_cost_usd` on the final `result` event in stream-json mode; the supervisor captures this per-invocation starting in M2.1. The aggregated view across tickets and agents comes in M6 alongside hygiene.
 - **Cross-department notification**: when the CTO sets a ticket to `needs_review` because it needs design input, who knows? A simple "needs_review" view in org overview is enough — the CEO doesn't need pushed alerts, you check the dashboard.
 - **Model override per spawn**: skip for early milestones. All agents use their configured model. Add per-spawn overrides only when a specific task demonstrates a need.
 - **Multi-company**: the schema has `companies` as a top-level entity but the initial build is single-company. Don't build multi-tenant until you need it.
-- **Naming**: "Garrison" is a working title. Commit to a name before the first public commit — public repos are much harder to rename than private ones.
+- **Naming**: committed to Garrison. `garrison-hq/garrison` is the public home.
 
 ---
 
@@ -509,4 +534,4 @@ The UI is the product. Views to build across M3 and M4:
 
 - It is not a general orchestrator. Agents run Claude Code; that's the only runtime we care about supporting.
 - It is not a no-code tool. Agents are configured by markdown + YAML. Dashboards edit those, but the model is "config files as first-class data in a database," not "visual workflow builder."
-- It is not trying to replicate every feature of the earlier multi-agent setup I ran. It's trying to solve the core value — cross-team agent orchestration — with something event-driven, memory-backed, and cheaper.
+- It is not trying to replicate every feature of the earlier multi-agent setup I ran. It's trying to replace its value prop — cross-team agent orchestration — with something event-driven, memory-backed, and cheaper.
