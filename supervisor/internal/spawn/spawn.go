@@ -9,12 +9,17 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
 
+	"github.com/garrison-hq/garrison/supervisor/internal/agents"
 	"github.com/garrison-hq/garrison/supervisor/internal/concurrency"
+	"github.com/garrison-hq/garrison/supervisor/internal/mcpconfig"
 	"github.com/garrison-hq/garrison/supervisor/internal/store"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -23,42 +28,76 @@ import (
 
 // ShutdownSignalGrace is the NFR-005 fixed window between the SIGTERM
 // forwarded to a running subprocess on supervisor shutdown and the SIGKILL
-// escalation that follows. Not operator-tunable in M1.
+// escalation that follows. Not operator-tunable.
 const ShutdownSignalGrace = 5 * time.Second
 
-// TerminalWriteGrace bounds the final UpdateInstanceTerminal+MarkEventProcessed
-// tx after the subprocess exits. The root ctx is already cancelled on
-// shutdown, so writeTerminal runs against a detached ctx — this cap keeps a
-// stuck DB from holding the supervisor past the operator's shutdown budget.
+// TerminalWriteGrace bounds the final terminal-row update after the
+// subprocess exits. The root ctx is already cancelled on shutdown, so the
+// terminal writers run against a detached ctx — this cap keeps a stuck DB
+// from holding the supervisor past the operator's shutdown budget.
 const TerminalWriteGrace = 5 * time.Second
 
+// MCPBailSignalGrace bounds the SIGTERM→SIGKILL escalation window on the
+// MCP-bail path. NFR-106 budget is 2 s from init-observation to the group
+// being signalled; the first SIGTERM lands within microseconds of the
+// observation, so this grace governs only how long we wait before
+// escalating. 2 seconds is a deliberate parity with the total NFR budget.
+const MCPBailSignalGrace = 2 * time.Second
+
 // Deps bundles Spawn's runtime collaborators. Constructed once in
-// cmd/supervisor (T012) and handed to the dispatcher (T010) so every event
-// invocation shares the same pool, logger, and config.
+// cmd/supervisor and handed to the dispatcher so every event invocation
+// shares the same pool, logger, and config.
 type Deps struct {
 	Pool              *pgxpool.Pool
 	Queries           *store.Queries
-	FakeAgentCmd      string
-	SubprocessTimeout time.Duration
 	Logger            *slog.Logger
+	SubprocessTimeout time.Duration
+
 	// SigkillEscalations counts subprocesses the supervisor had to escalate
-	// from SIGTERM to SIGKILL on shutdown (NFR-005 timeout). nil is tolerated
+	// from SIGTERM to SIGKILL on shutdown (NFR-005). nil is tolerated
 	// (tests skip tracking); production wires an atomic counter so
 	// cmd/supervisor can return exit code 5 per contracts/cli.md when
 	// counter > 0 at shutdown.
 	SigkillEscalations *atomic.Int64
+
+	// Fake-agent escape hatch. FakeAgentCmd being non-empty implicitly
+	// flips UseFakeAgent true so M1 integration tests and chaos_test.go
+	// keep working without touching every call site. Production daemons
+	// set UseFakeAgent explicitly from config.
+	FakeAgentCmd string
+	UseFakeAgent bool
+
+	// M2.1 real-Claude path collaborators. Unused when UseFakeAgent is
+	// true. AgentRODSN is composed by config.AgentRODSN() and handed in
+	// whole (the unexported password never leaves config).
+	AgentsCache     *agents.Cache
+	ClaudeBin       string
+	ClaudeModel     string
+	ClaudeBudgetUSD float64
+	MCPConfigDir    string
+	SupervisorBin   string
+	AgentRODSN      string
 }
 
-// Spawn handles one work.ticket.created event end-to-end per plan.md
-// §"Subprocess lifecycle manager". Idempotent: a second call with the same
-// event_id is a no-op via the LockEventForProcessing dedupe check, which is
-// the guard against the LISTEN/poll race described in plan.md §"Dedupe on
-// handling".
+// UseFake decides which branch Spawn runs. UseFakeAgent wins if set;
+// otherwise a non-empty FakeAgentCmd implies fake mode for back-compat
+// with existing M1 tests that predate the explicit flag. Exported so
+// tests can pin the dispatch contract without reaching for reflection.
+func (d Deps) UseFake() bool {
+	return d.UseFakeAgent || d.FakeAgentCmd != ""
+}
+
+// Spawn handles one work.ticket.created event end-to-end. Idempotent: a
+// second call with the same event_id is a no-op via the
+// LockEventForProcessing dedupe check, which is the guard against the
+// LISTEN/poll race described in plan §"Dedupe on handling".
+//
+// The first short transaction (LockEventForProcessing → department lookup
+// → CheckCap → InsertRunningInstance → commit) is shared by both the
+// fake-agent and real-Claude paths. Only after that commit do the two
+// paths diverge — the fake path runs the M1 exec-and-scan loop; the real
+// path runs the M2.1 agent-resolve + MCP-config + NDJSON-pipeline flow.
 func Spawn(ctx context.Context, deps Deps, eventID pgtype.UUID) error {
-	// Step 1 (dedupe + gate + insert in one short tx). Holding the FOR UPDATE
-	// row-lock across the concurrency check and InsertRunningInstance means a
-	// second handler replaying the same event_id cannot slip past the dedupe
-	// guard even if the first handler hasn't yet reached step 7's terminal tx.
 	tx, err := deps.Pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("spawn: begin dedupe tx: %w", err)
@@ -94,13 +133,14 @@ func Spawn(ctx context.Context, deps Deps, eventID pgtype.UUID) error {
 		return fmt.Errorf("spawn: department_id: %w", err)
 	}
 
-	// Deleted-department edge (data-model.md invariant #5): mark the event
-	// processed with no agent_instances row, log once at error level, return.
-	if _, err := q.GetDepartmentByID(ctx, deptUUID); err != nil {
+	dept, err := q.GetDepartmentByID(ctx, deptUUID)
+	if err != nil {
 		if !errors.Is(err, pgx.ErrNoRows) {
 			_ = tx.Rollback(ctx)
 			return fmt.Errorf("spawn: GetDepartmentByID: %w", err)
 		}
+		// Deleted-department edge: mark the event processed with no
+		// agent_instances row, log once at error level, return.
 		if err := q.MarkEventProcessed(ctx, eventID); err != nil {
 			_ = tx.Rollback(ctx)
 			return fmt.Errorf("spawn: MarkEventProcessed missing-dept: %w", err)
@@ -112,13 +152,11 @@ func Spawn(ctx context.Context, deps Deps, eventID pgtype.UUID) error {
 			"event_id", formatUUID(eventID),
 			"ticket_id", payload.TicketID,
 			"department_id", payload.DepartmentID,
-			"reason", "department_missing",
+			"reason", ExitDepartmentMissing,
 		)
 		return nil
 	}
 
-	// Step 2: concurrency gate. Defer (rollback + return nil) if blocked — the
-	// fallback poller will pick the event up on a later cycle.
 	allowed, capN, running, err := concurrency.CheckCap(ctx, q, deptUUID)
 	if err != nil {
 		_ = tx.Rollback(ctx)
@@ -135,7 +173,6 @@ func Spawn(ctx context.Context, deps Deps, eventID pgtype.UUID) error {
 		return nil
 	}
 
-	// Step 3: insert running instance and commit the short tx.
 	instanceID, err := q.InsertRunningInstance(ctx, store.InsertRunningInstanceParams{
 		DepartmentID: deptUUID,
 		TicketID:     ticketUUID,
@@ -148,10 +185,30 @@ func Spawn(ctx context.Context, deps Deps, eventID pgtype.UUID) error {
 		return fmt.Errorf("spawn: commit dedupe+running: %w", err)
 	}
 
-	// Step 4: exec.CommandContext with subprocess-timeout context. The exec
-	// ctx is deliberately detached from the supervisor shutdown ctx so the
-	// SIGTERM→5s→SIGKILL shutdown sequence below can be driven manually per
-	// plan.md step 8 rather than via exec's one-shot SIGKILL cancel.
+	if deps.UseFake() {
+		return runFakeAgent(ctx, deps, instanceID, eventID, ticketUUID, payload)
+	}
+	return runRealClaude(ctx, deps, instanceID, eventID, ticketUUID, dept, payload)
+}
+
+// -----------------------------------------------------------------------
+// Fake-agent path (M1 lifecycle, preserved verbatim for test suites)
+// -----------------------------------------------------------------------
+
+// runFakeAgent is the M1 lifecycle: BuildCommand → cmd.Start → line-scan
+// stdout/stderr → wait → Classify → writeTerminal. PID-level signalling is
+// sufficient here because the fake agent does not spawn children; keeping
+// this path identical to M1 is what lets every M1 integration test pass
+// unchanged.
+func runFakeAgent(
+	ctx context.Context,
+	deps Deps,
+	instanceID, eventID, _ pgtype.UUID,
+	payload struct {
+		TicketID     string `json:"ticket_id"`
+		DepartmentID string `json:"department_id"`
+	},
+) error {
 	execCtx, execCancel := context.WithTimeout(context.Background(), deps.SubprocessTimeout)
 	defer execCancel()
 
@@ -178,13 +235,11 @@ func Spawn(ctx context.Context, deps Deps, eventID pgtype.UUID) error {
 		"pid", cmd.Process.Pid,
 	)
 
-	// Step 5: per-stream line-scanning goroutines, one slog record per line.
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go scanStream(&wg, stdout, logger, "stdout")
 	go scanStream(&wg, stderr, logger, "stderr")
 
-	// Steps 6 + 8: wait for exit; on shutdown, manual SIGTERM→SIGKILL.
 	waitDone := make(chan error, 1)
 	go func() { waitDone <- cmd.Wait() }()
 
@@ -209,9 +264,8 @@ func Spawn(ctx context.Context, deps Deps, eventID pgtype.UUID) error {
 		}
 	}
 	wg.Wait()
-	_ = exitErr // retained for future use; ProcessState carries what we need.
+	_ = exitErr
 
-	// Determine why the exit happened — shutdown outranks subprocess timeout.
 	var ctxErr error
 	switch {
 	case shutdownCtxErr != nil:
@@ -220,42 +274,328 @@ func Spawn(ctx context.Context, deps Deps, eventID pgtype.UUID) error {
 		ctxErr = context.DeadlineExceeded
 	}
 
-	exitCode, signalName := extractExit(cmd.ProcessState)
-	cls := Classify(exitCode, signalName, ctxErr, shutdownSigkilled)
+	exitCode, sigName := extractExit(cmd.ProcessState)
+	cls := Classify(exitCode, sigName, ctxErr, shutdownSigkilled)
 
 	if shutdownSigkilled && deps.SigkillEscalations != nil {
 		deps.SigkillEscalations.Add(1)
 	}
 
-	// Step 7: single terminal tx — UpdateInstanceTerminal + MarkEventProcessed.
-	// ctx is cancelled on shutdown, which would cause tx.Begin to fail with
-	// context.Canceled and leave agent_instances.status='running'. Detach via
-	// WithoutCancel + a bounded budget so the terminal write still lands even
-	// when the supervisor is tearing down, but a wedged DB can't hold the
-	// process open past shutdown-grace.
 	termCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), TerminalWriteGrace)
 	defer cancel()
 	return writeTerminal(termCtx, deps, instanceID, eventID, cls.Status, cls.ExitReason)
 }
 
-// Classification is the (status, exit_reason) pair written to agent_instances.
-// Field names mirror the column names verbatim for grep-ability.
+// -----------------------------------------------------------------------
+// Real-Claude path (M2.1 — agents cache + MCP config + NDJSON pipeline)
+// -----------------------------------------------------------------------
+
+// runRealClaude implements steps 3–12 of plan §internal/spawn for the real
+// Claude Code subprocess. The 12-step sequence is preserved in the code
+// layout below; each block is annotated with its plan step.
+func runRealClaude(
+	ctx context.Context,
+	deps Deps,
+	instanceID, eventID, ticketUUID pgtype.UUID,
+	dept store.Department,
+	payload struct {
+		TicketID     string `json:"ticket_id"`
+		DepartmentID string `json:"department_id"`
+	},
+) error {
+	logger := deps.Logger.With(
+		"event_id", formatUUID(eventID),
+		"instance_id", formatUUID(instanceID),
+		"ticket_id", payload.TicketID,
+		"department_id", payload.DepartmentID,
+	)
+
+	// Step 3: resolve agent row from the startup cache. A missing cache or
+	// a missing row is terminal with exit_reason='agent_missing' — the
+	// supervisor has already committed a running row and must close it out.
+	if deps.AgentsCache == nil {
+		logger.Error("agents cache not wired; cannot resolve engineer")
+		return writeTerminalCost(ctx, deps, instanceID, eventID, ticketUUID, "failed", ExitAgentMissing, pgtype.Numeric{}, false)
+	}
+	agent, err := deps.AgentsCache.GetForDepartmentAndRole(ctx, dept.ID, "engineer")
+	if err != nil {
+		logger.Error("no engineer agent for department", "err", err)
+		return writeTerminalCost(ctx, deps, instanceID, eventID, ticketUUID, "failed", ExitAgentMissing, pgtype.Numeric{}, false)
+	}
+
+	// Step 4: write per-invocation MCP config. Disk errors here land in
+	// the spawn_failed terminal (clarify-session Q2) — dispatcher continues
+	// onto the next event.
+	mcpPath, err := mcpconfig.Write(ctx, deps.MCPConfigDir, instanceID, deps.SupervisorBin, deps.AgentRODSN)
+	if err != nil {
+		logger.Error("mcpconfig.Write failed; recording spawn_failed", "err", err)
+		return writeTerminalCost(ctx, deps, instanceID, eventID, ticketUUID, "failed", ExitSpawnFailed, pgtype.Numeric{}, false)
+	}
+	// Remove the MCP config file on every exit path.
+	defer func() {
+		if rmErr := mcpconfig.Remove(mcpPath); rmErr != nil {
+			logger.Warn("mcpconfig.Remove failed; continuing", "path", mcpPath, "err", rmErr)
+		}
+	}()
+
+	// Step 5 + 6: build argv + configure exec.Cmd.
+	execCtx, execCancel := context.WithTimeout(context.Background(), deps.SubprocessTimeout)
+	defer execCancel()
+
+	model := agent.Model
+	if model == "" {
+		model = deps.ClaudeModel
+	}
+	taskDescription := fmt.Sprintf(
+		"You are the engineer on ticket %s. Read it from Postgres and perform the task described in your system prompt.",
+		payload.TicketID,
+	)
+	budget := deps.ClaudeBudgetUSD
+	if budget <= 0 {
+		budget = 0.05
+	}
+	argv := []string{
+		"-p", taskDescription,
+		"--output-format", "stream-json",
+		"--verbose",
+		"--no-session-persistence",
+		"--model", model,
+		"--max-budget-usd", strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.6f", budget), "0"), "."),
+		"--mcp-config", mcpPath,
+		"--strict-mcp-config",
+		"--system-prompt", agent.AgentMD,
+		"--permission-mode", "bypassPermissions",
+	}
+	cmd := exec.CommandContext(execCtx, deps.ClaudeBin, argv...)
+	if dept.WorkspacePath != nil && *dept.WorkspacePath != "" {
+		cmd.Dir = *dept.WorkspacePath
+	}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// exec.CommandContext's default Cancel kills the PID only. Override
+	// so the timeout path signals the whole process group.
+	cmd.Cancel = func() error { return killProcessGroup(cmd, syscall.SIGTERM) }
+	// WaitDelay escalates to a second Cancel (which we steer to SIGKILL
+	// via a latch) if the process is still alive after 5 seconds.
+	cmd.WaitDelay = ShutdownSignalGrace
+	stdin, err := os.Open(os.DevNull)
+	if err != nil {
+		logger.Error("open /dev/null failed", "err", err)
+		return writeTerminalCost(ctx, deps, instanceID, eventID, ticketUUID, "failed", ExitSpawnFailed, pgtype.Numeric{}, false)
+	}
+	defer stdin.Close()
+	cmd.Stdin = stdin
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return writeTerminalCost(ctx, deps, instanceID, eventID, ticketUUID, "failed", ExitSpawnFailed, pgtype.Numeric{}, false)
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return writeTerminalCost(ctx, deps, instanceID, eventID, ticketUUID, "failed", ExitSpawnFailed, pgtype.Numeric{}, false)
+	}
+
+	// Step 7: cmd.Start.
+	if err := cmd.Start(); err != nil {
+		logger.Error("claude cmd.Start failed; recording spawn_failed", "err", err)
+		return writeTerminalCost(ctx, deps, instanceID, eventID, ticketUUID, "failed", ExitSpawnFailed, pgtype.Numeric{}, false)
+	}
+
+	logger = logger.With("pid", cmd.Process.Pid, "session_prep_model", model)
+	logger.Info("claude subprocess started")
+
+	// Step 8: backfill pid (M1 retro §4 fix).
+	if err := deps.Queries.UpdatePID(ctx, store.UpdatePIDParams{
+		ID:  instanceID,
+		Pid: int32Ptr(int32(cmd.Process.Pid)),
+	}); err != nil {
+		logger.Warn("UpdatePID failed; continuing without backfill", "err", err)
+	}
+
+	// Bail hook: the pipeline calls this on MCP-health failure or parse
+	// error. The handler signals the whole group and latches a flag so
+	// the wait-loop can escalate to SIGKILL after the grace.
+	var bailed atomic.Bool
+	onBail := func(_ string) {
+		if !bailed.CompareAndSwap(false, true) {
+			return
+		}
+		if err := killProcessGroup(cmd, syscall.SIGTERM); err != nil {
+			logger.Warn("killProcessGroup on bail returned error", "err", err)
+		}
+	}
+
+	// Step 9 + stderr goroutine: the NDJSON pipeline reads stdout; a
+	// sibling goroutine copies stderr into structured slog lines so the
+	// supervisor log carries claude's own warnings.
+	var (
+		result      Result
+		pipelineErr error
+	)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go scanStream(&wg, stderr, logger.With("stream", "stderr"), "stderr")
+	go func() {
+		defer wg.Done()
+		result, pipelineErr = Run(execCtx, stdout, instanceID, logger, onBail)
+	}()
+
+	// Step 10: wait for exit, with shutdown sequencing.
+	waitDone := make(chan error, 1)
+	go func() { waitDone <- cmd.Wait() }()
+
+	var (
+		shutdownCtxErr    error
+		shutdownSigkilled bool
+	)
+	select {
+	case <-waitDone:
+		// Natural exit (including timeout-driven Cancel chain).
+	case <-ctx.Done():
+		shutdownCtxErr = ctx.Err()
+		if err := killProcessGroup(cmd, syscall.SIGTERM); err != nil {
+			logger.Warn("killProcessGroup(SIGTERM) on shutdown returned error", "err", err)
+		}
+		select {
+		case <-waitDone:
+		case <-time.After(ShutdownSignalGrace):
+			if err := killProcessGroup(cmd, syscall.SIGKILL); err != nil {
+				logger.Warn("killProcessGroup(SIGKILL) on shutdown returned error", "err", err)
+			}
+			shutdownSigkilled = true
+			<-waitDone
+		}
+	}
+	wg.Wait()
+
+	if shutdownSigkilled && deps.SigkillEscalations != nil {
+		deps.SigkillEscalations.Add(1)
+	}
+
+	if pipelineErr != nil && !result.ParseError {
+		logger.Warn("pipeline.Run returned a non-parse error", "err", pipelineErr)
+	}
+
+	// Collect the wait-side detail Adjudicate needs.
+	exitCode, sigName := extractExit(cmd.ProcessState)
+	var execCtxErr error
+	switch {
+	case shutdownCtxErr != nil:
+		execCtxErr = context.Canceled
+	case errors.Is(execCtx.Err(), context.DeadlineExceeded):
+		execCtxErr = context.DeadlineExceeded
+	}
+	wait := WaitDetail{
+		ContextErr:        execCtxErr,
+		ShutdownInitiated: shutdownCtxErr != nil,
+		ExitCode:          exitCode,
+	}
+	if sigName != "" && !wait.ShutdownInitiated && !errors.Is(execCtxErr, context.DeadlineExceeded) && !bailed.Load() {
+		wait.Signaled = true
+		wait.Signal = signalFromName(sigName)
+	}
+
+	// Step 11: post-run hello.txt check (deferred per plan §pipeline.
+	// Adjudicate — only considered if nothing more urgent already matched).
+	helloTxtOK := false
+	if dept.WorkspacePath != nil && *dept.WorkspacePath != "" {
+		helloTxtOK = checkHelloTxt(*dept.WorkspacePath, payload.TicketID)
+	}
+
+	status, exitReason := Adjudicate(result, wait, helloTxtOK)
+
+	// Cost stays NULL unless a result event landed; that keeps the
+	// aggregate cost query honest about what Claude actually billed.
+	cost, _ := parseCostToNumeric(result.TotalCostUSD)
+	if !result.ResultSeen {
+		cost = pgtype.Numeric{}
+	}
+
+	logger.Info("claude subprocess terminal",
+		"status", status,
+		"exit_reason", exitReason,
+		"total_cost_usd", result.TotalCostUSD,
+		"result_seen", result.ResultSeen,
+		"assistant_seen", result.AssistantSeen,
+	)
+
+	termCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), TerminalWriteGrace)
+	defer cancel()
+	insertTransition := status == "succeeded"
+	return writeTerminalCost(termCtx, deps, instanceID, eventID, ticketUUID, status, exitReason, cost, insertTransition)
+}
+
+// checkHelloTxt reads workspace/hello.txt and returns true iff the contents,
+// stripped of at most one trailing newline, equal ticketID exactly. Any
+// read error (file missing, permission denied, etc.) yields false — the
+// acceptance check is fail-closed.
+func checkHelloTxt(workspacePath, ticketID string) bool {
+	b, err := os.ReadFile(filepath.Join(workspacePath, "hello.txt"))
+	if err != nil {
+		return false
+	}
+	got := strings.TrimRight(string(b), "\n")
+	return got == ticketID
+}
+
+// parseCostToNumeric converts Claude's json.Number-preserved decimal string
+// into pgtype.Numeric via the pgx Scan path. Returns the zero Numeric and
+// the error on failure so the caller can decide whether to surface or
+// swallow it. An empty cost string yields the zero Numeric with nil error.
+func parseCostToNumeric(cost string) (pgtype.Numeric, error) {
+	if cost == "" {
+		return pgtype.Numeric{}, nil
+	}
+	var n pgtype.Numeric
+	if err := n.Scan(cost); err != nil {
+		return pgtype.Numeric{}, err
+	}
+	return n, nil
+}
+
+// signalFromName maps the canonical SIG* string that signalName() emits
+// back to syscall.Signal so FormatSignalled can render the exit_reason.
+// Unknown strings return 0 and FormatSignalled falls through to its
+// numeric shim ("signaled_signal_N").
+func signalFromName(s string) syscall.Signal {
+	switch s {
+	case "SIGKILL":
+		return syscall.SIGKILL
+	case "SIGTERM":
+		return syscall.SIGTERM
+	case "SIGINT":
+		return syscall.SIGINT
+	case "SIGHUP":
+		return syscall.SIGHUP
+	case "SIGQUIT":
+		return syscall.SIGQUIT
+	case "SIGSEGV":
+		return syscall.SIGSEGV
+	case "SIGABRT":
+		return syscall.SIGABRT
+	case "SIGPIPE":
+		return syscall.SIGPIPE
+	default:
+		return 0
+	}
+}
+
+func int32Ptr(n int32) *int32 { return &n }
+
+// -----------------------------------------------------------------------
+// Terminal writers
+// -----------------------------------------------------------------------
+
+// Classification is the (status, exit_reason) pair written to agent_instances
+// by the M1 fake-agent path. The M2.1 real path uses pipeline.Adjudicate
+// instead; both paths share the underlying column vocabulary.
 type Classification struct {
 	Status     string
 	ExitReason string
 }
 
-// Classify is the pure subprocess-exit → (status, exit_reason) function.
-// Inputs intentionally avoid *os.ProcessState so unit tests exercise the
-// mapping without fork/exec. Precedence: supervisor shutdown and subprocess
-// timeout win over the raw exit code, because operators read those reasons
-// as policy outcomes, not process accidents.
-//
-// ctxErr semantics: context.DeadlineExceeded = subprocess-timeout budget
-// elapsed; context.Canceled = supervisor root ctx cancelled (shutdown).
-// shutdownSigkilled is true only when the 5s SIGTERM grace expired and the
-// supervisor escalated to SIGKILL.
-func Classify(exitCode int, signalName string, ctxErr error, shutdownSigkilled bool) Classification {
+// Classify is the pure subprocess-exit → (status, exit_reason) function used
+// by the M1 fake-agent path. Inputs intentionally avoid *os.ProcessState so
+// unit tests exercise the mapping without fork/exec.
+func Classify(exitCode int, sigName string, ctxErr error, shutdownSigkilled bool) Classification {
 	switch {
 	case errors.Is(ctxErr, context.DeadlineExceeded):
 		return Classification{Status: "timeout", ExitReason: "timeout"}
@@ -264,8 +604,8 @@ func Classify(exitCode int, signalName string, ctxErr error, shutdownSigkilled b
 			return Classification{Status: "failed", ExitReason: "supervisor_shutdown_sigkill"}
 		}
 		return Classification{Status: "failed", ExitReason: "supervisor_shutdown"}
-	case signalName != "":
-		return Classification{Status: "failed", ExitReason: "signal_" + signalName}
+	case sigName != "":
+		return Classification{Status: "failed", ExitReason: "signal_" + sigName}
 	case exitCode == 0:
 		return Classification{Status: "succeeded", ExitReason: "exit_code_0"}
 	default:
@@ -273,10 +613,9 @@ func Classify(exitCode int, signalName string, ctxErr error, shutdownSigkilled b
 	}
 }
 
-// writeTerminal writes the terminal agent_instances row update and the
-// event_outbox.processed_at completion in a single transaction (FR-006).
-// Shared tx is the atomicity guarantee: a crash between the two statements
-// leaves the event replayable, never duplicate.
+// writeTerminal is the M1 two-statement terminal tx (UpdateInstanceTerminal
+// + MarkEventProcessed). Preserved verbatim so the fake-agent path stays
+// byte-identical with M1.
 func writeTerminal(ctx context.Context, deps Deps, instanceID, eventID pgtype.UUID, status, exitReason string) error {
 	tx, err := deps.Pool.Begin(ctx)
 	if err != nil {
@@ -302,20 +641,76 @@ func writeTerminal(ctx context.Context, deps Deps, instanceID, eventID pgtype.UU
 	return nil
 }
 
-// scanStream reads one line at a time from r and emits an slog record per
-// line. The goroutine exits when the pipe closes, which happens when the
-// child process exits.
+// writeTerminalCost is the M2.1 widened terminal tx: UpdateInstanceTerminal
+// WithCost + (optional) InsertTicketTransition + (optional)
+// UpdateTicketColumnSlug + MarkEventProcessed, all in a single
+// transaction. The transition + column update only fire when
+// insertTransition is true — i.e. on the succeeded path, per FR-114.
+func writeTerminalCost(
+	ctx context.Context,
+	deps Deps,
+	instanceID, eventID, ticketID pgtype.UUID,
+	status, exitReason string,
+	cost pgtype.Numeric,
+	insertTransition bool,
+) error {
+	tx, err := deps.Pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("spawn: begin terminal tx: %w", err)
+	}
+	q := deps.Queries.WithTx(tx)
+	reason := exitReason
+	if err := q.UpdateInstanceTerminalWithCost(ctx, store.UpdateInstanceTerminalWithCostParams{
+		ID:           instanceID,
+		Status:       status,
+		ExitReason:   &reason,
+		TotalCostUsd: cost,
+	}); err != nil {
+		_ = tx.Rollback(ctx)
+		return fmt.Errorf("spawn: UpdateInstanceTerminalWithCost: %w", err)
+	}
+	if insertTransition && ticketID.Valid {
+		fromCol := "todo"
+		if _, err := q.InsertTicketTransition(ctx, store.InsertTicketTransitionParams{
+			TicketID:                   ticketID,
+			FromColumn:                 &fromCol,
+			ToColumn:                   "done",
+			TriggeredByAgentInstanceID: instanceID,
+		}); err != nil {
+			_ = tx.Rollback(ctx)
+			return fmt.Errorf("spawn: InsertTicketTransition: %w", err)
+		}
+		if err := q.UpdateTicketColumnSlug(ctx, store.UpdateTicketColumnSlugParams{
+			ID:         ticketID,
+			ColumnSlug: "done",
+		}); err != nil {
+			_ = tx.Rollback(ctx)
+			return fmt.Errorf("spawn: UpdateTicketColumnSlug: %w", err)
+		}
+	}
+	if err := q.MarkEventProcessed(ctx, eventID); err != nil {
+		_ = tx.Rollback(ctx)
+		return fmt.Errorf("spawn: MarkEventProcessed: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("spawn: commit terminal: %w", err)
+	}
+	return nil
+}
+
+// -----------------------------------------------------------------------
+// Shared helpers (unchanged from M1 except for location)
+// -----------------------------------------------------------------------
+
 func scanStream(wg *sync.WaitGroup, r io.ReadCloser, logger *slog.Logger, stream string) {
 	defer wg.Done()
 	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 64<<10), 1<<20)
 	for scanner.Scan() {
 		logger.Info(scanner.Text(), "stream", stream)
 	}
 }
 
-// extractExit pulls (exit_code, signal_name) from ps. Signal exit is reported
-// as exit_code=-1 (os.ProcessState convention); signalName is non-empty only
-// on signal exits.
 func extractExit(ps *os.ProcessState) (int, string) {
 	if ps == nil {
 		return -1, ""
@@ -326,9 +721,6 @@ func extractExit(ps *os.ProcessState) (int, string) {
 	return ps.ExitCode(), ""
 }
 
-// signalName returns the canonical SIG... form used in exit_reason values.
-// syscall.Signal.String() is locale-ish ("killed", "terminated"); the SIG-
-// prefixed form is what data-model.md §"exit_reason vocabulary" requires.
 func signalName(sig syscall.Signal) string {
 	switch sig {
 	case syscall.SIGKILL:
@@ -352,8 +744,6 @@ func signalName(sig syscall.Signal) string {
 	}
 }
 
-// parseUUID decodes a canonical-form UUID string into pgtype.UUID via the
-// pgx Scan() path so the exact same representation round-trips into the db.
 func parseUUID(s string) (pgtype.UUID, error) {
 	var u pgtype.UUID
 	if err := u.Scan(s); err != nil {
@@ -362,8 +752,6 @@ func parseUUID(s string) (pgtype.UUID, error) {
 	return u, nil
 }
 
-// formatUUID renders a pgtype.UUID as its canonical 8-4-4-4-12 hex string for
-// slog fields. Returns empty for !Valid; log sites tolerate empty.
 func formatUUID(u pgtype.UUID) string {
 	if !u.Valid {
 		return ""
