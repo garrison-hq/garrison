@@ -1,0 +1,22 @@
+# Normalise line endings on checkout. Source is LF-only; enforce it
+# so Windows contributors don't silently re-write files to CRLF.
+* text=auto eol=lf
+
+# Markdown files never want CRLF. Some IDEs default to it on Windows.
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+
+# Go source files — belt and braces.
+*.go text eol=lf
+*.sql text eol=lf
+*.sh text eol=lf
+
+# Binary assets (none today, but future-proofing).
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary

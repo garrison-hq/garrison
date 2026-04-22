@@ -211,7 +211,7 @@ Compare to the department's `concurrency_cap`. If at cap, the event is *not* mar
 For M1, the "agent" is a fake command configurable via env var:
 
 ```
-ORG_OS_FAKE_AGENT_CMD="sh -c 'echo hello from $TICKET_ID; sleep 2'"
+GARRISON_FAKE_AGENT_CMD="sh -c 'echo hello from $TICKET_ID; sleep 2'"
 ```
 
 The supervisor:
