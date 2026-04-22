@@ -12,7 +12,7 @@ copy-migrations:
 build: copy-migrations
 	CGO_ENABLED=0 go build -o bin/supervisor ./cmd/supervisor
 
-test:
+test: copy-migrations
 	go test ./...
 
 test-integration: copy-migrations
@@ -33,7 +33,10 @@ run: build
 docker: copy-migrations
 	docker build -t garrison/supervisor:dev .
 
-lint:
+# copy-migrations is required because cmd/supervisor/migrate.go has a
+# //go:embed directive that go vet and the compiler resolve at type-check
+# time — without the staged files, `go vet ./...` fails.
+lint: copy-migrations
 	go vet ./...
 	@if [ -n "$$(gofmt -l .)" ]; then gofmt -l .; exit 1; fi
 
