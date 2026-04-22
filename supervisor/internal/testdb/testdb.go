@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
@@ -55,6 +56,52 @@ func Start(t *testing.T) *pgxpool.Pool {
 	truncate()
 	t.Cleanup(truncate)
 	return sharedPool
+}
+
+// SeedM21 inserts the M2.1 minimum working set: one company, one
+// engineering department with the supplied workspace_path, and one
+// active engineer agent row whose listens_for matches the supervisor's
+// registered channel. Returns the engineering department ID so tests
+// can compose tickets against it.
+//
+// The agent seed carries a non-trivial agent_md so checkHelloTxt-style
+// length assertions (e.g. T010 integration test) have something to
+// match. Model is pinned to the M2.1 default so the spawn argv carries
+// the value operators expect in production logs.
+func SeedM21(t *testing.T, workspacePath string) pgtype.UUID {
+	t.Helper()
+	pool := Start(t)
+	ctx := context.Background()
+	var companyID pgtype.UUID
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO companies (id, name) VALUES (gen_random_uuid(), 'garrison test co') RETURNING id`,
+	).Scan(&companyID); err != nil {
+		t.Fatalf("SeedM21: insert company: %v", err)
+	}
+	var deptID pgtype.UUID
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO departments (id, company_id, slug, name, concurrency_cap, workspace_path)
+		VALUES (gen_random_uuid(), $1, 'engineering', 'Engineering', 1, $2)
+		RETURNING id`,
+		companyID, workspacePath,
+	).Scan(&deptID); err != nil {
+		t.Fatalf("SeedM21: insert department: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO agents (id, department_id, role_slug, agent_md, model, skills, mcp_tools, listens_for, palace_wing, status)
+		VALUES (
+			gen_random_uuid(), $1, 'engineer',
+			'# Engineer (M2.1)\n\nIntegration-test seed body — the real agent_md ships via T003.',
+			'claude-haiku-4-5-20251001',
+			'[]'::jsonb, '[]'::jsonb,
+			'["work.ticket.created.engineering.todo"]'::jsonb,
+			NULL, 'active'
+		)`,
+		deptID,
+	); err != nil {
+		t.Fatalf("SeedM21: insert agent: %v", err)
+	}
+	return deptID
 }
 
 // URL exposes the shared postgres connection string so tests that need to

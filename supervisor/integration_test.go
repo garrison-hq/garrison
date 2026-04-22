@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -447,4 +448,196 @@ func TestHundredTicketVolume(t *testing.T) {
 	if processedCount != 100 {
 		t.Fatalf("expected 100 processed events, got %d", processedCount)
 	}
+}
+
+// ---------------------------------------------------------------------
+// T015: M2.1 golden-path end-to-end test (mock claude + real pipeline)
+// ---------------------------------------------------------------------
+
+// TestM21HelloWorldEndToEnd is the load-bearing M2.1 acceptance test —
+// covers criteria A1–A9 in a single run. It does not use the real
+// claude binary (T018 owns the real-binary chaos tests); instead it
+// points GARRISON_CLAUDE_BIN at the compiled mockclaude binary which
+// replays a canned NDJSON stream AND performs the file-write side
+// effect (writing hello.txt with the ticket ID) that the supervisor's
+// post-run acceptance check looks for.
+//
+// What this test pins:
+//   - A1: real claude binary (substituted here by an NDJSON-emitting
+//     stand-in that speaks the same argv + stdout contract).
+//   - A2: MCP config file written before spawn, removed on exit
+//     (verified by checking the config dir is empty after).
+//   - A3: init event observed with mcp_servers.postgres=connected.
+//   - A4: agent_instances.pid populated (UpdatePID backfill).
+//   - A5: result event parsed, total_cost_usd = 0.003.
+//   - A6: the engineer writes hello.txt with the ticket id.
+//   - A7: hello.txt contents = ticket ID exactly.
+//   - A8: agent_instances row is succeeded / completed with the cost.
+//   - A9: ticket_transitions row todo→done with hygiene_status NULL,
+//     tickets.column_slug updated to 'done'.
+func TestM21HelloWorldEndToEnd(t *testing.T) {
+	pool := testdb.Start(t)
+	ctx := context.Background()
+
+	workspaceDir := t.TempDir()
+	mcpConfigDir := t.TempDir()
+	deptID := testdb.SeedM21(t, workspaceDir)
+
+	mockBin := buildMockClaudeBinary(t)
+	scriptPath := mockClaudeScriptPath(t, "helloworld.ndjson")
+
+	startSupervisor(t, supervisorOpts{
+		ClaudeBin:        mockBin,
+		AgentROPassword:  "integration-test-ro",
+		MCPConfigDir:     mcpConfigDir,
+		MockClaudeScript: scriptPath,
+		PollInterval:     "1s",
+		LogLevel:         "info",
+	})
+
+	ticket, err := (store.New(pool)).InsertTicket(ctx, store.InsertTicketParams{
+		DepartmentID: deptID,
+		Objective:    "write hello world",
+	})
+	if err != nil {
+		t.Fatalf("InsertTicket: %v", err)
+	}
+	ticketID := formatTicketID(t, ticket.ID)
+
+	// Wait up to 20 s for the agent_instance to reach a terminal state.
+	// Running the full suite on a loaded machine slows the LISTEN-notify
+	// roundtrip; in isolation the happy path completes in ≈1 s.
+	waitForTerminalCount(t, pool, 1, 20*time.Second, "succeeded")
+
+	// A6/A7: hello.txt exists in the workspace with the ticket ID as
+	// its exact contents.
+	helloPath := fmt.Sprintf("%s/hello.txt", workspaceDir)
+	got, err := os.ReadFile(helloPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", helloPath, err)
+	}
+	if string(got) != ticketID {
+		t.Errorf("hello.txt = %q; want exactly the ticket id %q", string(got), ticketID)
+	}
+
+	// A4/A5/A8: agent_instances row is succeeded/completed with pid
+	// and total_cost_usd populated.
+	var (
+		status     string
+		exitReason *string
+		pid        *int32
+		cost       *string
+	)
+	if err := pool.QueryRow(ctx, `
+		SELECT status, exit_reason, pid, total_cost_usd::text
+		FROM agent_instances
+		WHERE ticket_id = $1`,
+		ticket.ID,
+	).Scan(&status, &exitReason, &pid, &cost); err != nil {
+		t.Fatalf("fetch agent_instance: %v", err)
+	}
+	if status != "succeeded" {
+		t.Errorf("agent_instance.status = %q; want succeeded", status)
+	}
+	if exitReason == nil || *exitReason != "completed" {
+		t.Errorf("agent_instance.exit_reason = %v; want 'completed'", exitReason)
+	}
+	if pid == nil || *pid == 0 {
+		t.Errorf("agent_instance.pid = %v; want non-zero (UpdatePID should have run)", pid)
+	}
+	if cost == nil {
+		t.Errorf("agent_instance.total_cost_usd is NULL; want 0.003")
+	} else if normaliseCost(*cost) != "0.003" {
+		// NUMERIC(10,6) text rendering pads to "0.003000"; normalise by
+		// trimming trailing zeros so the comparison is scale-agnostic.
+		t.Errorf("agent_instance.total_cost_usd = %q; want 0.003 (±trailing zeros)", *cost)
+	}
+
+	// A9: ticket_transitions row todo→done with hygiene_status NULL,
+	// tickets.column_slug = 'done'.
+	var (
+		fromCol       *string
+		toCol         string
+		hygieneStatus *string
+	)
+	if err := pool.QueryRow(ctx, `
+		SELECT from_column, to_column, hygiene_status
+		FROM ticket_transitions
+		WHERE ticket_id = $1`,
+		ticket.ID,
+	).Scan(&fromCol, &toCol, &hygieneStatus); err != nil {
+		t.Fatalf("fetch ticket_transition: %v", err)
+	}
+	if fromCol == nil || *fromCol != "todo" {
+		t.Errorf("ticket_transition.from_column = %v; want 'todo'", fromCol)
+	}
+	if toCol != "done" {
+		t.Errorf("ticket_transition.to_column = %q; want 'done'", toCol)
+	}
+	if hygieneStatus != nil {
+		t.Errorf("ticket_transition.hygiene_status = %v; want NULL", hygieneStatus)
+	}
+
+	var columnSlug string
+	if err := pool.QueryRow(ctx,
+		`SELECT column_slug FROM tickets WHERE id = $1`, ticket.ID,
+	).Scan(&columnSlug); err != nil {
+		t.Fatalf("fetch ticket.column_slug: %v", err)
+	}
+	if columnSlug != "done" {
+		t.Errorf("tickets.column_slug = %q; want 'done'", columnSlug)
+	}
+
+	// event_outbox.processed_at is set.
+	var processed pgtype.Timestamptz
+	if err := pool.QueryRow(ctx,
+		`SELECT processed_at FROM event_outbox ORDER BY created_at DESC LIMIT 1`,
+	).Scan(&processed); err != nil {
+		t.Fatalf("fetch event_outbox: %v", err)
+	}
+	if !processed.Valid {
+		t.Error("event_outbox.processed_at is NULL; terminal tx did not commit")
+	}
+
+	// A2: the per-invocation MCP config file was removed on exit. The
+	// mcpConfigDir should be empty now.
+	entries, err := os.ReadDir(mcpConfigDir)
+	if err != nil {
+		t.Fatalf("read mcp config dir: %v", err)
+	}
+	if len(entries) != 0 {
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("mcp config dir not cleaned up; got %v", names)
+	}
+}
+
+// formatTicketID renders a pgtype.UUID to the canonical hex form the
+// mockclaude regex extracts. Shared with T016/T017 tests too.
+func formatTicketID(t *testing.T, u pgtype.UUID) string {
+	t.Helper()
+	if !u.Valid {
+		t.Fatalf("formatTicketID: invalid uuid")
+	}
+	b := u.Bytes
+	return fmt.Sprintf("%x-%x-%x-%x-%x",
+		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
+// normaliseCost trims the trailing zero-padding NUMERIC(scale) adds so
+// tests can compare costs without caring about column scale. "0.003000"
+// → "0.003"; "0.003" → "0.003"; "0.00" → "0" (then the caller should
+// compare against "0"). Used by T015+ assertions.
+func normaliseCost(s string) string {
+	if !strings.Contains(s, ".") {
+		return s
+	}
+	s = strings.TrimRight(s, "0")
+	s = strings.TrimRight(s, ".")
+	if s == "" {
+		return "0"
+	}
+	return s
 }

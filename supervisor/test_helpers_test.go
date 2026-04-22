@@ -21,13 +21,23 @@ import (
 )
 
 // supervisorOpts bundles the common env overrides tests need. Any field
-// left blank gets the supervisor's default.
+// left blank gets the supervisor's default. M2.1 fields (RealClaude*,
+// AgentROPassword, MCPConfigDir) are only relevant when FakeAgentCmd is
+// empty — setting both selects the real-Claude codepath.
 type supervisorOpts struct {
 	FakeAgentCmd      string
 	PollInterval      string
 	SubprocessTimeout string
 	ShutdownGrace     string
 	LogLevel          string
+
+	// Real-Claude mode — leave ClaudeBin and AgentROPassword unset to
+	// stay in fake-agent mode (FakeAgentCmd above).
+	ClaudeBin        string
+	AgentROPassword  string
+	MCPConfigDir     string
+	MockClaudeScript string // forwarded as GARRISON_MOCK_CLAUDE_SCRIPT
+	SignalMarker     string // forwarded as GARRISON_MOCK_CLAUDE_SIGNAL_MARKER
 }
 
 // startSupervisor builds the binary, execs it with a free /health port
@@ -43,9 +53,11 @@ func startSupervisor(t *testing.T, opts supervisorOpts) (int, *exec.Cmd) {
 
 	env := append(os.Environ(),
 		"GARRISON_DATABASE_URL="+url,
-		"GARRISON_FAKE_AGENT_CMD="+opts.FakeAgentCmd,
 		fmt.Sprintf("GARRISON_HEALTH_PORT=%d", port),
 	)
+	if opts.FakeAgentCmd != "" {
+		env = append(env, "GARRISON_FAKE_AGENT_CMD="+opts.FakeAgentCmd)
+	}
 	if opts.PollInterval != "" {
 		env = append(env, "GARRISON_POLL_INTERVAL="+opts.PollInterval)
 	}
@@ -57,6 +69,21 @@ func startSupervisor(t *testing.T, opts supervisorOpts) (int, *exec.Cmd) {
 	}
 	if opts.LogLevel != "" {
 		env = append(env, "GARRISON_LOG_LEVEL="+opts.LogLevel)
+	}
+	if opts.ClaudeBin != "" {
+		env = append(env, "GARRISON_CLAUDE_BIN="+opts.ClaudeBin)
+	}
+	if opts.AgentROPassword != "" {
+		env = append(env, "GARRISON_AGENT_RO_PASSWORD="+opts.AgentROPassword)
+	}
+	if opts.MCPConfigDir != "" {
+		env = append(env, "GARRISON_MCP_CONFIG_DIR="+opts.MCPConfigDir)
+	}
+	if opts.MockClaudeScript != "" {
+		env = append(env, "GARRISON_MOCK_CLAUDE_SCRIPT="+opts.MockClaudeScript)
+	}
+	if opts.SignalMarker != "" {
+		env = append(env, "GARRISON_MOCK_CLAUDE_SIGNAL_MARKER="+opts.SignalMarker)
 	}
 
 	cmd := exec.Command(bin)
@@ -102,6 +129,41 @@ func buildSupervisorBinary(t *testing.T) string {
 		t.Fatalf("go build supervisor: %v", err)
 	}
 	return out
+}
+
+// buildMockClaudeBinary compiles the integration-test stand-in for the
+// real claude binary (supervisor/internal/spawn/mockclaude). Returns the
+// absolute path of the produced binary; the t.TempDir it writes into is
+// cleaned up automatically on test end.
+func buildMockClaudeBinary(t *testing.T) string {
+	t.Helper()
+	_, thisFile, _, _ := runtime.Caller(0)
+	supervisorDir := filepath.Dir(thisFile)
+	out := filepath.Join(t.TempDir(), "mockclaude")
+	cmd := exec.Command("go", "build", "-o", out, "./internal/spawn/mockclaude")
+	cmd.Dir = supervisorDir
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("go build mockclaude: %v", err)
+	}
+	return out
+}
+
+// mockClaudeScriptPath returns the absolute path to a fixture NDJSON
+// script under supervisor/internal/spawn/mockclaude/scripts/. Relative
+// paths break when the test binary runs from an unusual cwd (go test -c
+// then ./pkg.test, bazel-style sandboxes), so compose the canonical
+// absolute path once.
+func mockClaudeScriptPath(t *testing.T, name string) string {
+	t.Helper()
+	_, thisFile, _, _ := runtime.Caller(0)
+	supervisorDir := filepath.Dir(thisFile)
+	p := filepath.Join(supervisorDir, "internal", "spawn", "mockclaude", "scripts", name)
+	if _, err := os.Stat(p); err != nil {
+		t.Fatalf("mockclaude script %s: %v", p, err)
+	}
+	return p
 }
 
 func mustFreePort(t *testing.T) int {
