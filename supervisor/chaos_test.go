@@ -151,7 +151,7 @@ func TestSIGKILLSubprocessRecordedFailed(t *testing.T) {
 
 // TestGracefulShutdownWithInflight SIGTERMs the supervisor while a long-sleep
 // subprocess is running. Verifies: (a) supervisor exits within
-// ORG_OS_SHUTDOWN_GRACE, (b) the in-flight agent_instances row lands with a
+// GARRISON_SHUTDOWN_GRACE, (b) the in-flight agent_instances row lands with a
 // supervisor_shutdown exit_reason (plain or _sigkill). The subprocess itself
 // is `sh -c "exec sleep 60"`: exec makes sh replace itself with sleep so the
 // supervisor's SIGTERM is received by the sleep binary directly (sh doesn't

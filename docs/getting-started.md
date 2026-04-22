@@ -59,7 +59,7 @@ The supervisor binary embeds its own migrations and runs them via
 the `--migrate` subcommand.
 
 ```bash
-export ORG_OS_DATABASE_URL='postgres://postgres:postgres@localhost:5432/orgos?sslmode=disable'
+export GARRISON_DATABASE_URL='postgres://postgres:postgres@localhost:5432/orgos?sslmode=disable'
 ./bin/supervisor --migrate
 ```
 
@@ -95,8 +95,8 @@ docker exec pg-garrison psql -U postgres orgos -c \
 ## 5. Run the supervisor
 
 ```bash
-export ORG_OS_DATABASE_URL='postgres://postgres:postgres@localhost:5432/orgos?sslmode=disable'
-export ORG_OS_FAKE_AGENT_CMD='sh -c "echo hello from $TICKET_ID; sleep 2"'
+export GARRISON_DATABASE_URL='postgres://postgres:postgres@localhost:5432/orgos?sslmode=disable'
+export GARRISON_FAKE_AGENT_CMD='sh -c "echo hello from $TICKET_ID; sleep 2"'
 ./bin/supervisor
 ```
 
@@ -159,7 +159,7 @@ docker exec pg-garrison psql -U postgres orgos -c \
 Send SIGTERM (Ctrl+C in the supervisor terminal, or `docker kill`
 if running under Docker). The supervisor logs
 `shutdown signal received; cancelling root context`, waits for any
-in-flight subprocess (up to `ORG_OS_SHUTDOWN_GRACE`, default `30s`),
+in-flight subprocess (up to `GARRISON_SHUTDOWN_GRACE`, default `30s`),
 writes the terminal row, and exits 0.
 
 ## Running under Docker
@@ -192,7 +192,7 @@ Integration and chaos suites need Docker running so
 - **`advisory lock already held`** (exit code 4): another supervisor
   instance is running against the same database. Stop it first.
 - **`/bin/sh: not found` in subprocess log**: your
-  `ORG_OS_FAKE_AGENT_CMD` references `sh -c ...` but the runtime
+  `GARRISON_FAKE_AGENT_CMD` references `sh -c ...` but the runtime
   image has no shell. The shipped Dockerfile uses `alpine:3.20`
   precisely to provide `/bin/sh`. If you rebuilt from distroless,
   switch the base back.
@@ -200,7 +200,7 @@ Integration and chaos suites need Docker running so
   user has `CREATE` on the database. The compose default
   (`postgres` superuser on `orgos`) is fine.
 - **`/health` returns 503**: either the DB ping failed or the most
-  recent poll timestamp is older than `2·ORG_OS_POLL_INTERVAL`.
+  recent poll timestamp is older than `2·GARRISON_POLL_INTERVAL`.
   Check the supervisor logs for `poll cycle failed` or
   `reconnect backoff`.
 

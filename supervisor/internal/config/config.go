@@ -39,7 +39,7 @@ type Config struct {
 	LogLevel          slog.Level
 }
 
-// Load reads ORG_OS_* env vars, applies defaults, and validates per plan.md
+// Load reads GARRISON_* env vars, applies defaults, and validates per plan.md
 // §"Config". It returns a descriptive error that names the offending env var
 // on any failure.
 func Load() (*Config, error) {
@@ -51,66 +51,66 @@ func Load() (*Config, error) {
 		LogLevel:          DefaultLogLevel,
 	}
 
-	dbURL := os.Getenv("ORG_OS_DATABASE_URL")
+	dbURL := os.Getenv("GARRISON_DATABASE_URL")
 	if dbURL == "" {
-		return nil, fmt.Errorf("config: required env var ORG_OS_DATABASE_URL is unset or empty")
+		return nil, fmt.Errorf("config: required env var GARRISON_DATABASE_URL is unset or empty")
 	}
 	if _, err := url.Parse(dbURL); err != nil {
-		return nil, fmt.Errorf("config: ORG_OS_DATABASE_URL is not a parseable URL: %w", err)
+		return nil, fmt.Errorf("config: GARRISON_DATABASE_URL is not a parseable URL: %w", err)
 	}
 	cfg.DatabaseURL = dbURL
 
-	fakeCmd := os.Getenv("ORG_OS_FAKE_AGENT_CMD")
+	fakeCmd := os.Getenv("GARRISON_FAKE_AGENT_CMD")
 	if fakeCmd == "" {
-		return nil, fmt.Errorf("config: required env var ORG_OS_FAKE_AGENT_CMD is unset or empty")
+		return nil, fmt.Errorf("config: required env var GARRISON_FAKE_AGENT_CMD is unset or empty")
 	}
 	cfg.FakeAgentCmd = fakeCmd
 
-	if v := os.Getenv("ORG_OS_POLL_INTERVAL"); v != "" {
+	if v := os.Getenv("GARRISON_POLL_INTERVAL"); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil {
-			return nil, fmt.Errorf("config: ORG_OS_POLL_INTERVAL %q is not a valid duration: %w", v, err)
+			return nil, fmt.Errorf("config: GARRISON_POLL_INTERVAL %q is not a valid duration: %w", v, err)
 		}
 		if d < MinPollInterval {
-			return nil, fmt.Errorf("config: ORG_OS_POLL_INTERVAL (%s) must be >= %s", d, MinPollInterval)
+			return nil, fmt.Errorf("config: GARRISON_POLL_INTERVAL (%s) must be >= %s", d, MinPollInterval)
 		}
 		cfg.PollInterval = d
 	}
 
-	if v := os.Getenv("ORG_OS_SUBPROCESS_TIMEOUT"); v != "" {
+	if v := os.Getenv("GARRISON_SUBPROCESS_TIMEOUT"); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil {
-			return nil, fmt.Errorf("config: ORG_OS_SUBPROCESS_TIMEOUT %q is not a valid duration: %w", v, err)
+			return nil, fmt.Errorf("config: GARRISON_SUBPROCESS_TIMEOUT %q is not a valid duration: %w", v, err)
 		}
 		if d <= 0 {
-			return nil, fmt.Errorf("config: ORG_OS_SUBPROCESS_TIMEOUT must be positive (got %s)", d)
+			return nil, fmt.Errorf("config: GARRISON_SUBPROCESS_TIMEOUT must be positive (got %s)", d)
 		}
 		cfg.SubprocessTimeout = d
 	}
 
-	if v := os.Getenv("ORG_OS_SHUTDOWN_GRACE"); v != "" {
+	if v := os.Getenv("GARRISON_SHUTDOWN_GRACE"); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil {
-			return nil, fmt.Errorf("config: ORG_OS_SHUTDOWN_GRACE %q is not a valid duration: %w", v, err)
+			return nil, fmt.Errorf("config: GARRISON_SHUTDOWN_GRACE %q is not a valid duration: %w", v, err)
 		}
 		if d <= 0 {
-			return nil, fmt.Errorf("config: ORG_OS_SHUTDOWN_GRACE must be positive (got %s)", d)
+			return nil, fmt.Errorf("config: GARRISON_SHUTDOWN_GRACE must be positive (got %s)", d)
 		}
 		cfg.ShutdownGrace = d
 	}
 
-	if v := os.Getenv("ORG_OS_HEALTH_PORT"); v != "" {
+	if v := os.Getenv("GARRISON_HEALTH_PORT"); v != "" {
 		n, err := strconv.ParseUint(v, 10, 16)
 		if err != nil {
-			return nil, fmt.Errorf("config: ORG_OS_HEALTH_PORT %q is not a valid uint16: %w", v, err)
+			return nil, fmt.Errorf("config: GARRISON_HEALTH_PORT %q is not a valid uint16: %w", v, err)
 		}
 		if n == 0 {
-			return nil, fmt.Errorf("config: ORG_OS_HEALTH_PORT must be non-zero")
+			return nil, fmt.Errorf("config: GARRISON_HEALTH_PORT must be non-zero")
 		}
 		cfg.HealthPort = uint16(n)
 	}
 
-	if v := os.Getenv("ORG_OS_LOG_LEVEL"); v != "" {
+	if v := os.Getenv("GARRISON_LOG_LEVEL"); v != "" {
 		level, err := parseLogLevel(v)
 		if err != nil {
 			return nil, err
@@ -132,6 +132,6 @@ func parseLogLevel(s string) (slog.Level, error) {
 	case "error":
 		return slog.LevelError, nil
 	default:
-		return 0, fmt.Errorf("config: ORG_OS_LOG_LEVEL %q is not one of debug|info|warn|error", s)
+		return 0, fmt.Errorf("config: GARRISON_LOG_LEVEL %q is not one of debug|info|warn|error", s)
 	}
 }

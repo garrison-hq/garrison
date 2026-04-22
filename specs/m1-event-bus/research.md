@@ -24,7 +24,7 @@ No open NEEDS CLARIFICATION markers remain.
 
 ## Decision 2 — Config shape
 
-**Decision**: Environment variables only, loaded into a typed `config.Config` struct validated at startup. No config file support. Env names prefixed `ORG_OS_`.
+**Decision**: Environment variables only, loaded into a typed `config.Config` struct validated at startup. No config file support. Env names prefixed `GARRISON_`.
 
 **Rationale**:
 - FR-013 explicitly disallows config files in M1.
@@ -141,7 +141,7 @@ No open NEEDS CLARIFICATION markers remain.
 
 ## Micro-gap 2 — FR-004 command-template substitution mechanism
 
-**Decision**: Do both — Go-side literal-token replacement of `$TICKET_ID` and `$DEPARTMENT_ID` in the argv produced by shell-splitting `ORG_OS_FAKE_AGENT_CMD`, AND set those same values as environment variables on the subprocess.
+**Decision**: Do both — Go-side literal-token replacement of `$TICKET_ID` and `$DEPARTMENT_ID` in the argv produced by shell-splitting `GARRISON_FAKE_AGENT_CMD`, AND set those same values as environment variables on the subprocess.
 
 **Rationale**:
 - Go-side replacement works for any command the operator writes, shell-wrapped or not (e.g. `["/usr/local/bin/fake-agent", "--ticket", "$TICKET_ID"]`).
@@ -159,6 +159,6 @@ No open NEEDS CLARIFICATION markers remain.
 Two items outside the explicitly locked list deserve retro-note attention:
 
 1. **`github.com/pressly/goose/v3`** — already named by FR-013 and AGENTS.md allows "one of goose or tern"; not a new approval.
-2. **`github.com/google/shlex`** — for argv splitting of `ORG_OS_FAKE_AGENT_CMD`. This is **one new dependency outside the locked list**, flagged as an open question in the plan. Resolution: accept per AGENTS.md soft rule (justification: the operator can write shell-style templates with quoted arguments, and a handwritten whitespace-splitter would silently break those), and note in the M1 retro.
+2. **`github.com/google/shlex`** — for argv splitting of `GARRISON_FAKE_AGENT_CMD`. This is **one new dependency outside the locked list**, flagged as an open question in the plan. Resolution: accept per AGENTS.md soft rule (justification: the operator can write shell-style templates with quoted arguments, and a handwritten whitespace-splitter would silently break those), and note in the M1 retro.
 
 No other new dependencies are introduced.

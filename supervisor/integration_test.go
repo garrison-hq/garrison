@@ -263,10 +263,10 @@ func TestAdvisoryLockRejectsDoubleRun(t *testing.T) {
 	port := mustFreePort(t)
 	cmd := exec.Command(bin)
 	cmd.Env = append(os.Environ(),
-		"ORG_OS_DATABASE_URL="+url,
-		`ORG_OS_FAKE_AGENT_CMD=sh -c "echo ok"`,
-		fmt.Sprintf("ORG_OS_HEALTH_PORT=%d", port),
-		"ORG_OS_LOG_LEVEL=error",
+		"GARRISON_DATABASE_URL="+url,
+		`GARRISON_FAKE_AGENT_CMD=sh -c "echo ok"`,
+		fmt.Sprintf("GARRISON_HEALTH_PORT=%d", port),
+		"GARRISON_LOG_LEVEL=error",
 	)
 	out, err := cmd.CombinedOutput()
 	if err == nil {

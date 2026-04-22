@@ -38,16 +38,16 @@ agent subprocesses on work.ticket.created events.
 Flags:
   --version         Print version and exit.
   --help, -h        Print this message and exit.
-  --migrate         Run goose migrations against ORG_OS_DATABASE_URL and exit.
+  --migrate         Run goose migrations against GARRISON_DATABASE_URL and exit.
 
 Environment variables (daemon mode):
-  ORG_OS_DATABASE_URL        required   Postgres connection URL.
-  ORG_OS_FAKE_AGENT_CMD      required   Command template for the fake agent.
-  ORG_OS_POLL_INTERVAL       5s         Fallback poll interval (min 1s).
-  ORG_OS_SUBPROCESS_TIMEOUT  60s        Per-subprocess timeout.
-  ORG_OS_SHUTDOWN_GRACE      30s        Graceful shutdown deadline.
-  ORG_OS_HEALTH_PORT         8080       HTTP health server port.
-  ORG_OS_LOG_LEVEL           info       Log level (debug|info|warn|error).
+  GARRISON_DATABASE_URL        required   Postgres connection URL.
+  GARRISON_FAKE_AGENT_CMD      required   Command template for the fake agent.
+  GARRISON_POLL_INTERVAL       5s         Fallback poll interval (min 1s).
+  GARRISON_SUBPROCESS_TIMEOUT  60s        Per-subprocess timeout.
+  GARRISON_SHUTDOWN_GRACE      30s        Graceful shutdown deadline.
+  GARRISON_HEALTH_PORT         8080       HTTP health server port.
+  GARRISON_LOG_LEVEL           info       Log level (debug|info|warn|error).
 `
 
 func main() {

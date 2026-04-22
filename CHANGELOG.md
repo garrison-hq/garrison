@@ -93,7 +93,7 @@ Exactly one direct dependency added outside the locked list in
 `AGENTS.md` §"Supervisor (Go) — Locked dependency list":
 
 - `github.com/google/shlex` — POSIX-like argv splitter for
-  `ORG_OS_FAKE_AGENT_CMD`. Justified in the T008 commit; flagged
+  `GARRISON_FAKE_AGENT_CMD`. Justified in the T008 commit; flagged
   in the retro. Single-file, stdlib-only, no transitive deps.
 
 ### Deferred to M2+

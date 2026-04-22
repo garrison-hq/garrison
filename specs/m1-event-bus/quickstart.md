@@ -44,12 +44,12 @@ docker run -d --name garrison-pg \
 Then:
 
 ```sh
-export ORG_OS_DATABASE_URL='postgres://garrison:garrison@localhost:5432/garrison?sslmode=disable'
+export GARRISON_DATABASE_URL='postgres://garrison:garrison@localhost:5432/garrison?sslmode=disable'
 ```
 
 ### Option B — existing dev database
 
-Set `ORG_OS_DATABASE_URL` to any reachable Postgres 17+ URL.
+Set `GARRISON_DATABASE_URL` to any reachable Postgres 17+ URL.
 
 ## Migrations
 
@@ -78,18 +78,18 @@ VALUES ('Engineering', 'eng', 2);
 Required env vars:
 
 ```sh
-export ORG_OS_DATABASE_URL='postgres://garrison:garrison@localhost:5432/garrison?sslmode=disable'
-export ORG_OS_FAKE_AGENT_CMD='sh -c "echo hello from $TICKET_ID; sleep 2"'
+export GARRISON_DATABASE_URL='postgres://garrison:garrison@localhost:5432/garrison?sslmode=disable'
+export GARRISON_FAKE_AGENT_CMD='sh -c "echo hello from $TICKET_ID; sleep 2"'
 ```
 
 Optional env vars (defaults match [`contracts/cli.md`](./contracts/cli.md)):
 
 ```sh
-export ORG_OS_POLL_INTERVAL=5s
-export ORG_OS_SUBPROCESS_TIMEOUT=60s
-export ORG_OS_SHUTDOWN_GRACE=30s
-export ORG_OS_HEALTH_PORT=8080
-export ORG_OS_LOG_LEVEL=info
+export GARRISON_POLL_INTERVAL=5s
+export GARRISON_SUBPROCESS_TIMEOUT=60s
+export GARRISON_SHUTDOWN_GRACE=30s
+export GARRISON_HEALTH_PORT=8080
+export GARRISON_LOG_LEVEL=info
 ```
 
 Then:
@@ -108,7 +108,7 @@ Expected startup sequence in logs (one JSON line per record):
 6. LISTEN on `work.ticket.created` started
 7. health server listening on `:8080`
 
-`curl http://localhost:8080/health` returns `200` once step 5 has written `LastPollAt`. It returns `503` before that, and any time a subsequent ping fails or `time.Since(LastPollAt) > 2 * ORG_OS_POLL_INTERVAL`.
+`curl http://localhost:8080/health` returns `200` once step 5 has written `LastPollAt`. It returns `503` before that, and any time a subsequent ping fails or `time.Since(LastPollAt) > 2 * GARRISON_POLL_INTERVAL`.
 
 ## Fire an event
 
@@ -170,7 +170,7 @@ Expected shutdown behaviour:
 
 - Root context cancelled.
 - Each in-flight subprocess receives SIGTERM; if still alive after 5s, SIGKILL.
-- `/health` begins refusing connections (server enters graceful shutdown for `ORG_OS_SHUTDOWN_GRACE`).
+- `/health` begins refusing connections (server enters graceful shutdown for `GARRISON_SHUTDOWN_GRACE`).
 - Process exits `0` if no SIGKILL escalations occurred, `5` if any subprocess required SIGKILL.
 
 ## Docker image
@@ -179,16 +179,16 @@ Expected shutdown behaviour:
 make docker
 ```
 
-Produces `garrison/supervisor:dev`. The image is distroless-static and contains only the binary; it exposes no default port (the container orchestrator maps `ORG_OS_HEALTH_PORT`). Run:
+Produces `garrison/supervisor:dev`. The image is distroless-static and contains only the binary; it exposes no default port (the container orchestrator maps `GARRISON_HEALTH_PORT`). Run:
 
 ```sh
-docker run --rm -e ORG_OS_DATABASE_URL=... -e ORG_OS_FAKE_AGENT_CMD=... -p 8080:8080 garrison/supervisor:dev
+docker run --rm -e GARRISON_DATABASE_URL=... -e GARRISON_FAKE_AGENT_CMD=... -p 8080:8080 garrison/supervisor:dev
 ```
 
 For `--migrate` mode:
 
 ```sh
-docker run --rm -e ORG_OS_DATABASE_URL=... garrison/supervisor:dev --migrate
+docker run --rm -e GARRISON_DATABASE_URL=... garrison/supervisor:dev --migrate
 ```
 
 ## Regenerating sqlc code
@@ -207,6 +207,6 @@ Commits the regenerated files under `supervisor/internal/store/` to the branch.
 |---------|--------------|-----|
 | Exit code `4` on startup | Another supervisor holds the FR-018 advisory lock on the same DB | Stop the other instance; advisory locks release when the session closes. |
 | Exit code `3` on `--migrate` | Migration SQL error | Read the error; inspect `goose_db_version` table. |
-| `/health` stuck at 503 | Initial connect retry in progress, or Postgres unreachable | Check `ORG_OS_DATABASE_URL`; look at supervisor log records for connect errors. |
+| `/health` stuck at 503 | Initial connect retry in progress, or Postgres unreachable | Check `GARRISON_DATABASE_URL`; look at supervisor log records for connect errors. |
 | Events stay with `processed_at IS NULL` | Cap is 0 for that department, or all running slots occupied | Raise `departments.concurrency_cap`; fallback poll will pick up deferred events. |
-| Subprocess stuck, eventually timeout | `ORG_OS_SUBPROCESS_TIMEOUT` reached | Expected; row becomes `status='timeout'`, `exit_reason='timeout'`. |
+| Subprocess stuck, eventually timeout | `GARRISON_SUBPROCESS_TIMEOUT` reached | Expected; row becomes `status='timeout'`, `exit_reason='timeout'`. |

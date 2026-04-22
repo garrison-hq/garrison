@@ -27,9 +27,9 @@ var migrationsFS embed.FS
 // the schema to head. Exits ExitOK on success, ExitMigrateFailed on any
 // connection/SQL error per contracts/cli.md.
 func runMigrate() int {
-	dbURL := os.Getenv("ORG_OS_DATABASE_URL")
+	dbURL := os.Getenv("GARRISON_DATABASE_URL")
 	if dbURL == "" {
-		fmt.Fprintln(os.Stderr, "supervisor: --migrate requires ORG_OS_DATABASE_URL")
+		fmt.Fprintln(os.Stderr, "supervisor: --migrate requires GARRISON_DATABASE_URL")
 		return ExitMigrateFailed
 	}
 

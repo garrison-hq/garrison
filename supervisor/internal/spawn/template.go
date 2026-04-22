@@ -19,7 +19,7 @@ import (
 // ErrEmptyCommand is returned when rawCmd parses to zero argv elements.
 // Surfacing this as a typed error (rather than letting exec.Command panic on
 // an empty name) makes the misconfiguration legible at startup.
-var ErrEmptyCommand = errors.New("spawn: ORG_OS_FAKE_AGENT_CMD is empty after parsing")
+var ErrEmptyCommand = errors.New("spawn: GARRISON_FAKE_AGENT_CMD is empty after parsing")
 
 // BuildCommand parses rawCmd as a POSIX-like shell command line via shlex,
 // substitutes the literal tokens $TICKET_ID and $DEPARTMENT_ID in every argv
@@ -29,7 +29,7 @@ var ErrEmptyCommand = errors.New("spawn: ORG_OS_FAKE_AGENT_CMD is empty after pa
 // the fake-agent shell script consumes the values in M1, env vars are how a
 // real agent (Claude Code) will consume them post-M1.
 //
-// rawCmd comes straight from the ORG_OS_FAKE_AGENT_CMD env var. ticketID and
+// rawCmd comes straight from the GARRISON_FAKE_AGENT_CMD env var. ticketID and
 // departmentID are canonical-form UUID strings; the caller formats pgtype.UUID
 // before invoking this function so template.go stays free of pgx and unit-
 // testable without a database.

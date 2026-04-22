@@ -182,7 +182,7 @@ docker run -d --name pg-garrison -p 5432:5432 \
 # 2. Build and run migrations.
 cd supervisor
 make build
-export ORG_OS_DATABASE_URL='postgres://postgres:postgres@localhost:5432/orgos?sslmode=disable'
+export GARRISON_DATABASE_URL='postgres://postgres:postgres@localhost:5432/orgos?sslmode=disable'
 ./bin/supervisor --migrate
 
 # 3. Insert a department.
@@ -190,7 +190,7 @@ docker exec pg-garrison psql -U postgres orgos -c \
   "INSERT INTO departments (slug, name, concurrency_cap) VALUES ('engineering', 'Engineering', 2);"
 
 # 4. Run the supervisor with a placeholder agent command.
-export ORG_OS_FAKE_AGENT_CMD='sh -c "echo hello from $TICKET_ID; sleep 2"'
+export GARRISON_FAKE_AGENT_CMD='sh -c "echo hello from $TICKET_ID; sleep 2"'
 ./bin/supervisor
 
 # 5. In another shell, insert a ticket and watch the supervisor react.
@@ -230,12 +230,12 @@ All configuration is env-driven. Defaults in parentheses.
 
 | Variable | Purpose | Default |
 |---|---|---|
-| `ORG_OS_DATABASE_URL` | Postgres DSN. | *required* |
-| `ORG_OS_POLL_INTERVAL` | Fallback-poll cadence. | `2s` |
-| `ORG_OS_SUBPROCESS_TIMEOUT` | Per-subprocess hard timeout. | `60s` |
-| `ORG_OS_SHUTDOWN_GRACE` | SIGTERM-to-forced-exit budget. | `30s` |
-| `ORG_OS_HEALTH_PORT` | `/health` HTTP port. | `8080` |
-| `ORG_OS_FAKE_AGENT_CMD` | Placeholder subprocess command (M1 only). | *required* |
+| `GARRISON_DATABASE_URL` | Postgres DSN. | *required* |
+| `GARRISON_POLL_INTERVAL` | Fallback-poll cadence. | `2s` |
+| `GARRISON_SUBPROCESS_TIMEOUT` | Per-subprocess hard timeout. | `60s` |
+| `GARRISON_SHUTDOWN_GRACE` | SIGTERM-to-forced-exit budget. | `30s` |
+| `GARRISON_HEALTH_PORT` | `/health` HTTP port. | `8080` |
+| `GARRISON_FAKE_AGENT_CMD` | Placeholder subprocess command (M1 only). | *required* |
 
 Config is immutable per process. SIGHUP is treated as SIGTERM — see
 the M1 retro for why.

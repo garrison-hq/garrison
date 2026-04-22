@@ -39,7 +39,7 @@ Please include:
 - A description of the issue and where in the code you believe it
   lives (file path + line number if you have one).
 - The conditions under which the issue is exploitable (e.g. "needs
-  `ORG_OS_FAKE_AGENT_CMD` to be attacker-controlled").
+  `GARRISON_FAKE_AGENT_CMD` to be attacker-controlled").
 - A minimal reproduction if you have one. A failing
   `integration_test.go`-style test case is ideal but not required.
 - Whether you have disclosed this anywhere else and on what
@@ -87,7 +87,7 @@ Examples that qualify:
 
 Examples that do **not** qualify and should go in a normal issue:
 
-- "The supervisor executes `ORG_OS_FAKE_AGENT_CMD` as given" — yes;
+- "The supervisor executes `GARRISON_FAKE_AGENT_CMD` as given" — yes;
   that's the point. It's an operator-supplied command. The env
   var is a trust boundary.
 - "Postgres is reachable on a known port" — operator
@@ -102,7 +102,7 @@ Examples that do **not** qualify and should go in a normal issue:
 
 For reference, the M1 supervisor's most sensitive code paths are:
 
-- `ORG_OS_FAKE_AGENT_CMD` is a **trust boundary**. The supervisor
+- `GARRISON_FAKE_AGENT_CMD` is a **trust boundary**. The supervisor
   splits it with `shlex` and `exec`s it directly. An attacker who
   can set this env var has arbitrary code execution as the
   supervisor user. This is by design for the fake-agent placeholder

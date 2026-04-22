@@ -140,15 +140,15 @@ Env vars only; typed `config.Config` struct validated at startup. No file-based 
 
 | Env var | Type / default | Source requirement |
 |---------|----------------|--------------------|
-| `ORG_OS_DATABASE_URL` | string, required | FR-001 (connection) |
-| `ORG_OS_FAKE_AGENT_CMD` | string, required | m1-context.md "Subprocess contract" |
-| `ORG_OS_POLL_INTERVAL` | duration, default `5s`, min `1s` | NFR-001 |
-| `ORG_OS_SUBPROCESS_TIMEOUT` | duration, default `60s` | NFR-003 |
-| `ORG_OS_SHUTDOWN_GRACE` | duration, default `30s` | NFR-004 |
-| `ORG_OS_HEALTH_PORT` | uint16, default `8080` | FR-016 |
-| `ORG_OS_LOG_LEVEL` | enum `debug\|info\|warn\|error`, default `info` | NFR-008 |
+| `GARRISON_DATABASE_URL` | string, required | FR-001 (connection) |
+| `GARRISON_FAKE_AGENT_CMD` | string, required | m1-context.md "Subprocess contract" |
+| `GARRISON_POLL_INTERVAL` | duration, default `5s`, min `1s` | NFR-001 |
+| `GARRISON_SUBPROCESS_TIMEOUT` | duration, default `60s` | NFR-003 |
+| `GARRISON_SHUTDOWN_GRACE` | duration, default `30s` | NFR-004 |
+| `GARRISON_HEALTH_PORT` | uint16, default `8080` | FR-016 |
+| `GARRISON_LOG_LEVEL` | enum `debug\|info\|warn\|error`, default `info` | NFR-008 |
 
-`Config` struct fields mirror these one-to-one with Go-native types (`time.Duration`, `uint16`, custom `slog.Level`). `Load()` fails non-zero at startup on: missing required var, non-positive durations, `ORG_OS_POLL_INTERVAL < 1s`, invalid log level, unparseable URL. Reconnect backoff (NFR-002), per-subprocess SIGTERM-grace (NFR-005), and recovery window (NFR-006) are **not** env-configurable in M1; they are exported constants in `internal/events` and `internal/spawn` and `internal/recovery` respectively.
+`Config` struct fields mirror these one-to-one with Go-native types (`time.Duration`, `uint16`, custom `slog.Level`). `Load()` fails non-zero at startup on: missing required var, non-positive durations, `GARRISON_POLL_INTERVAL < 1s`, invalid log level, unparseable URL. Reconnect backoff (NFR-002), per-subprocess SIGTERM-grace (NFR-005), and recovery window (NFR-006) are **not** env-configurable in M1; they are exported constants in `internal/events` and `internal/spawn` and `internal/recovery` respectively.
 
 ## Supervisor lifecycle and state machine
 
@@ -234,7 +234,7 @@ Per m1-context.md "Subprocess contract" and spec FR-004/FR-005/FR-010/FR-015. Se
 1. Look up department (for slug/name used in logs) and ticket from the event's `event_id`.
 2. Run concurrency gate (`internal/concurrency.CheckCap`). Defer if blocked.
 3. Command template substitution (decision 7 + gap 2):
-   - Go-side replacement of literal `$TICKET_ID` and `$DEPARTMENT_ID` tokens in the argv produced by shell-splitting `ORG_OS_FAKE_AGENT_CMD` (use `github.com/google/shlex` — **open question: this is one dep outside the locked list; propose accepting it, else implement minimal whitespace-split with documented limitations**).
+   - Go-side replacement of literal `$TICKET_ID` and `$DEPARTMENT_ID` tokens in the argv produced by shell-splitting `GARRISON_FAKE_AGENT_CMD` (use `github.com/google/shlex` — **open question: this is one dep outside the locked list; propose accepting it, else implement minimal whitespace-split with documented limitations**).
    - Set `TICKET_ID` and `DEPARTMENT_ID` as env vars on the subprocess in addition.
 4. `INSERT INTO agent_instances (status='running', started_at=NOW(), ...)` → returning `id`.
 5. `ctx, cancel := context.WithTimeout(rootCtx, cfg.SubprocessTimeout)` → `exec.CommandContext(ctx, argv[0], argv[1:]...)`. Set `Stdout`/`Stderr` to `io.Pipe` halves; spawn two goroutines per stream running `bufio.Scanner` and emitting one `slog` record per line with `stream="stdout"|"stderr"` and the domain fields attached via `slog.With`.
@@ -380,10 +380,10 @@ Test files named at the function level, grouped by what they verify. Build tags:
 ### Unit tests (no Postgres)
 
 **`internal/config/config_test.go`**
-- `TestLoadDefaults` — only `ORG_OS_DATABASE_URL` and `ORG_OS_FAKE_AGENT_CMD` set; all other fields equal documented defaults.
-- `TestLoadRejectsSubSecondPoll` — `ORG_OS_POLL_INTERVAL=500ms` → Load returns error.
-- `TestLoadRejectsMissingRequired` — missing `ORG_OS_DATABASE_URL` → Load returns error naming the missing var.
-- `TestLoadRejectsInvalidLogLevel` — `ORG_OS_LOG_LEVEL=chatty` → error.
+- `TestLoadDefaults` — only `GARRISON_DATABASE_URL` and `GARRISON_FAKE_AGENT_CMD` set; all other fields equal documented defaults.
+- `TestLoadRejectsSubSecondPoll` — `GARRISON_POLL_INTERVAL=500ms` → Load returns error.
+- `TestLoadRejectsMissingRequired` — missing `GARRISON_DATABASE_URL` → Load returns error naming the missing var.
+- `TestLoadRejectsInvalidLogLevel` — `GARRISON_LOG_LEVEL=chatty` → error.
 
 **`internal/concurrency/cap_test.go`**
 - `TestCheckCapAllowsUnderCap` — cap=3, running=2 → allowed=true.
@@ -427,7 +427,7 @@ Test files named at the function level, grouped by what they verify. Build tags:
 **`supervisor/chaos_test.go`**
 - `TestReconnectCatchesMissedEvents` — testcontainer Postgres is paused mid-run; 3 tickets inserted during the outage; unpause; all 3 complete within one poll interval after reconnect. Spec US3.
 - `TestSIGKILLSubprocessRecordedFailed` — spawn a subprocess, SIGKILL the process externally, observe `agent_instances.status='failed'` with `exit_reason` containing the signal. Spec US4 edge case.
-- `TestGracefulShutdownWithInflight` — long-running fake agent, send SIGTERM to supervisor; verify subprocess receives SIGTERM, exits, supervisor exits within `ORG_OS_SHUTDOWN_GRACE`. Spec US4 AC1/AC2.
+- `TestGracefulShutdownWithInflight` — long-running fake agent, send SIGTERM to supervisor; verify subprocess receives SIGTERM, exits, supervisor exits within `GARRISON_SHUTDOWN_GRACE`. Spec US4 AC1/AC2.
 
 ### Test coverage policy
 

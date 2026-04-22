@@ -12,15 +12,15 @@ for M1" was run unmodified, in order, from a clean database.
 - `garrison/supervisor:dev` image id `7c7729648f66` (24.3 MB alpine)
 - `postgres:17`, `POSTGRES_DB=orgos`, `POSTGRES_PASSWORD=postgres`
 - network `garrison-m1` (bridge)
-- `ORG_OS_DATABASE_URL=postgres://postgres:postgres@pg-m1:5432/orgos?sslmode=disable`
-- `ORG_OS_POLL_INTERVAL=2s`
-- `ORG_OS_SHUTDOWN_GRACE=30s`
-- `ORG_OS_FAKE_AGENT_CMD` varies per step (noted inline)
+- `GARRISON_DATABASE_URL=postgres://postgres:postgres@pg-m1:5432/orgos?sslmode=disable`
+- `GARRISON_POLL_INTERVAL=2s`
+- `GARRISON_SHUTDOWN_GRACE=30s`
+- `GARRISON_FAKE_AGENT_CMD` varies per step (noted inline)
 
 ## Step 1 — Run the migrations; the schema exists
 
 ```
-$ docker run --rm --network garrison-m1 -e ORG_OS_DATABASE_URL=... garrison/supervisor:dev --migrate
+$ docker run --rm --network garrison-m1 -e GARRISON_DATABASE_URL=... garrison/supervisor:dev --migrate
 {"level":"INFO","msg":"OK   20260421000001_initial_schema.sql (10ms)"}
 {"level":"INFO","msg":"OK   20260421000002_event_trigger.sql (3.45ms)"}
 {"level":"INFO","msg":"goose: successfully migrated database to version: 20260421000002"}
@@ -73,7 +73,7 @@ Result:
 
 ## Step 3 — Start the supervisor binary
 
-Started with `ORG_OS_FAKE_AGENT_CMD='sh -c "sleep 2; echo done"'`
+Started with `GARRISON_FAKE_AGENT_CMD='sh -c "sleep 2; echo done"'`
 to give each subprocess a ~2s runtime window so the cap is
 observable during sampling in step 5.
 
@@ -177,7 +177,7 @@ All three have `status='succeeded'` and `exit_reason='exit_code_0'`.
 
 ## Step 8 — SIGTERM with in-flight subprocess; clean exit within 30s
 
-Restarted supervisor with `ORG_OS_FAKE_AGENT_CMD='sh -c "sleep 15; echo done"'`
+Restarted supervisor with `GARRISON_FAKE_AGENT_CMD='sh -c "sleep 15; echo done"'`
 and inserted one ticket `sigterm-longjob`. After 2s, verified:
 
 ```
@@ -209,7 +209,7 @@ Supervisor log excerpt:
 {"level":"INFO","msg":"shutdown complete"}
 ```
 
-268ms is well inside the 30s `ORG_OS_SHUTDOWN_GRACE` budget; exit
+268ms is well inside the 30s `GARRISON_SHUTDOWN_GRACE` budget; exit
 code 0; in-flight subprocess correctly landed `failed` +
 `supervisor_shutdown`.
 

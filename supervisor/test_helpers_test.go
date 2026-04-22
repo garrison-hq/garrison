@@ -42,21 +42,21 @@ func startSupervisor(t *testing.T, opts supervisorOpts) (int, *exec.Cmd) {
 	port := mustFreePort(t)
 
 	env := append(os.Environ(),
-		"ORG_OS_DATABASE_URL="+url,
-		"ORG_OS_FAKE_AGENT_CMD="+opts.FakeAgentCmd,
-		fmt.Sprintf("ORG_OS_HEALTH_PORT=%d", port),
+		"GARRISON_DATABASE_URL="+url,
+		"GARRISON_FAKE_AGENT_CMD="+opts.FakeAgentCmd,
+		fmt.Sprintf("GARRISON_HEALTH_PORT=%d", port),
 	)
 	if opts.PollInterval != "" {
-		env = append(env, "ORG_OS_POLL_INTERVAL="+opts.PollInterval)
+		env = append(env, "GARRISON_POLL_INTERVAL="+opts.PollInterval)
 	}
 	if opts.SubprocessTimeout != "" {
-		env = append(env, "ORG_OS_SUBPROCESS_TIMEOUT="+opts.SubprocessTimeout)
+		env = append(env, "GARRISON_SUBPROCESS_TIMEOUT="+opts.SubprocessTimeout)
 	}
 	if opts.ShutdownGrace != "" {
-		env = append(env, "ORG_OS_SHUTDOWN_GRACE="+opts.ShutdownGrace)
+		env = append(env, "GARRISON_SHUTDOWN_GRACE="+opts.ShutdownGrace)
 	}
 	if opts.LogLevel != "" {
-		env = append(env, "ORG_OS_LOG_LEVEL="+opts.LogLevel)
+		env = append(env, "GARRISON_LOG_LEVEL="+opts.LogLevel)
 	}
 
 	cmd := exec.Command(bin)

@@ -43,7 +43,7 @@ Total: **18 tasks**.
 - [ ] T003 Author goose migrations for the M1 schema and trigger
   - **Depends on**: T001
   - **Files**: [migrations/20260421000001_initial_schema.sql](../../migrations/20260421000001_initial_schema.sql), [migrations/20260421000002_event_trigger.sql](../../migrations/20260421000002_event_trigger.sql)
-  - **Completion condition**: running `goose -dir migrations postgres "$ORG_OS_DATABASE_URL" up` against a throwaway Postgres (a one-off `docker run postgres:17` is fine) applies both migrations without error, creates the four tables and two partial indexes verbatim from [../_context/m1-context.md](../_context/m1-context.md) §"Data model for M1", installs the `emit_ticket_created` trigger function and `ticket_created_emit` trigger, and `goose down` rolls both back cleanly. No Go code depends on this yet.
+  - **Completion condition**: running `goose -dir migrations postgres "$GARRISON_DATABASE_URL" up` against a throwaway Postgres (a one-off `docker run postgres:17` is fine) applies both migrations without error, creates the four tables and two partial indexes verbatim from [../_context/m1-context.md](../_context/m1-context.md) §"Data model for M1", installs the `emit_ticket_created` trigger function and `ticket_created_emit` trigger, and `goose down` rolls both back cleanly. No Go code depends on this yet.
   - **Out of scope for this task**: embedding goose into the binary (that is T012's `--migrate` subcommand), any `sqlc` code, any test data seeding.
 
 - [ ] T004 Author sqlc query SQL, configure sqlc, and commit generated Go
@@ -77,7 +77,7 @@ Total: **18 tasks**.
 - [ ] T008 Implement command-template parsing in `internal/spawn` with unit tests
   - **Depends on**: T002
   - **Files**: [supervisor/internal/spawn/template.go](../../supervisor/internal/spawn/template.go), [supervisor/internal/spawn/template_test.go](../../supervisor/internal/spawn/template_test.go)
-  - **Completion condition**: a pure function takes the raw `ORG_OS_FAKE_AGENT_CMD` string plus `TICKET_ID` and `DEPARTMENT_ID` UUIDs and returns an `*exec.Cmd` with both literal-token substitution in argv and the two env vars set, per [plan.md](./plan.md) §"Subprocess lifecycle manager" step 3. Three unit tests (`TestSubstituteLiteralTokens`, `TestSubstituteAlsoSetsEnv`, `TestShlexRejectsUnterminatedQuote`) pass. The shlex-vs-whitespace decision is resolved in code and noted in the commit message per AGENTS.md soft rule on locked deps.
+  - **Completion condition**: a pure function takes the raw `GARRISON_FAKE_AGENT_CMD` string plus `TICKET_ID` and `DEPARTMENT_ID` UUIDs and returns an `*exec.Cmd` with both literal-token substitution in argv and the two env vars set, per [plan.md](./plan.md) §"Subprocess lifecycle manager" step 3. Three unit tests (`TestSubstituteLiteralTokens`, `TestSubstituteAlsoSetsEnv`, `TestShlexRejectsUnterminatedQuote`) pass. The shlex-vs-whitespace decision is resolved in code and noted in the commit message per AGENTS.md soft rule on locked deps.
   - **Out of scope for this task**: actually running the subprocess, any `agent_instances` row writes, any context-timeout plumbing.
 
 - [ ] T009 Implement subprocess lifecycle, status classification, and dedupe transaction in `internal/spawn`
@@ -121,7 +121,7 @@ Total: **18 tasks**.
 - [ ] T014 Golden-path end-to-end test — insert one ticket, observe one `succeeded` `agent_instances` row
   - **Depends on**: T012, T013
   - **Files**: [supervisor/integration_test.go](../../supervisor/integration_test.go)
-  - **Completion condition**: `TestEndToEndTicketFlow` (tag `integration`) boots a Postgres container, runs the supervisor binary as a child process via `exec.CommandContext` with `ORG_OS_FAKE_AGENT_CMD='sh -c "echo ok; exit 0"'`, inserts a department and a ticket via the testdb pool, waits up to 10s for exactly one `agent_instances` row with `status='succeeded'`, and verifies the corresponding `event_outbox.processed_at` is set. This is the M1 smoke test: if this passes, the happy path works end-to-end.
+  - **Completion condition**: `TestEndToEndTicketFlow` (tag `integration`) boots a Postgres container, runs the supervisor binary as a child process via `exec.CommandContext` with `GARRISON_FAKE_AGENT_CMD='sh -c "echo ok; exit 0"'`, inserts a department and a ticket via the testdb pool, waits up to 10s for exactly one `agent_instances` row with `status='succeeded'`, and verifies the corresponding `event_outbox.processed_at` is set. This is the M1 smoke test: if this passes, the happy path works end-to-end.
   - **Out of scope for this task**: concurrency, reconnect, shutdown, or recovery scenarios — those land in T015 and T016.
 
 - [ ] T015 Remaining integration tests covering US2, US3 startup, recovery, `/health`, and edge cases
@@ -133,7 +133,7 @@ Total: **18 tasks**.
 - [ ] T016 Chaos tests for reconnect, external SIGKILL, and graceful shutdown
   - **Depends on**: T015
   - **Files**: [supervisor/chaos_test.go](../../supervisor/chaos_test.go)
-  - **Completion condition**: `make test-chaos` (tag `chaos`) passes `TestReconnectCatchesMissedEvents` (pause Postgres container, insert 3 tickets via separate connection after unpause — adjust per container semantics, unpause, expect all 3 complete within one poll interval), `TestSIGKILLSubprocessRecordedFailed` (spawn a long-sleep subprocess, `kill -9` it externally, expect `status='failed'` with signal in `exit_reason`), and `TestGracefulShutdownWithInflight` (long-sleep agent, SIGTERM the supervisor, subprocess receives SIGTERM, supervisor exits within `ORG_OS_SHUTDOWN_GRACE`).
+  - **Completion condition**: `make test-chaos` (tag `chaos`) passes `TestReconnectCatchesMissedEvents` (pause Postgres container, insert 3 tickets via separate connection after unpause — adjust per container semantics, unpause, expect all 3 complete within one poll interval), `TestSIGKILLSubprocessRecordedFailed` (spawn a long-sleep subprocess, `kill -9` it externally, expect `status='failed'` with signal in `exit_reason`), and `TestGracefulShutdownWithInflight` (long-sleep agent, SIGTERM the supervisor, subprocess receives SIGTERM, supervisor exits within `GARRISON_SHUTDOWN_GRACE`).
   - **Out of scope for this task**: performance benchmarks, long-soak runs — neither is an M1 requirement.
 
 ---

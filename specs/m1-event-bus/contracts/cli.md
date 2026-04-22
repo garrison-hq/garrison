@@ -12,7 +12,7 @@ One binary: `supervisor` (built from `supervisor/cmd/supervisor`).
 |------|----------|-----------|
 | `--version` | Prints `supervisor vX.Y.Z` (from `-ldflags="-X main.version=..."`) to stdout and exits. | `0` |
 | `--help` / `-h` | Prints usage (including the env-var table) to stdout and exits. | `0` |
-| `--migrate` | Runs goose `UpContext` against `ORG_OS_DATABASE_URL`, prints the applied migrations, and exits. | `0` on success, non-zero on any migration error. |
+| `--migrate` | Runs goose `UpContext` against `GARRISON_DATABASE_URL`, prints the applied migrations, and exits. | `0` on success, non-zero on any migration error. |
 | (no flags) | Runs the supervisor daemon until `SIGTERM`/`SIGINT`. | `0` on clean shutdown, non-zero if any subprocess required a SIGKILL escalation (FR-010/NFR-005) or if the FR-018 advisory lock was already held at startup. |
 
 ## Positional arguments
@@ -23,21 +23,21 @@ None. Rejects any positional argument with a non-zero exit and a usage message.
 
 | Env var | Required | Default |
 |---------|----------|---------|
-| `ORG_OS_DATABASE_URL` | Yes | — |
-| `ORG_OS_FAKE_AGENT_CMD` | Yes for daemon mode | — (not read by `--version`, `--help`; required for `--migrate` because the URL comes from the same var) |
-| `ORG_OS_POLL_INTERVAL` | No | `5s` |
-| `ORG_OS_SUBPROCESS_TIMEOUT` | No | `60s` |
-| `ORG_OS_SHUTDOWN_GRACE` | No | `30s` |
-| `ORG_OS_HEALTH_PORT` | No | `8080` |
-| `ORG_OS_LOG_LEVEL` | No | `info` |
+| `GARRISON_DATABASE_URL` | Yes | — |
+| `GARRISON_FAKE_AGENT_CMD` | Yes for daemon mode | — (not read by `--version`, `--help`; required for `--migrate` because the URL comes from the same var) |
+| `GARRISON_POLL_INTERVAL` | No | `5s` |
+| `GARRISON_SUBPROCESS_TIMEOUT` | No | `60s` |
+| `GARRISON_SHUTDOWN_GRACE` | No | `30s` |
+| `GARRISON_HEALTH_PORT` | No | `8080` |
+| `GARRISON_LOG_LEVEL` | No | `info` |
 
-`--migrate` reads only `ORG_OS_DATABASE_URL` and (for log level) `ORG_OS_LOG_LEVEL`. Other env vars are not validated by the migrate path; the daemon path validates all of them.
+`--migrate` reads only `GARRISON_DATABASE_URL` and (for log level) `GARRISON_LOG_LEVEL`. Other env vars are not validated by the migrate path; the daemon path validates all of them.
 
 ## Signals (daemon mode)
 
 | Signal | Behavior |
 |--------|----------|
-| `SIGTERM` | Graceful shutdown (FR-009, FR-010). Root context cancelled; in-flight subprocesses receive SIGTERM → 5s → SIGKILL; binary exits within `ORG_OS_SHUTDOWN_GRACE`. |
+| `SIGTERM` | Graceful shutdown (FR-009, FR-010). Root context cancelled; in-flight subprocesses receive SIGTERM → 5s → SIGKILL; binary exits within `GARRISON_SHUTDOWN_GRACE`. |
 | `SIGINT` | Same as SIGTERM. |
 | `SIGHUP` | Open question: plan proposes identical to SIGTERM; confirm before implementation. |
 | `SIGKILL` (not catchable) | Binary dies immediately; stale `running` rows reconciled on next startup via FR-011. |

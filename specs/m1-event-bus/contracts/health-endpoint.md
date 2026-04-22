@@ -29,7 +29,7 @@ From the FR-017 clarification and plan's startup ordering: `/health` is served a
 
 ## Binding and authentication
 
-- Binds `0.0.0.0:$ORG_OS_HEALTH_PORT` (default `8080`).
+- Binds `0.0.0.0:$GARRISON_HEALTH_PORT` (default `8080`).
 - **No authentication** in M1. Network-level exposure is delegated to the container runtime and Coolify routing rules.
 
 ## Shutdown

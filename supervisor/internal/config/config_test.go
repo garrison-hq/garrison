@@ -15,16 +15,16 @@ const (
 )
 
 var allEnvVars = []string{
-	"ORG_OS_DATABASE_URL",
-	"ORG_OS_FAKE_AGENT_CMD",
-	"ORG_OS_POLL_INTERVAL",
-	"ORG_OS_SUBPROCESS_TIMEOUT",
-	"ORG_OS_SHUTDOWN_GRACE",
-	"ORG_OS_HEALTH_PORT",
-	"ORG_OS_LOG_LEVEL",
+	"GARRISON_DATABASE_URL",
+	"GARRISON_FAKE_AGENT_CMD",
+	"GARRISON_POLL_INTERVAL",
+	"GARRISON_SUBPROCESS_TIMEOUT",
+	"GARRISON_SHUTDOWN_GRACE",
+	"GARRISON_HEALTH_PORT",
+	"GARRISON_LOG_LEVEL",
 }
 
-// clearAll unsets every ORG_OS_* env var the config package reads, so a test
+// clearAll unsets every GARRISON_* env var the config package reads, so a test
 // starts from a known-empty environment regardless of the shell it runs in.
 // t.Setenv handles restoration on test cleanup.
 func clearAll(t *testing.T) {
@@ -36,8 +36,8 @@ func clearAll(t *testing.T) {
 
 func TestLoadDefaults(t *testing.T) {
 	clearAll(t)
-	t.Setenv("ORG_OS_DATABASE_URL", validDBURL)
-	t.Setenv("ORG_OS_FAKE_AGENT_CMD", validFakeCmd)
+	t.Setenv("GARRISON_DATABASE_URL", validDBURL)
+	t.Setenv("GARRISON_FAKE_AGENT_CMD", validFakeCmd)
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -68,43 +68,43 @@ func TestLoadDefaults(t *testing.T) {
 
 func TestLoadRejectsSubSecondPoll(t *testing.T) {
 	clearAll(t)
-	t.Setenv("ORG_OS_DATABASE_URL", validDBURL)
-	t.Setenv("ORG_OS_FAKE_AGENT_CMD", validFakeCmd)
-	t.Setenv("ORG_OS_POLL_INTERVAL", "500ms")
+	t.Setenv("GARRISON_DATABASE_URL", validDBURL)
+	t.Setenv("GARRISON_FAKE_AGENT_CMD", validFakeCmd)
+	t.Setenv("GARRISON_POLL_INTERVAL", "500ms")
 
 	_, err := config.Load()
 	if err == nil {
 		t.Fatalf("Load(): want error for sub-second poll interval, got nil")
 	}
-	if !strings.Contains(err.Error(), "ORG_OS_POLL_INTERVAL") {
-		t.Errorf("error = %v; want it to mention ORG_OS_POLL_INTERVAL", err)
+	if !strings.Contains(err.Error(), "GARRISON_POLL_INTERVAL") {
+		t.Errorf("error = %v; want it to mention GARRISON_POLL_INTERVAL", err)
 	}
 }
 
 func TestLoadRejectsMissingRequired(t *testing.T) {
 	clearAll(t)
-	t.Setenv("ORG_OS_FAKE_AGENT_CMD", validFakeCmd)
+	t.Setenv("GARRISON_FAKE_AGENT_CMD", validFakeCmd)
 
 	_, err := config.Load()
 	if err == nil {
-		t.Fatalf("Load(): want error for missing ORG_OS_DATABASE_URL, got nil")
+		t.Fatalf("Load(): want error for missing GARRISON_DATABASE_URL, got nil")
 	}
-	if !strings.Contains(err.Error(), "ORG_OS_DATABASE_URL") {
-		t.Errorf("error = %v; want it to name the missing var ORG_OS_DATABASE_URL", err)
+	if !strings.Contains(err.Error(), "GARRISON_DATABASE_URL") {
+		t.Errorf("error = %v; want it to name the missing var GARRISON_DATABASE_URL", err)
 	}
 }
 
 func TestLoadRejectsInvalidLogLevel(t *testing.T) {
 	clearAll(t)
-	t.Setenv("ORG_OS_DATABASE_URL", validDBURL)
-	t.Setenv("ORG_OS_FAKE_AGENT_CMD", validFakeCmd)
-	t.Setenv("ORG_OS_LOG_LEVEL", "chatty")
+	t.Setenv("GARRISON_DATABASE_URL", validDBURL)
+	t.Setenv("GARRISON_FAKE_AGENT_CMD", validFakeCmd)
+	t.Setenv("GARRISON_LOG_LEVEL", "chatty")
 
 	_, err := config.Load()
 	if err == nil {
 		t.Fatalf("Load(): want error for invalid log level, got nil")
 	}
-	if !strings.Contains(err.Error(), "ORG_OS_LOG_LEVEL") {
-		t.Errorf("error = %v; want it to mention ORG_OS_LOG_LEVEL", err)
+	if !strings.Contains(err.Error(), "GARRISON_LOG_LEVEL") {
+		t.Errorf("error = %v; want it to mention GARRISON_LOG_LEVEL", err)
 	}
 }
