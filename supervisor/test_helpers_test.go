@@ -21,6 +21,7 @@ import (
 
 	"github.com/garrison-hq/garrison/supervisor/internal/store"
 	"github.com/garrison-hq/garrison/supervisor/internal/testdb"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -46,6 +47,19 @@ type supervisorOpts struct {
 	// HomeOverride sets HOME for the supervisor subprocess (used by the
 	// session-persistence test to scope claude's writes under a tempdir).
 	HomeOverride string
+
+	// SupervisorBinOverride forwards GARRISON_SUPERVISOR_BIN_OVERRIDE
+	// into the daemon env. T018 BrokenMCPConfig test points this at
+	// /bin/does-not-exist so the MCP server command in the per-spawn
+	// config is unrunnable, forcing Claude to report postgres.status
+	// =failed at init.
+	SupervisorBinOverride string
+
+	// PgmcpPIDFile forwards GARRISON_PGMCP_PID_FILE so the pgmcp
+	// subcommand writes its own PID to the file on startup. T018
+	// ChaosPgmcpDiesMidRun reads the file to externally kill the
+	// subprocess and observe Claude's response.
+	PgmcpPIDFile string
 
 	// LogSink, if non-nil, receives a copy of the supervisor's stdout
 	// alongside os.Stdout so tests can assert on structured log lines.
@@ -119,6 +133,12 @@ func startSupervisor(t *testing.T, opts supervisorOpts) (int, *exec.Cmd) {
 	}
 	if opts.SignalMarker != "" {
 		env = append(env, "GARRISON_MOCK_CLAUDE_SIGNAL_MARKER="+opts.SignalMarker)
+	}
+	if opts.SupervisorBinOverride != "" {
+		env = append(env, "GARRISON_SUPERVISOR_BIN_OVERRIDE="+opts.SupervisorBinOverride)
+	}
+	if opts.PgmcpPIDFile != "" {
+		env = append(env, "GARRISON_PGMCP_PID_FILE="+opts.PgmcpPIDFile)
 	}
 	if opts.HomeOverride != "" {
 		// Strip any existing HOME entry before appending so the override
@@ -300,6 +320,41 @@ func sampleMaxRunning(t *testing.T, pool *pgxpool.Pool, within time.Duration) in
 		time.Sleep(50 * time.Millisecond)
 	}
 	return peak
+}
+
+// terminalRow is the shape waitForTerminalByTicket returns — the four
+// fields failure-path assertions care about. Moved to test_helpers_test
+// so both integration_test.go and chaos_test.go can reach it without
+// duplicating the SELECT.
+type terminalRow struct {
+	Status     string
+	ExitReason *string
+	Pid        *int32
+	Cost       *string
+}
+
+// waitForTerminalByTicket polls for any non-running agent_instance row
+// against the supplied ticket_id and returns status/exit_reason/pid/
+// cost. Fails the test if no terminal row lands within the budget.
+func waitForTerminalByTicket(t *testing.T, pool *pgxpool.Pool, ticketID pgtype.UUID, within time.Duration) terminalRow {
+	t.Helper()
+	ctx := context.Background()
+	deadline := time.Now().Add(within)
+	var row terminalRow
+	for time.Now().Before(deadline) {
+		err := pool.QueryRow(ctx, `
+			SELECT status, exit_reason, pid, total_cost_usd::text
+			FROM agent_instances
+			WHERE ticket_id = $1 AND status <> 'running'`,
+			ticketID,
+		).Scan(&row.Status, &row.ExitReason, &row.Pid, &row.Cost)
+		if err == nil {
+			return row
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("no terminal agent_instance row for ticket %v within %s", ticketID, within)
+	return row
 }
 
 // waitForRunningCount polls until COUNT(agent_instances WHERE status='running')

@@ -194,10 +194,23 @@ func runDaemon() int {
 	// coding /usr/local/bin/supervisor. If it fails, we log and fall
 	// back to os.Args[0]; spawn_failed will surface in the agent_instances
 	// row if the resulting path can't actually execute.
-	supervisorBin, err := os.Executable()
-	if err != nil {
-		logger.Warn("os.Executable failed; using os.Args[0]", "err", err)
-		supervisorBin = os.Args[0]
+	//
+	// GARRISON_SUPERVISOR_BIN_OVERRIDE is a test-only hook (T018 chaos
+	// test uses it to point the MCP config at /bin/does-not-exist so
+	// Claude reports postgres.status=failed at init). Production never
+	// sets it.
+	var supervisorBin string
+	if override := os.Getenv("GARRISON_SUPERVISOR_BIN_OVERRIDE"); override != "" {
+		supervisorBin = override
+		logger.Warn("GARRISON_SUPERVISOR_BIN_OVERRIDE active; MCP config will point at the override path",
+			"override", override)
+	} else {
+		exe, err := os.Executable()
+		if err != nil {
+			logger.Warn("os.Executable failed; using os.Args[0]", "err", err)
+			exe = os.Args[0]
+		}
+		supervisorBin = exe
 	}
 
 	spawnDeps := spawn.Deps{

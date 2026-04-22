@@ -58,6 +58,29 @@ func Start(t *testing.T) *pgxpool.Pool {
 	return sharedPool
 }
 
+// SetAgentROPassword ALTERs the garrison_agent_ro role created by the
+// M2.1 migration to use the supplied password. Tests that run real
+// Claude + real pgmcp must call this with the same password they hand
+// the supervisor via GARRISON_AGENT_RO_PASSWORD, otherwise pgmcp will
+// fail to connect (the migration creates the role with LOGIN but no
+// password — operators are expected to run the equivalent ALTER in
+// production).
+//
+// Uses the shared pool directly (not via Start) so repeated helper
+// calls do not re-TRUNCATE and wipe rows the caller just seeded.
+func SetAgentROPassword(t *testing.T, password string) {
+	t.Helper()
+	initOnce.Do(func() { initErr = bootContainer() })
+	if initErr != nil {
+		t.Fatalf("testdb: init: %v", initErr)
+	}
+	if _, err := sharedPool.Exec(context.Background(),
+		fmt.Sprintf(`ALTER ROLE garrison_agent_ro WITH PASSWORD '%s'`, password),
+	); err != nil {
+		t.Fatalf("SetAgentROPassword: %v", err)
+	}
+}
+
 // SeedM21 inserts the M2.1 minimum working set: one company, one
 // engineering department with the supplied workspace_path, and one
 // active engineer agent row whose listens_for matches the supervisor's

@@ -701,38 +701,6 @@ func startM21Scenario(t *testing.T, scriptName string, extra func(*supervisorOpt
 	}
 }
 
-// waitForTerminalAny polls for any terminal status (succeeded | failed |
-// timeout) against the supplied ticket_id. Returns the agent_instance
-// row fields relevant to failure-path assertions. Fails the test if
-// no terminal row lands within the budget.
-type terminalRow struct {
-	Status     string
-	ExitReason *string
-	Pid        *int32
-	Cost       *string
-}
-
-func waitForTerminalByTicket(t *testing.T, pool *pgxpool.Pool, ticketID pgtype.UUID, within time.Duration) terminalRow {
-	t.Helper()
-	ctx := context.Background()
-	deadline := time.Now().Add(within)
-	var row terminalRow
-	for time.Now().Before(deadline) {
-		err := pool.QueryRow(ctx, `
-			SELECT status, exit_reason, pid, total_cost_usd::text
-			FROM agent_instances
-			WHERE ticket_id = $1 AND status <> 'running'`,
-			ticketID,
-		).Scan(&row.Status, &row.ExitReason, &row.Pid, &row.Cost)
-		if err == nil {
-			return row
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	t.Fatalf("no terminal agent_instance row for ticket %v within %s", ticketID, within)
-	return row
-}
-
 // assertNoTransition asserts there is no ticket_transitions row for the
 // given ticket. Non-success exit reasons must not write a transition
 // (FR-114).

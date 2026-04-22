@@ -41,6 +41,16 @@ func runMCPPostgres() int {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	logger.Info("pgmcp: starting", "stream", "pgmcp")
 
+	// GARRISON_PGMCP_PID_FILE is a test-only hook (T018 chaos test
+	// "pgmcp dies mid-run" uses it to discover the subprocess PID so
+	// it can externally kill it). Production never sets it; failure
+	// to write is warned and otherwise ignored.
+	if pidFile := os.Getenv("GARRISON_PGMCP_PID_FILE"); pidFile != "" {
+		if err := os.WriteFile(pidFile, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0o600); err != nil {
+			logger.Warn("pgmcp: GARRISON_PGMCP_PID_FILE write failed", "stream", "pgmcp", "err", err)
+		}
+	}
+
 	if err := pgmcp.Serve(ctx, os.Stdin, os.Stdout, dsn); err != nil {
 		logger.Error("pgmcp: Serve returned error", "stream", "pgmcp", "err", err)
 		return ExitFailure
