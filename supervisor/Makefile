@@ -1,4 +1,4 @@
-.PHONY: build test test-integration test-chaos sqlc migrate run docker lint clean copy-migrations
+.PHONY: build test test-integration test-chaos sqlc migrate run docker lint clean copy-migrations seed-engineer-agent
 
 # copy-migrations stages the repo-root migrations/ into cmd/supervisor/migrations/
 # so `go:embed migrations/*.sql` in cmd/supervisor/migrate.go can find them
@@ -23,6 +23,15 @@ test-chaos: copy-migrations
 
 sqlc:
 	sqlc generate
+
+# seed-engineer-agent re-embeds examples/agents/engineer.md into the
+# engineer-role seed INSERT in the M2.1 migration. Idempotent — run it
+# whenever the markdown file changes so the DB seed stays in sync. The
+# paths are relative to supervisor/ (this Makefile's dir).
+seed-engineer-agent:
+	go run ./internal/tools/embed-agent-md \
+		../examples/agents/engineer.md \
+		../migrations/20260422000003_m2_1_claude_invocation.sql
 
 migrate: build
 	./bin/supervisor --migrate
