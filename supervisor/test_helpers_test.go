@@ -3,14 +3,18 @@
 package supervisor_test
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -38,6 +42,37 @@ type supervisorOpts struct {
 	MCPConfigDir     string
 	MockClaudeScript string // forwarded as GARRISON_MOCK_CLAUDE_SCRIPT
 	SignalMarker     string // forwarded as GARRISON_MOCK_CLAUDE_SIGNAL_MARKER
+
+	// HomeOverride sets HOME for the supervisor subprocess (used by the
+	// session-persistence test to scope claude's writes under a tempdir).
+	HomeOverride string
+
+	// LogSink, if non-nil, receives a copy of the supervisor's stdout
+	// alongside os.Stdout so tests can assert on structured log lines.
+	// Writes are serialised via safeBuffer because the integration test
+	// suite may have multiple goroutines Read()ing the captured stream
+	// while the subprocess Write()s new lines.
+	LogSink *safeBuffer
+}
+
+// safeBuffer is a mutex-guarded bytes.Buffer. Used by LogSink so the
+// supervisor's JSON-per-line stdout can be written by cmd and read
+// by the test without racing.
+type safeBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (s *safeBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.Write(p)
+}
+
+func (s *safeBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.String()
 }
 
 // startSupervisor builds the binary, execs it with a free /health port
@@ -85,10 +120,25 @@ func startSupervisor(t *testing.T, opts supervisorOpts) (int, *exec.Cmd) {
 	if opts.SignalMarker != "" {
 		env = append(env, "GARRISON_MOCK_CLAUDE_SIGNAL_MARKER="+opts.SignalMarker)
 	}
+	if opts.HomeOverride != "" {
+		// Strip any existing HOME entry before appending so the override
+		// wins regardless of the parent shell's HOME.
+		filtered := env[:0]
+		for _, kv := range env {
+			if !startsWith(kv, "HOME=") {
+				filtered = append(filtered, kv)
+			}
+		}
+		env = append(filtered, "HOME="+opts.HomeOverride)
+	}
 
 	cmd := exec.Command(bin)
 	cmd.Env = env
-	cmd.Stdout = os.Stdout
+	if opts.LogSink != nil {
+		cmd.Stdout = io.MultiWriter(os.Stdout, opts.LogSink)
+	} else {
+		cmd.Stdout = os.Stdout
+	}
 	cmd.Stderr = os.Stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
@@ -270,3 +320,45 @@ func waitForRunningCount(t *testing.T, pool *pgxpool.Pool, want int64, within ti
 	}
 	t.Fatalf("timed out waiting for %d running rows; got %d", want, got)
 }
+
+// startsWith is strings.HasPrefix aliased for readability at call site.
+func startsWith(s, prefix string) bool { return strings.HasPrefix(s, prefix) }
+
+// newLogSink allocates a fresh safeBuffer for a test that wants to
+// inspect supervisor log lines.
+func newLogSink() *safeBuffer {
+	return &safeBuffer{}
+}
+
+// waitForLogSubstring polls the supplied sink until every substring in
+// subs appears on the same log line, or the deadline elapses. Returns
+// the first matching line. Fails the test on timeout.
+func waitForLogSubstring(t *testing.T, sink *safeBuffer, within time.Duration, subs ...string) string {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for time.Now().Before(deadline) {
+		for _, line := range strings.Split(sink.String(), "\n") {
+			if line == "" {
+				continue
+			}
+			ok := true
+			for _, s := range subs {
+				if !strings.Contains(line, s) {
+					ok = false
+					break
+				}
+			}
+			if ok {
+				return line
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for log line containing %v within %s", subs, within)
+	return ""
+}
+
+// discardUnused pins the bytes import in tests that do not directly
+// reference it, since bytes.Buffer is only referenced by the safeBuffer
+// type field.
+var _ = bytes.NewBuffer

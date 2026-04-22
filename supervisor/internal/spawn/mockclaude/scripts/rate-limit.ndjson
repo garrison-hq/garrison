@@ -1,0 +1,9 @@
+# T017 TestM21RateLimitEventLogged fixture: a rate_limit_event between
+# init and result. The supervisor must log all six fields of
+# rate_limit_info at warn level (NFR-109, SC-109); the test captures
+# stdout and grep's the JSON log line.
+#write-hello-txt
+{"type":"system","subtype":"init","session_id":"mock-rate-limit","model":"claude-haiku-4-5-20251001","cwd":"/workspaces/engineering","tools":["Read","Write"],"mcp_servers":[{"name":"postgres","status":"connected"}]}
+{"type":"rate_limit_event","uuid":"rl-1","session_id":"mock-rate-limit","rate_limit_info":{"status":"warn","resetsAt":1700000000,"rateLimitType":"input","utilization":0.85,"isUsingOverage":false,"surpassedThreshold":0.75}}
+{"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","content":[{"type":"text","text":"writing despite rate limit warning"}]}}
+{"type":"result","subtype":"success","is_error":false,"duration_ms":220,"duration_api_ms":180,"total_cost_usd":0.003,"stop_reason":"end_turn","result":"ok","session_id":"mock-rate-limit"}

@@ -1,0 +1,11 @@
+# T017 TestM21ConcurrencyCapOneSerializes fixture: same happy-path
+# shape as helloworld.ndjson but with a 2s sleep before emitting the
+# result event. Two tickets inserted within 100 ms must serialize
+# (cap=1): the first runs, the second waits for the poller.
+#write-hello-txt
+{"type":"system","subtype":"init","session_id":"mock-slow","model":"claude-haiku-4-5-20251001","cwd":"/workspaces/engineering","tools":["Read","Write"],"mcp_servers":[{"name":"postgres","status":"connected"}]}
+{"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","content":[{"type":"text","text":"working slowly"}]}}
+#sleep 2s
+{"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","content":[{"type":"tool_use","name":"Write","input":{"path":"hello.txt","contents":"{{TICKET_ID}}"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_slow","is_error":false,"content":[{"type":"text","text":"ok"}]}]}}
+{"type":"result","subtype":"success","is_error":false,"duration_ms":2100,"duration_api_ms":1800,"total_cost_usd":0.003,"stop_reason":"end_turn","result":"ok","session_id":"mock-slow"}

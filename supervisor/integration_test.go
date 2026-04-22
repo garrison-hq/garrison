@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -933,5 +934,318 @@ func TestM21SpawnFailedOnConfigWriteError(t *testing.T) {
 	}
 	if row2.ExitReason == nil || *row2.ExitReason != "completed" {
 		t.Errorf("second exit_reason = %v; want completed", row2.ExitReason)
+	}
+}
+
+// ---------------------------------------------------------------------
+// T017: M2.1 supervisor-observed behaviour integration tests
+// ---------------------------------------------------------------------
+
+// TestM21TimeoutFiresProcessGroupKill — NFR-101/NFR-106: subprocess
+// timeout is measured from cmd.Start. Mock emits init then sleeps far
+// past the 2-second GARRISON_SUBPROCESS_TIMEOUT; exec.CommandContext
+// fires cmd.Cancel (killProcessGroup SIGTERM), WaitDelay escalates to
+// SIGKILL. Adjudicate records exit_reason=timeout. The mock's SIGTERM
+// marker file confirms the group was signalled (not just the PID).
+func TestM21TimeoutFiresProcessGroupKill(t *testing.T) {
+	pool := testdb.Start(t)
+	workspaceDir := t.TempDir()
+	mcpConfigDir := t.TempDir()
+	signalMarker := fmt.Sprintf("%s/sigterm.marker", t.TempDir())
+	deptID := testdb.SeedM21(t, workspaceDir)
+	mockBin := buildMockClaudeBinary(t)
+	scriptPath := mockClaudeScriptPath(t, "timeout.ndjson")
+
+	startSupervisor(t, supervisorOpts{
+		ClaudeBin:         mockBin,
+		AgentROPassword:   "integration-test-ro",
+		MCPConfigDir:      mcpConfigDir,
+		MockClaudeScript:  scriptPath,
+		SignalMarker:      signalMarker,
+		SubprocessTimeout: "2s",
+		PollInterval:      "1s",
+		LogLevel:          "info",
+	})
+
+	ticket, err := store.New(pool).InsertTicket(context.Background(), store.InsertTicketParams{
+		DepartmentID: deptID,
+		Objective:    "timeout scenario",
+	})
+	if err != nil {
+		t.Fatalf("InsertTicket: %v", err)
+	}
+
+	// Budget = 2s timeout + 5s WaitDelay grace + some slack.
+	row := waitForTerminalByTicket(t, pool, ticket.ID, 20*time.Second)
+	if row.Status != "timeout" {
+		t.Errorf("status = %q; want timeout", row.Status)
+	}
+	if row.ExitReason == nil || *row.ExitReason != "timeout" {
+		t.Errorf("exit_reason = %v; want timeout", row.ExitReason)
+	}
+
+	// Process-group signalling sanity: the mock's SIGTERM handler
+	// writes the marker file when it receives the signal. If only the
+	// mock's own PID had been signalled (M1 behaviour), this would
+	// still fire — but the real safety net (children also dying) is
+	// separately verified by the pgroup unit test.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(signalMarker); err == nil {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Errorf("mock SIGTERM marker file %s never appeared", signalMarker)
+}
+
+// TestM21PIDBackfilled — happy path pins the M1 retro §4 fix: after a
+// successful terminal, agent_instances.pid is non-NULL.
+func TestM21PIDBackfilled(t *testing.T) {
+	s := startM21Scenario(t, "helloworld.ndjson", nil)
+	row := waitForTerminalByTicket(t, s.Pool, s.TicketUUID, 20*time.Second)
+	if row.Status != "succeeded" {
+		t.Fatalf("status = %q; want succeeded", row.Status)
+	}
+	if row.Pid == nil || *row.Pid == 0 {
+		t.Errorf("agent_instances.pid = %v; want non-zero (UpdatePID backfill)", row.Pid)
+	}
+}
+
+// TestM21RateLimitEventLogged — SC-109/NFR-109: a rate_limit_event mid-
+// stream produces a warn-level slog line carrying all six
+// rate_limit_info fields plus uuid + session_id. Uses LogSink to
+// inspect supervisor stdout.
+func TestM21RateLimitEventLogged(t *testing.T) {
+	pool := testdb.Start(t)
+	workspaceDir := t.TempDir()
+	mcpConfigDir := t.TempDir()
+	deptID := testdb.SeedM21(t, workspaceDir)
+	mockBin := buildMockClaudeBinary(t)
+	scriptPath := mockClaudeScriptPath(t, "rate-limit.ndjson")
+	logSink := newLogSink()
+
+	startSupervisor(t, supervisorOpts{
+		ClaudeBin:        mockBin,
+		AgentROPassword:  "integration-test-ro",
+		MCPConfigDir:     mcpConfigDir,
+		MockClaudeScript: scriptPath,
+		PollInterval:     "1s",
+		LogLevel:         "info",
+		LogSink:          logSink,
+	})
+
+	ticket, err := store.New(pool).InsertTicket(context.Background(), store.InsertTicketParams{
+		DepartmentID: deptID,
+		Objective:    "rate-limit scenario",
+	})
+	if err != nil {
+		t.Fatalf("InsertTicket: %v", err)
+	}
+	row := waitForTerminalByTicket(t, pool, ticket.ID, 20*time.Second)
+	if row.Status != "succeeded" {
+		t.Errorf("status = %q; want succeeded (rate_limit_event is observational)", row.Status)
+	}
+
+	// All six rate_limit_info fields plus uuid + session_id should
+	// appear on the warn-level log line.
+	line := waitForLogSubstring(t, logSink, 5*time.Second,
+		`"msg":"claude rate_limit_event"`,
+		`"status":"warn"`,
+		`"resets_at":1700000000`,
+		`"rate_limit_type":"input"`,
+		`"utilization":0.85`,
+		`"is_using_overage":false`,
+		`"surpassed_threshold":0.75`,
+		`"uuid":"rl-1"`,
+		`"session_id":"mock-rate-limit"`,
+	)
+	if line == "" {
+		t.Error("rate_limit log line empty; waitForLogSubstring should have fataled but did not")
+	}
+}
+
+// TestM21ConcurrencyCapOneSerializes — SC-106: engineering department's
+// seeded concurrency_cap is 1. Two tickets inserted within 100 ms must
+// serialize: the first runs, the second sits in event_outbox until the
+// fallback poll picks it up after the first terminates. Peak running
+// count never exceeds 1.
+func TestM21ConcurrencyCapOneSerializes(t *testing.T) {
+	pool := testdb.Start(t)
+	workspaceDir := t.TempDir()
+	mcpConfigDir := t.TempDir()
+	deptID := testdb.SeedM21(t, workspaceDir)
+	mockBin := buildMockClaudeBinary(t)
+	scriptPath := mockClaudeScriptPath(t, "helloworld-slow.ndjson")
+
+	startSupervisor(t, supervisorOpts{
+		ClaudeBin:        mockBin,
+		AgentROPassword:  "integration-test-ro",
+		MCPConfigDir:     mcpConfigDir,
+		MockClaudeScript: scriptPath,
+		PollInterval:     "1s",
+		LogLevel:         "info",
+	})
+
+	q := store.New(pool)
+	for i := 0; i < 2; i++ {
+		if _, err := q.InsertTicket(context.Background(), store.InsertTicketParams{
+			DepartmentID: deptID,
+			Objective:    fmt.Sprintf("cap-serialize %d", i),
+		}); err != nil {
+			t.Fatalf("InsertTicket %d: %v", i, err)
+		}
+	}
+
+	// Peak running count across ~6s should never exceed 1 (cap).
+	peak := sampleMaxRunning(t, pool, 6*time.Second)
+	if peak > 1 {
+		t.Errorf("concurrency cap violated: peak running = %d; want <= 1", peak)
+	}
+
+	// Both eventually succeed.
+	waitForTerminalCount(t, pool, 2, 20*time.Second, "succeeded")
+}
+
+// TestM21SessionPersistenceSideEffectAbsent — NFR-110: the spawn argv
+// carries --no-session-persistence, so the real claude never writes
+// ~/.claude/projects/*/sessions/*. The mock doesn't write there
+// either; this test pins the absence after a happy path under a
+// scoped HOME so a future regression (e.g. accidentally dropping the
+// flag) shows up as a present file.
+func TestM21SessionPersistenceSideEffectAbsent(t *testing.T) {
+	pool := testdb.Start(t)
+	workspaceDir := t.TempDir()
+	mcpConfigDir := t.TempDir()
+	scopedHome := t.TempDir()
+	deptID := testdb.SeedM21(t, workspaceDir)
+	mockBin := buildMockClaudeBinary(t)
+	scriptPath := mockClaudeScriptPath(t, "helloworld.ndjson")
+
+	startSupervisor(t, supervisorOpts{
+		ClaudeBin:        mockBin,
+		AgentROPassword:  "integration-test-ro",
+		MCPConfigDir:     mcpConfigDir,
+		MockClaudeScript: scriptPath,
+		HomeOverride:     scopedHome,
+		PollInterval:     "1s",
+		LogLevel:         "info",
+	})
+
+	ticket, err := store.New(pool).InsertTicket(context.Background(), store.InsertTicketParams{
+		DepartmentID: deptID,
+		Objective:    "session-persistence scenario",
+	})
+	if err != nil {
+		t.Fatalf("InsertTicket: %v", err)
+	}
+	row := waitForTerminalByTicket(t, pool, ticket.ID, 20*time.Second)
+	if row.Status != "succeeded" {
+		t.Fatalf("status = %q; want succeeded", row.Status)
+	}
+
+	// No ~/.claude/projects/*/sessions/* files should exist.
+	sessionsRoot := fmt.Sprintf("%s/.claude/projects", scopedHome)
+	if entries, err := os.ReadDir(sessionsRoot); err == nil {
+		// If the dir exists, walk it looking for any session file.
+		var leaked []string
+		for _, project := range entries {
+			if !project.IsDir() {
+				continue
+			}
+			sessDir := fmt.Sprintf("%s/%s/sessions", sessionsRoot, project.Name())
+			ents, err := os.ReadDir(sessDir)
+			if err != nil {
+				continue
+			}
+			for _, e := range ents {
+				leaked = append(leaked, fmt.Sprintf("%s/%s", sessDir, e.Name()))
+			}
+		}
+		if len(leaked) > 0 {
+			t.Errorf("session-persistence files leaked: %v", leaked)
+		}
+	}
+	// Either no directory or no files: both are acceptable.
+}
+
+// TestM21GracefulShutdownWithInflight — A10: send SIGTERM to the
+// supervisor while a Claude subprocess is running; the subprocess's
+// process group receives SIGTERM (verified via the mock's signal
+// marker), the terminal row is written, and no agent_instances remain
+// with status=running. Supervisor exits within its shutdown grace.
+func TestM21GracefulShutdownWithInflight(t *testing.T) {
+	pool := testdb.Start(t)
+	workspaceDir := t.TempDir()
+	mcpConfigDir := t.TempDir()
+	signalMarker := fmt.Sprintf("%s/sigterm.marker", t.TempDir())
+	deptID := testdb.SeedM21(t, workspaceDir)
+	mockBin := buildMockClaudeBinary(t)
+	scriptPath := mockClaudeScriptPath(t, "timeout.ndjson") // 30s sleep after init
+
+	_, supCmd := startSupervisor(t, supervisorOpts{
+		ClaudeBin:        mockBin,
+		AgentROPassword:  "integration-test-ro",
+		MCPConfigDir:     mcpConfigDir,
+		MockClaudeScript: scriptPath,
+		SignalMarker:     signalMarker,
+		ShutdownGrace:    "10s",
+		PollInterval:     "1s",
+		LogLevel:         "info",
+	})
+
+	if _, err := store.New(pool).InsertTicket(context.Background(), store.InsertTicketParams{
+		DepartmentID: deptID,
+		Objective:    "graceful-shutdown scenario",
+	}); err != nil {
+		t.Fatalf("InsertTicket: %v", err)
+	}
+
+	// Wait for the subprocess to actually land before signalling the
+	// supervisor — otherwise we might SIGTERM before the spawn has
+	// happened, turning this into a trivial shutdown.
+	waitForRunningCount(t, pool, 1, 10*time.Second)
+
+	if err := supCmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatalf("signal supervisor: %v", err)
+	}
+
+	// Supervisor should exit within its shutdown grace + a little slack.
+	done := make(chan error, 1)
+	go func() { done <- supCmd.Wait() }()
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatalf("supervisor did not exit within shutdown grace")
+	}
+
+	// Mock's SIGTERM marker should exist — confirms the spawn's
+	// process group was signalled.
+	if _, err := os.Stat(signalMarker); err != nil {
+		t.Errorf("mock SIGTERM marker %s missing: %v", signalMarker, err)
+	}
+
+	// No agent_instances should remain with status='running'.
+	var running int64
+	if err := pool.QueryRow(context.Background(),
+		`SELECT COUNT(*) FROM agent_instances WHERE status = 'running'`,
+	).Scan(&running); err != nil {
+		t.Fatalf("count running: %v", err)
+	}
+	if running != 0 {
+		t.Errorf("agent_instances.status='running' count = %d; want 0 after shutdown", running)
+	}
+
+	// A terminal row should exist for the inflight ticket (either
+	// succeeded if the mock flushed a result in time — unlikely for
+	// timeout.ndjson — or failed/supervisor_shutdown otherwise).
+	var terminalCount int64
+	if err := pool.QueryRow(context.Background(),
+		`SELECT COUNT(*) FROM agent_instances WHERE status <> 'running'`,
+	).Scan(&terminalCount); err != nil {
+		t.Fatalf("count terminal: %v", err)
+	}
+	if terminalCount < 1 {
+		t.Errorf("expected >=1 terminal agent_instances; got %d", terminalCount)
 	}
 }

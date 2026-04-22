@@ -46,11 +46,22 @@ import (
 var ticketIDPattern = regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`)
 
 func main() {
-	// Catch SIGTERM so tests that need to verify signal reception can
-	// observe a marker-file write before the process exits.
+	// Catch SIGTERM on a dedicated goroutine so tests that need to
+	// verify signal reception observe a marker-file write before the
+	// process exits. Handling SIGTERM in the main loop would miss the
+	// signal during a #sleep directive because time.Sleep is not
+	// interruptible by signal.Notify delivery.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 	defer signal.Stop(sigCh)
+	go func() {
+		s := <-sigCh
+		if marker := os.Getenv("GARRISON_MOCK_CLAUDE_SIGNAL_MARKER"); marker != "" {
+			_ = os.WriteFile(marker, []byte(s.String()), 0o600)
+		}
+		fmt.Fprintf(os.Stderr, "mockclaude: received %s; exiting\n", s)
+		os.Exit(143)
+	}()
 
 	fs := flag.NewFlagSet("mockclaude", flag.ContinueOnError)
 	// Silence flag's default complaint-on-unknown — we intentionally
@@ -88,12 +99,6 @@ func main() {
 	defer f.Close()
 
 	exitCode := 0
-	sigReceived := make(chan os.Signal, 1)
-	go func() {
-		s := <-sigCh
-		sigReceived <- s
-	}()
-
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64<<10), 1<<20)
 	for scanner.Scan() {
@@ -110,17 +115,6 @@ func main() {
 		}
 		line = strings.ReplaceAll(line, "{{TICKET_ID}}", ticketID)
 		fmt.Println(line)
-		// Bounce out early if SIGTERM arrived mid-script so tests can
-		// observe supervisor-initiated termination.
-		select {
-		case s := <-sigReceived:
-			fmt.Fprintf(os.Stderr, "mockclaude: received %s mid-script; exiting\n", s)
-			if marker := os.Getenv("GARRISON_MOCK_CLAUDE_SIGNAL_MARKER"); marker != "" {
-				_ = os.WriteFile(marker, []byte(s.String()), 0o600)
-			}
-			os.Exit(143)
-		default:
-		}
 	}
 	if err := scanner.Err(); err != nil {
 		fmt.Fprintf(os.Stderr, "mockclaude: scan: %v\n", err)
