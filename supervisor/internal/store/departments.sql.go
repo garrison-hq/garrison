@@ -12,7 +12,7 @@ import (
 )
 
 const getDepartmentByID = `-- name: GetDepartmentByID :one
-SELECT id, slug, name, concurrency_cap, created_at FROM departments WHERE id = $1
+SELECT id, slug, name, concurrency_cap, created_at, company_id, workspace_path, workflow FROM departments WHERE id = $1
 `
 
 func (q *Queries) GetDepartmentByID(ctx context.Context, id pgtype.UUID) (Department, error) {
@@ -24,6 +24,29 @@ func (q *Queries) GetDepartmentByID(ctx context.Context, id pgtype.UUID) (Depart
 		&i.Name,
 		&i.ConcurrencyCap,
 		&i.CreatedAt,
+		&i.CompanyID,
+		&i.WorkspacePath,
+		&i.Workflow,
+	)
+	return i, err
+}
+
+const getDepartmentBySlug = `-- name: GetDepartmentBySlug :one
+SELECT id, slug, name, concurrency_cap, created_at, company_id, workspace_path, workflow FROM departments WHERE slug = $1
+`
+
+func (q *Queries) GetDepartmentBySlug(ctx context.Context, slug string) (Department, error) {
+	row := q.db.QueryRow(ctx, getDepartmentBySlug, slug)
+	var i Department
+	err := row.Scan(
+		&i.ID,
+		&i.Slug,
+		&i.Name,
+		&i.ConcurrencyCap,
+		&i.CreatedAt,
+		&i.CompanyID,
+		&i.WorkspacePath,
+		&i.Workflow,
 	)
 	return i, err
 }
@@ -31,7 +54,7 @@ func (q *Queries) GetDepartmentByID(ctx context.Context, id pgtype.UUID) (Depart
 const insertDepartment = `-- name: InsertDepartment :one
 INSERT INTO departments (slug, name, concurrency_cap)
 VALUES ($1, $2, $3)
-RETURNING id, slug, name, concurrency_cap, created_at
+RETURNING id, slug, name, concurrency_cap, created_at, company_id, workspace_path, workflow
 `
 
 type InsertDepartmentParams struct {
@@ -49,6 +72,9 @@ func (q *Queries) InsertDepartment(ctx context.Context, arg InsertDepartmentPara
 		&i.Name,
 		&i.ConcurrencyCap,
 		&i.CreatedAt,
+		&i.CompanyID,
+		&i.WorkspacePath,
+		&i.Workflow,
 	)
 	return i, err
 }

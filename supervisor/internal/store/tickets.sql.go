@@ -12,7 +12,7 @@ import (
 )
 
 const getTicketByID = `-- name: GetTicketByID :one
-SELECT id, department_id, objective, created_at FROM tickets WHERE id = $1
+SELECT id, department_id, objective, created_at, column_slug, acceptance_criteria, metadata, origin FROM tickets WHERE id = $1
 `
 
 func (q *Queries) GetTicketByID(ctx context.Context, id pgtype.UUID) (Ticket, error) {
@@ -23,6 +23,10 @@ func (q *Queries) GetTicketByID(ctx context.Context, id pgtype.UUID) (Ticket, er
 		&i.DepartmentID,
 		&i.Objective,
 		&i.CreatedAt,
+		&i.ColumnSlug,
+		&i.AcceptanceCriteria,
+		&i.Metadata,
+		&i.Origin,
 	)
 	return i, err
 }
@@ -30,7 +34,7 @@ func (q *Queries) GetTicketByID(ctx context.Context, id pgtype.UUID) (Ticket, er
 const insertTicket = `-- name: InsertTicket :one
 INSERT INTO tickets (department_id, objective)
 VALUES ($1, $2)
-RETURNING id, department_id, objective, created_at
+RETURNING id, department_id, objective, created_at, column_slug, acceptance_criteria, metadata, origin
 `
 
 type InsertTicketParams struct {
@@ -46,6 +50,49 @@ func (q *Queries) InsertTicket(ctx context.Context, arg InsertTicketParams) (Tic
 		&i.DepartmentID,
 		&i.Objective,
 		&i.CreatedAt,
+		&i.ColumnSlug,
+		&i.AcceptanceCriteria,
+		&i.Metadata,
+		&i.Origin,
 	)
 	return i, err
+}
+
+const insertTicketTransition = `-- name: InsertTicketTransition :one
+INSERT INTO ticket_transitions (ticket_id, from_column, to_column, triggered_by_agent_instance_id)
+VALUES ($1, $2, $3, $4)
+RETURNING id
+`
+
+type InsertTicketTransitionParams struct {
+	TicketID                   pgtype.UUID
+	FromColumn                 *string
+	ToColumn                   string
+	TriggeredByAgentInstanceID pgtype.UUID
+}
+
+func (q *Queries) InsertTicketTransition(ctx context.Context, arg InsertTicketTransitionParams) (pgtype.UUID, error) {
+	row := q.db.QueryRow(ctx, insertTicketTransition,
+		arg.TicketID,
+		arg.FromColumn,
+		arg.ToColumn,
+		arg.TriggeredByAgentInstanceID,
+	)
+	var id pgtype.UUID
+	err := row.Scan(&id)
+	return id, err
+}
+
+const updateTicketColumnSlug = `-- name: UpdateTicketColumnSlug :exec
+UPDATE tickets SET column_slug = $2 WHERE id = $1
+`
+
+type UpdateTicketColumnSlugParams struct {
+	ID         pgtype.UUID
+	ColumnSlug string
+}
+
+func (q *Queries) UpdateTicketColumnSlug(ctx context.Context, arg UpdateTicketColumnSlugParams) error {
+	_, err := q.db.Exec(ctx, updateTicketColumnSlug, arg.ID, arg.ColumnSlug)
+	return err
 }

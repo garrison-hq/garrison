@@ -8,6 +8,20 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+type Agent struct {
+	ID           pgtype.UUID
+	DepartmentID pgtype.UUID
+	RoleSlug     string
+	AgentMd      string
+	Model        string
+	Skills       []byte
+	McpTools     []byte
+	ListensFor   []byte
+	PalaceWing   *string
+	Status       string
+	CreatedAt    pgtype.Timestamptz
+}
+
 type AgentInstance struct {
 	ID           pgtype.UUID
 	DepartmentID pgtype.UUID
@@ -17,6 +31,13 @@ type AgentInstance struct {
 	FinishedAt   pgtype.Timestamptz
 	Status       string
 	ExitReason   *string
+	TotalCostUsd pgtype.Numeric
+}
+
+type Company struct {
+	ID        pgtype.UUID
+	Name      string
+	CreatedAt pgtype.Timestamptz
 }
 
 type Department struct {
@@ -25,6 +46,9 @@ type Department struct {
 	Name           string
 	ConcurrencyCap int32
 	CreatedAt      pgtype.Timestamptz
+	CompanyID      pgtype.UUID
+	WorkspacePath  *string
+	Workflow       []byte
 }
 
 type EventOutbox struct {
@@ -36,8 +60,23 @@ type EventOutbox struct {
 }
 
 type Ticket struct {
-	ID           pgtype.UUID
-	DepartmentID pgtype.UUID
-	Objective    string
-	CreatedAt    pgtype.Timestamptz
+	ID                 pgtype.UUID
+	DepartmentID       pgtype.UUID
+	Objective          string
+	CreatedAt          pgtype.Timestamptz
+	ColumnSlug         string
+	AcceptanceCriteria *string
+	Metadata           []byte
+	Origin             string
+}
+
+type TicketTransition struct {
+	ID                         pgtype.UUID
+	TicketID                   pgtype.UUID
+	FromColumn                 *string
+	ToColumn                   string
+	TriggeredByAgentInstanceID pgtype.UUID
+	TriggeredByUser            bool
+	At                         pgtype.Timestamptz
+	HygieneStatus              *string
 }
