@@ -1,0 +1,97 @@
+# Garrison M2.2 deployment topology.
+#
+# Four services (per Session 2026-04-23 Deployment clarification):
+#   postgres              — M1/M2.1 state store + pg_notify event bus
+#   mempalace             — MemPalace 3.3.2 sidecar; idle host for per-exec work
+#   docker-proxy          — linuxserver/socket-proxy with POST=1 EXEC=1
+#                           CONTAINERS=1 only. Listens on TCP :2375 inside
+#                           the compose network (NOT a unix-socket proxy —
+#                           T001 finding F5). Supervisor reaches it by
+#                           service-name DNS.
+#   supervisor            — Garrison Go binary + claude 2.1.117 + docker-cli
+#
+# Supervisor never mounts /var/run/docker.sock directly. All docker API
+# access flows through the filtered proxy. Residual security envelope
+# documented in docs/security/vault-threat-model.md § "M2.2 deployment
+# assumptions (socket-proxy)".
+
+services:
+  postgres:
+    image: postgres:17
+    container_name: garrison-postgres
+    environment:
+      POSTGRES_DB: garrison
+      POSTGRES_USER: supervisor
+      POSTGRES_PASSWORD: ${GARRISON_POSTGRES_PASSWORD:?GARRISON_POSTGRES_PASSWORD required}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U supervisor -d garrison"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  mempalace:
+    build:
+      context: .
+      dockerfile: Dockerfile.mempalace
+    image: garrison/mempalace:m2-2
+    container_name: garrison-mempalace
+    volumes:
+      - mempalace-palace:/palace
+    restart: unless-stopped
+
+  # linuxserver/socket-proxy: HAProxy-based docker-API filter.
+  # POST=1      — allow POST endpoints (exec needs this)
+  # EXEC=1      — allow /containers/*/exec + /exec/*/start
+  # CONTAINERS=1— allow /containers/*/json (inspect; docker exec's preflight)
+  # EVERY OTHER FLAG DEFAULTS TO 0 (DENY):
+  #   IMAGES=0, VOLUMES=0, NETWORKS=0, BUILD=0, SWARM=0, CONFIGS=0,
+  #   DISTRIBUTION=0, NODES=0, PLUGINS=0, SERVICES=0, SESSION=0,
+  #   SYSTEM=0, TASKS=0, ALLOW_START=0, ALLOW_STOP=0, ALLOW_RESTARTS=0,
+  #   COMMIT=0, AUTH=0, PING=0, INFO=0, EVENTS=0, VERSION=0
+  docker-proxy:
+    # Pin by digest at deploy time. Keep :latest here only for local
+    # compose-based dev; production deployment substitutes a digest.
+    image: ghcr.io/linuxserver/socket-proxy:latest
+    container_name: garrison-docker-proxy
+    environment:
+      POST: 1
+      EXEC: 1
+      CONTAINERS: 1
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    # Listens on TCP :2375 inside the container. Not published to host —
+    # only reachable over the compose network via DNS.
+    restart: unless-stopped
+
+  supervisor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: garrison/supervisor:m2-2
+    container_name: garrison-supervisor
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mempalace:
+        condition: service_started
+      docker-proxy:
+        condition: service_started
+    environment:
+      GARRISON_DATABASE_URL: postgres://supervisor:${GARRISON_POSTGRES_PASSWORD}@postgres:5432/garrison
+      GARRISON_AGENT_RO_PASSWORD: ${GARRISON_AGENT_RO_PASSWORD:?GARRISON_AGENT_RO_PASSWORD required}
+      GARRISON_AGENT_MEMPALACE_PASSWORD: ${GARRISON_AGENT_MEMPALACE_PASSWORD:?GARRISON_AGENT_MEMPALACE_PASSWORD required}
+      GARRISON_MEMPALACE_CONTAINER: garrison-mempalace
+      GARRISON_PALACE_PATH: /palace
+      GARRISON_CLAUDE_BUDGET_USD: "0.10"
+      # TCP-based proxy per T001 finding F5 (linuxserver/socket-proxy is
+      # HAProxy on :2375, not a unix-socket proxy). No shared socket
+      # volume; reachable by service-name DNS over the compose network.
+      DOCKER_HOST: tcp://garrison-docker-proxy:2375
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  mempalace-palace:
