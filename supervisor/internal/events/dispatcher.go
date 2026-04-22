@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/jackc/pgx/v5/pgtype"
 )
@@ -29,8 +30,16 @@ var ErrUnknownChannel = errors.New("events: no handler registered for channel")
 // The handler map is copied into the dispatcher so callers cannot mutate the
 // routing after construction — dynamic registration is explicitly out of
 // scope for M1.
+//
+// inFlight dedupes concurrent dispatches of the same event_id across the
+// LISTEN and poll paths. The FR-006 SELECT ... FOR UPDATE check in spawn
+// only catches the completed-event case (processed_at set); it does not
+// prevent two concurrent handlers from both seeing processed_at=NULL
+// during the subprocess window. In-memory dedupe is sound for M1 because
+// FR-018 guarantees exactly one supervisor holds the advisory lock.
 type Dispatcher struct {
 	handlers map[string]Handler
+	inFlight sync.Map
 }
 
 // NewDispatcher returns a Dispatcher with the supplied route table frozen in.
@@ -72,6 +81,10 @@ func (d *Dispatcher) Dispatch(ctx context.Context, channel, payload string) erro
 	if err := eventID.Scan(env.EventID); err != nil {
 		return fmt.Errorf("events: invalid event_id %q on channel %q: %w", env.EventID, channel, err)
 	}
+	if _, loaded := d.inFlight.LoadOrStore(eventID, struct{}{}); loaded {
+		return nil
+	}
+	defer d.inFlight.Delete(eventID)
 	if err := h(ctx, eventID); err != nil {
 		return fmt.Errorf("events: handler for %q: %w", channel, err)
 	}
