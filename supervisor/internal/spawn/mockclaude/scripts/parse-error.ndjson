@@ -1,0 +1,6 @@
+# T016 TestM21ParseErrorBails fixture: healthy init followed by a line
+# that is not valid JSON. claudeproto.Route returns (Bail, err), the
+# supervisor records exit_reason=parse_error, signals the process group.
+{"type":"system","subtype":"init","session_id":"mock-parse","model":"claude-haiku-4-5-20251001","cwd":"/workspaces/engineering","tools":[],"mcp_servers":[{"name":"postgres","status":"connected"}]}
+{{not valid json at all
+#sleep 15s

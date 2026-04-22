@@ -423,48 +423,66 @@ func runRealClaude(
 		}
 	}
 
-	// Step 9 + stderr goroutine: the NDJSON pipeline reads stdout; a
-	// sibling goroutine copies stderr into structured slog lines so the
-	// supervisor log carries claude's own warnings.
+	// Step 9 + stderr goroutine: the NDJSON pipeline reads stdout to
+	// EOF; a sibling goroutine mirrors stderr into slog. Both must drain
+	// their pipes BEFORE cmd.Wait runs — os/exec's StdoutPipe docs are
+	// explicit that calling Wait before all reads complete is incorrect
+	// (a concurrent Wait closes the pipe while the scanner is still
+	// reading, losing the last events).
 	var (
 		result      Result
 		pipelineErr error
 	)
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go scanStream(&wg, stderr, logger.With("stream", "stderr"), "stderr")
+	pipelineDone := make(chan struct{})
+	stderrDone := make(chan struct{})
 	go func() {
-		defer wg.Done()
+		defer close(pipelineDone)
 		result, pipelineErr = Run(execCtx, stdout, instanceID, logger, onBail)
 	}()
+	go func() {
+		defer close(stderrDone)
+		scanner := bufio.NewScanner(stderr)
+		scanner.Buffer(make([]byte, 0, 64<<10), 1<<20)
+		for scanner.Scan() {
+			logger.Info(scanner.Text(), "stream", "stderr")
+		}
+	}()
 
-	// Step 10: wait for exit, with shutdown sequencing.
-	waitDone := make(chan error, 1)
-	go func() { waitDone <- cmd.Wait() }()
-
+	// Step 10: wait for the pipeline to drain (stdout EOF, which
+	// happens when the subprocess exits) with supervisor-shutdown
+	// sequencing. Pipeline completion is the signal that all events
+	// have been observed; cmd.Wait below reaps the subprocess.
 	var (
 		shutdownCtxErr    error
 		shutdownSigkilled bool
 	)
 	select {
-	case <-waitDone:
-		// Natural exit (including timeout-driven Cancel chain).
+	case <-pipelineDone:
+		// Subprocess wrote its final line and closed stdout — natural
+		// exit (including the exec.CommandContext timeout path, which
+		// routes through cmd.Cancel → killProcessGroup(SIGTERM) →
+		// WaitDelay escalation, eventually closing stdout).
 	case <-ctx.Done():
 		shutdownCtxErr = ctx.Err()
 		if err := killProcessGroup(cmd, syscall.SIGTERM); err != nil {
 			logger.Warn("killProcessGroup(SIGTERM) on shutdown returned error", "err", err)
 		}
 		select {
-		case <-waitDone:
+		case <-pipelineDone:
 		case <-time.After(ShutdownSignalGrace):
 			if err := killProcessGroup(cmd, syscall.SIGKILL); err != nil {
 				logger.Warn("killProcessGroup(SIGKILL) on shutdown returned error", "err", err)
 			}
 			shutdownSigkilled = true
-			<-waitDone
+			<-pipelineDone
 		}
 	}
-	wg.Wait()
+	<-stderrDone
+
+	// Now safe to reap. cmd.Wait closes stdout/stderr pipes but those
+	// are already drained, so no data is lost; it just returns the
+	// ProcessState.
+	_ = cmd.Wait()
 
 	if shutdownSigkilled && deps.SigkillEscalations != nil {
 		deps.SigkillEscalations.Add(1)

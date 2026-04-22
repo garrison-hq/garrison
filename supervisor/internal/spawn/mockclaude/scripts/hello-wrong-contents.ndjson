@@ -1,0 +1,9 @@
+# T016 TestM21AcceptanceFailedWhenHelloTxtContentsWrong fixture: mock
+# writes hello.txt with the literal string "oops" (not the ticket id),
+# then emits a clean init+result. Adjudicate falls through to the
+# helloTxtOK branch and records exit_reason=acceptance_failed because
+# the contents diff does not match the ticket id.
+#write-hello-txt-contents oops
+{"type":"system","subtype":"init","session_id":"mock-hello-wrong","model":"claude-haiku-4-5-20251001","cwd":"/workspaces/engineering","tools":[],"mcp_servers":[{"name":"postgres","status":"connected"}]}
+{"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","content":[{"type":"text","text":"wrote the wrong thing"}]}}
+{"type":"result","subtype":"success","is_error":false,"duration_ms":130,"duration_api_ms":110,"total_cost_usd":0.002,"stop_reason":"end_turn","result":"mismatch","session_id":"mock-hello-wrong"}

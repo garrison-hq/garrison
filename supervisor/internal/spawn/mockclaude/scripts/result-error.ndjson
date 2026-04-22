@@ -1,0 +1,7 @@
+# T016 TestM21ClaudeErrorResult fixture: init + result with is_error=true.
+# Adjudicate records exit_reason=claude_error; cost is captured because a
+# result event landed; no ticket transition (FR-114 — only succeeded path
+# writes the row).
+{"type":"system","subtype":"init","session_id":"mock-err","model":"claude-haiku-4-5-20251001","cwd":"/workspaces/engineering","tools":[],"mcp_servers":[{"name":"postgres","status":"connected"}]}
+{"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","content":[{"type":"text","text":"I failed"}]}}
+{"type":"result","subtype":"error_during_execution","is_error":true,"duration_ms":500,"duration_api_ms":420,"total_cost_usd":0.004,"stop_reason":"error","result":"error","session_id":"mock-err"}

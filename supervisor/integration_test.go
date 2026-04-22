@@ -15,6 +15,7 @@ import (
 	"github.com/garrison-hq/garrison/supervisor/internal/store"
 	"github.com/garrison-hq/garrison/supervisor/internal/testdb"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // TestEndToEndTicketFlow is the M1 smoke test: boot a real supervisor
@@ -640,4 +641,297 @@ func normaliseCost(s string) string {
 		return "0"
 	}
 	return s
+}
+
+// ---------------------------------------------------------------------
+// T016: M2.1 Claude failure-path integration tests
+// ---------------------------------------------------------------------
+
+// m21TestSetup bundles the common scaffolding every T016/T017 test
+// needs: seed, build the mock, start the supervisor against a named
+// script, insert a ticket, and return the ticket ID plus the open
+// workspace/config dirs so the assertion block can inspect them.
+type m21TestSetup struct {
+	TicketID      string
+	TicketUUID    pgtype.UUID
+	DepartmentID  pgtype.UUID
+	WorkspaceDir  string
+	MCPConfigDir  string
+	Pool          *pgxpool.Pool
+	SupervisorBin string
+}
+
+func startM21Scenario(t *testing.T, scriptName string, extra func(*supervisorOpts)) m21TestSetup {
+	t.Helper()
+	pool := testdb.Start(t)
+	workspaceDir := t.TempDir()
+	mcpConfigDir := t.TempDir()
+	deptID := testdb.SeedM21(t, workspaceDir)
+	mockBin := buildMockClaudeBinary(t)
+	scriptPath := mockClaudeScriptPath(t, scriptName)
+
+	opts := supervisorOpts{
+		ClaudeBin:        mockBin,
+		AgentROPassword:  "integration-test-ro",
+		MCPConfigDir:     mcpConfigDir,
+		MockClaudeScript: scriptPath,
+		PollInterval:     "1s",
+		LogLevel:         "info",
+	}
+	if extra != nil {
+		extra(&opts)
+	}
+	startSupervisor(t, opts)
+
+	ticket, err := store.New(pool).InsertTicket(context.Background(), store.InsertTicketParams{
+		DepartmentID: deptID,
+		Objective:    "failure-scenario ticket",
+	})
+	if err != nil {
+		t.Fatalf("InsertTicket: %v", err)
+	}
+	return m21TestSetup{
+		TicketID:     formatTicketID(t, ticket.ID),
+		TicketUUID:   ticket.ID,
+		DepartmentID: deptID,
+		WorkspaceDir: workspaceDir,
+		MCPConfigDir: mcpConfigDir,
+		Pool:         pool,
+	}
+}
+
+// waitForTerminalAny polls for any terminal status (succeeded | failed |
+// timeout) against the supplied ticket_id. Returns the agent_instance
+// row fields relevant to failure-path assertions. Fails the test if
+// no terminal row lands within the budget.
+type terminalRow struct {
+	Status     string
+	ExitReason *string
+	Pid        *int32
+	Cost       *string
+}
+
+func waitForTerminalByTicket(t *testing.T, pool *pgxpool.Pool, ticketID pgtype.UUID, within time.Duration) terminalRow {
+	t.Helper()
+	ctx := context.Background()
+	deadline := time.Now().Add(within)
+	var row terminalRow
+	for time.Now().Before(deadline) {
+		err := pool.QueryRow(ctx, `
+			SELECT status, exit_reason, pid, total_cost_usd::text
+			FROM agent_instances
+			WHERE ticket_id = $1 AND status <> 'running'`,
+			ticketID,
+		).Scan(&row.Status, &row.ExitReason, &row.Pid, &row.Cost)
+		if err == nil {
+			return row
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("no terminal agent_instance row for ticket %v within %s", ticketID, within)
+	return row
+}
+
+// assertNoTransition asserts there is no ticket_transitions row for the
+// given ticket. Non-success exit reasons must not write a transition
+// (FR-114).
+func assertNoTransition(t *testing.T, pool *pgxpool.Pool, ticketID pgtype.UUID) {
+	t.Helper()
+	var n int64
+	if err := pool.QueryRow(context.Background(),
+		`SELECT COUNT(*) FROM ticket_transitions WHERE ticket_id = $1`, ticketID,
+	).Scan(&n); err != nil {
+		t.Fatalf("count transitions: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("unexpected ticket_transitions rows: %d (want 0 for non-success exit)", n)
+	}
+}
+
+// assertHelloTxtMissing asserts workspace/hello.txt does not exist.
+func assertHelloTxtMissing(t *testing.T, workspaceDir string) {
+	t.Helper()
+	if _, err := os.Stat(fmt.Sprintf("%s/hello.txt", workspaceDir)); !os.IsNotExist(err) {
+		t.Errorf("hello.txt should not exist on failure path; stat err = %v", err)
+	}
+}
+
+// TestM21UnknownMCPStatusFailsClosed — FR-108 fail-closed on unknown
+// MCP status in the init event. Mock emits status="banana"; supervisor
+// bails the process group and records exit_reason=mcp_postgres_banana.
+func TestM21UnknownMCPStatusFailsClosed(t *testing.T) {
+	s := startM21Scenario(t, "mcp-bail.ndjson", nil)
+	row := waitForTerminalByTicket(t, s.Pool, s.TicketUUID, 20*time.Second)
+	if row.Status != "failed" {
+		t.Errorf("status = %q; want failed", row.Status)
+	}
+	if row.ExitReason == nil || *row.ExitReason != "mcp_postgres_banana" {
+		t.Errorf("exit_reason = %v; want mcp_postgres_banana", row.ExitReason)
+	}
+	assertHelloTxtMissing(t, s.WorkspaceDir)
+	assertNoTransition(t, s.Pool, s.TicketUUID)
+}
+
+// TestM21ParseErrorBails — FR-106: a malformed NDJSON line mid-stream is
+// fatal; the supervisor bails the process group and records exit_reason
+// =parse_error.
+func TestM21ParseErrorBails(t *testing.T) {
+	s := startM21Scenario(t, "parse-error.ndjson", nil)
+	row := waitForTerminalByTicket(t, s.Pool, s.TicketUUID, 20*time.Second)
+	if row.Status != "failed" {
+		t.Errorf("status = %q; want failed", row.Status)
+	}
+	if row.ExitReason == nil || *row.ExitReason != "parse_error" {
+		t.Errorf("exit_reason = %v; want parse_error", row.ExitReason)
+	}
+	assertHelloTxtMissing(t, s.WorkspaceDir)
+	assertNoTransition(t, s.Pool, s.TicketUUID)
+}
+
+// TestM21NoResultEventFailsClosed — clarify Q3: a subprocess that exits
+// 0 without ever emitting a result event is failed with exit_reason=
+// no_result. Cost stays NULL; no transition.
+func TestM21NoResultEventFailsClosed(t *testing.T) {
+	s := startM21Scenario(t, "no-result.ndjson", nil)
+	row := waitForTerminalByTicket(t, s.Pool, s.TicketUUID, 20*time.Second)
+	if row.Status != "failed" {
+		t.Errorf("status = %q; want failed", row.Status)
+	}
+	if row.ExitReason == nil || *row.ExitReason != "no_result" {
+		t.Errorf("exit_reason = %v; want no_result", row.ExitReason)
+	}
+	if row.Cost != nil {
+		t.Errorf("cost = %v; want NULL (no result event means no billing)", *row.Cost)
+	}
+	assertNoTransition(t, s.Pool, s.TicketUUID)
+}
+
+// TestM21ClaudeErrorResult — result event with is_error=true. Cost
+// captured from the event; no transition.
+func TestM21ClaudeErrorResult(t *testing.T) {
+	s := startM21Scenario(t, "result-error.ndjson", nil)
+	row := waitForTerminalByTicket(t, s.Pool, s.TicketUUID, 20*time.Second)
+	if row.Status != "failed" {
+		t.Errorf("status = %q; want failed", row.Status)
+	}
+	if row.ExitReason == nil || *row.ExitReason != "claude_error" {
+		t.Errorf("exit_reason = %v; want claude_error", row.ExitReason)
+	}
+	if row.Cost == nil || normaliseCost(*row.Cost) != "0.004" {
+		t.Errorf("cost = %v; want 0.004 (captured from the error result event)", row.Cost)
+	}
+	assertNoTransition(t, s.Pool, s.TicketUUID)
+}
+
+// TestM21AcceptanceFailedWhenHelloTxtMissing — successful init+result but
+// no file written. Adjudicate falls to the acceptance branch.
+func TestM21AcceptanceFailedWhenHelloTxtMissing(t *testing.T) {
+	s := startM21Scenario(t, "hello-missing.ndjson", nil)
+	row := waitForTerminalByTicket(t, s.Pool, s.TicketUUID, 20*time.Second)
+	if row.Status != "failed" {
+		t.Errorf("status = %q; want failed", row.Status)
+	}
+	if row.ExitReason == nil || *row.ExitReason != "acceptance_failed" {
+		t.Errorf("exit_reason = %v; want acceptance_failed", row.ExitReason)
+	}
+	if row.Cost == nil || normaliseCost(*row.Cost) != "0.002" {
+		t.Errorf("cost = %v; want 0.002 (captured from the success result event)", row.Cost)
+	}
+	assertHelloTxtMissing(t, s.WorkspaceDir)
+	assertNoTransition(t, s.Pool, s.TicketUUID)
+}
+
+// TestM21AcceptanceFailedWhenHelloTxtContentsWrong — mock writes
+// hello.txt with "oops" instead of the ticket id. Same terminal as the
+// missing-file case: exit_reason=acceptance_failed.
+func TestM21AcceptanceFailedWhenHelloTxtContentsWrong(t *testing.T) {
+	s := startM21Scenario(t, "hello-wrong-contents.ndjson", nil)
+	row := waitForTerminalByTicket(t, s.Pool, s.TicketUUID, 20*time.Second)
+	if row.Status != "failed" {
+		t.Errorf("status = %q; want failed", row.Status)
+	}
+	if row.ExitReason == nil || *row.ExitReason != "acceptance_failed" {
+		t.Errorf("exit_reason = %v; want acceptance_failed", row.ExitReason)
+	}
+	// The file exists but with wrong contents — the fail-closed check
+	// reads and compares; we don't re-assert the on-disk form beyond
+	// that.
+	b, _ := os.ReadFile(fmt.Sprintf("%s/hello.txt", s.WorkspaceDir))
+	if string(b) != "oops" {
+		t.Errorf("hello.txt contents = %q; want %q", string(b), "oops")
+	}
+	assertNoTransition(t, s.Pool, s.TicketUUID)
+}
+
+// TestM21SpawnFailedOnConfigWriteError — clarify Q2: when mcpconfig.Write
+// fails the supervisor writes a terminal row with exit_reason=spawn_failed
+// and keeps running. The second ticket (after the config dir is made
+// writable again) runs normally.
+func TestM21SpawnFailedOnConfigWriteError(t *testing.T) {
+	pool := testdb.Start(t)
+	workspaceDir := t.TempDir()
+	mcpConfigDir := t.TempDir()
+	// Make the config dir non-writable BEFORE the supervisor starts, so
+	// its startup check succeeds (MkdirAll + write probe at config load
+	// time — the probe runs with the test user's perms before we
+	// chmod), then read-only'd for the supervisor's spawn-time write.
+	// Startup writability is gated by config.Load's ensureWritableDir
+	// which tolerates pre-existing directories; spawn-time writes fail
+	// because the dir ends up chmodded 0500 below.
+	deptID := testdb.SeedM21(t, workspaceDir)
+
+	mockBin := buildMockClaudeBinary(t)
+	scriptPath := mockClaudeScriptPath(t, "helloworld.ndjson")
+
+	// Startup probe needs write perms; chmod happens AFTER startup.
+	startSupervisor(t, supervisorOpts{
+		ClaudeBin:        mockBin,
+		AgentROPassword:  "integration-test-ro",
+		MCPConfigDir:     mcpConfigDir,
+		MockClaudeScript: scriptPath,
+		PollInterval:     "1s",
+		LogLevel:         "info",
+	})
+	// Revoke write permission so the supervisor's per-invocation
+	// mcpconfig.Write fails with EACCES, triggering the spawn_failed
+	// terminal path.
+	if err := os.Chmod(mcpConfigDir, 0o500); err != nil {
+		t.Fatalf("chmod mcp dir: %v", err)
+	}
+
+	firstTicket, err := store.New(pool).InsertTicket(context.Background(), store.InsertTicketParams{
+		DepartmentID: deptID,
+		Objective:    "spawn-failed scenario",
+	})
+	if err != nil {
+		t.Fatalf("InsertTicket first: %v", err)
+	}
+	row := waitForTerminalByTicket(t, pool, firstTicket.ID, 20*time.Second)
+	if row.Status != "failed" {
+		t.Errorf("first status = %q; want failed", row.Status)
+	}
+	if row.ExitReason == nil || *row.ExitReason != "spawn_failed" {
+		t.Errorf("first exit_reason = %v; want spawn_failed", row.ExitReason)
+	}
+
+	// Restore write permission so a follow-on ticket succeeds normally
+	// — pins that the dispatcher kept running after the spawn-failed
+	// terminal.
+	if err := os.Chmod(mcpConfigDir, 0o755); err != nil {
+		t.Fatalf("chmod mcp dir back: %v", err)
+	}
+	secondTicket, err := store.New(pool).InsertTicket(context.Background(), store.InsertTicketParams{
+		DepartmentID: deptID,
+		Objective:    "spawn-failed follow-on",
+	})
+	if err != nil {
+		t.Fatalf("InsertTicket second: %v", err)
+	}
+	row2 := waitForTerminalByTicket(t, pool, secondTicket.ID, 20*time.Second)
+	if row2.Status != "succeeded" {
+		t.Errorf("second status = %q; want succeeded (dispatcher must continue)", row2.Status)
+	}
+	if row2.ExitReason == nil || *row2.ExitReason != "completed" {
+		t.Errorf("second exit_reason = %v; want completed", row2.ExitReason)
+	}
 }

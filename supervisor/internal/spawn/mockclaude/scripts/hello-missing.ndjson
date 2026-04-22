@@ -1,0 +1,8 @@
+# T016 TestM21AcceptanceFailedWhenHelloTxtMissing fixture: successful
+# init+result, but the mock does NOT emit #write-hello-txt, so no file
+# is produced. The pipeline's observations are all clean (result_seen,
+# is_error=false), so Adjudicate falls through to the helloTxtOK branch
+# and records exit_reason=acceptance_failed. Cost captured.
+{"type":"system","subtype":"init","session_id":"mock-hello-missing","model":"claude-haiku-4-5-20251001","cwd":"/workspaces/engineering","tools":[],"mcp_servers":[{"name":"postgres","status":"connected"}]}
+{"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","content":[{"type":"text","text":"forgot to write the file"}]}}
+{"type":"result","subtype":"success","is_error":false,"duration_ms":120,"duration_api_ms":100,"total_cost_usd":0.002,"stop_reason":"end_turn","result":"oops","session_id":"mock-hello-missing"}
