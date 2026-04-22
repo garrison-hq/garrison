@@ -1,6 +1,6 @@
 # Garrison — Architecture v0.2
 
-A zero-human company driver. Event-driven agent organization backed by Postgres + MemPalace, orchestrating Claude Code subprocesses as ephemeral workers. Replaces Paperclip with something cheaper when idle, faster to configure, and with genuine institutional memory.
+A zero-human company driver. Event-driven agent organization backed by Postgres + MemPalace, orchestrating Claude Code subprocesses as ephemeral workers. A rebuild after pain points I hit running multiple agents efficiently in an earlier setup: cheap when idle, fast to configure, with genuine institutional memory across restarts.
 
 ---
 
@@ -509,4 +509,4 @@ The UI is the product. Views to build across M3 and M4:
 
 - It is not a general orchestrator. Agents run Claude Code; that's the only runtime we care about supporting.
 - It is not a no-code tool. Agents are configured by markdown + YAML. Dashboards edit those, but the model is "config files as first-class data in a database," not "visual workflow builder."
-- It is not trying to replace every Paperclip feature. It's trying to replace Paperclip's value prop — cross-team agent orchestration — with something event-driven, memory-backed, and cheaper.
+- It is not trying to replicate every feature of the earlier multi-agent setup I ran. It's trying to solve the core value — cross-team agent orchestration — with something event-driven, memory-backed, and cheaper.

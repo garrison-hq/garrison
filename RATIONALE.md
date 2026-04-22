@@ -11,12 +11,12 @@ Read this before proposing changes. Most "wouldn't it be better if..." questions
 **Decision**: Postgres + pg_notify as the event bus. Agents spawn on events, run to completion, die. No polling loops, no scheduled heartbeats.
 
 **Alternatives considered**:
-- Scheduled heartbeats per agent (the Paperclip model)
+- Scheduled heartbeats per agent (what I had running before)
 - Message queue (Redis Streams, RabbitMQ, NATS)
 - Serverless triggers
 
 **Why pg_notify won**:
-- Zero idle cost. Agents consume no tokens when no events match them. This is the single biggest failure of Paperclip, which had 7 of 8 agents waking on cron to check if there was work for them — most wakes produced nothing but burned tokens.
+- Zero idle cost. Agents consume no tokens when no events match them. This is the single biggest failure of the scheduled-heartbeat approach I was running before — most agents spent most of their wake cycles checking a queue, finding nothing, and going back to sleep, burning tokens to produce no output.
 - Transactional. The event fires inside the same transaction that changed state, so there's no window where state is updated but the event wasn't delivered.
 - No extra infrastructure. Postgres is already required for application state; reusing it as the bus means one fewer thing to run, monitor, back up, and learn.
 - Well-understood failure modes. Postgres disconnects are survivable with reconnect + processed_at fallback; message broker failure modes are more varied and less familiar.
@@ -56,7 +56,7 @@ Read this before proposing changes. Most "wouldn't it be better if..." questions
 
 **Why MemPalace won**:
 - Structured navigation via wings + rooms + halls outperforms flat vector search on real-world recall. The 34% retrieval improvement from wing+room filtering is not cosmetic.
-- Wings shared across instances of the same role means institutional expertise accumulates. Instance #47 of frontend-engineer benefits from what instance #12 learned six months ago. This is the killer feature that Paperclip could not replicate.
+- Wings shared across instances of the same role means institutional expertise accumulates. Instance #47 of frontend-engineer benefits from what instance #12 learned six months ago. This is the killer feature that context-window-based memory models cannot replicate.
 - The temporal knowledge graph handles "who decided what when" natively. This is exactly what a CEO needs to answer "why are we doing X?".
 - Local, free, no API dependency. Aligns with the self-hosted ethos.
 - MCP-native, so every agent gets it through the same baseline tool set.
@@ -227,7 +227,7 @@ Collected from the decisions above. These are the things someone might reasonabl
 
 - **Not a general-purpose agent orchestrator.** Claude Code is the only runtime we support. If another runtime matters later, it's a fork, not a feature.
 - **Not a no-code tool.** Agents are configured by markdown + YAML. The UI edits them, but the mental model is "config files as first-class data in a database."
-- **Not a replacement for every Paperclip feature.** We replaced Paperclip's value proposition — cross-team agent orchestration — with something event-driven and memory-backed. Specific Paperclip features that aren't here (e.g. CEO-as-dispatcher heartbeat model) were rejected deliberately.
+- **Not a replacement for every feature of the earlier setup I ran.** I rebuilt the core value — cross-team agent orchestration — event-driven and memory-backed. Specific features that aren't here (e.g. the CEO-as-dispatcher heartbeat model) were rejected deliberately.
 - **Not a team-collaboration tool.** Built for a solo operator. Multi-user access control, permissions, activity attribution across humans — none of these exist.
 - **Not git-native.** Git is for code the agents write, not for system state or agent configs.
 - **Not cloud-first.** Self-hosted on Hetzner is the primary deployment model. Cloud deployments may work but are not optimized for.
