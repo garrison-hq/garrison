@@ -40,7 +40,7 @@ func TestReconnectCatchesMissedEvents(t *testing.T) {
 		PollInterval: "2s",
 	})
 
-	dept := mustInsertDepartment(t, q, "eng", 3)
+	dept := mustInsertDepartment(t, q, "engineering", 3)
 
 	// Chaos: kill every backend other than the current one. This drops the
 	// supervisor's listen conn and any currently-checked-out pool conns,
@@ -98,7 +98,7 @@ func TestSIGKILLSubprocessRecordedFailed(t *testing.T) {
 		SubprocessTimeout: "60s",
 	})
 
-	dept := mustInsertDepartment(t, q, "eng", 1)
+	dept := mustInsertDepartment(t, q, "engineering", 1)
 	ticket, err := q.InsertTicket(ctx, store.InsertTicketParams{
 		DepartmentID: dept.ID, Objective: "killme",
 	})
@@ -169,7 +169,7 @@ func TestGracefulShutdownWithInflight(t *testing.T) {
 		ShutdownGrace:     "10s",
 	})
 
-	dept := mustInsertDepartment(t, q, "eng", 1)
+	dept := mustInsertDepartment(t, q, "engineering", 1)
 	if _, err := q.InsertTicket(ctx, store.InsertTicketParams{
 		DepartmentID: dept.ID, Objective: "longjob",
 	}); err != nil {

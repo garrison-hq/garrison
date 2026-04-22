@@ -31,7 +31,7 @@ func TestEndToEndTicketFlow(t *testing.T) {
 		PollInterval: "1s",
 	})
 
-	dept := mustInsertDepartment(t, q, "eng", 2)
+	dept := mustInsertDepartment(t, q, "engineering", 2)
 	if _, err := q.InsertTicket(ctx, store.InsertTicketParams{
 		DepartmentID: dept.ID, Objective: "golden path",
 	}); err != nil {
@@ -64,7 +64,7 @@ func TestConcurrencyCapEnforced(t *testing.T) {
 		PollInterval: "1s",
 	})
 
-	dept := mustInsertDepartment(t, q, "eng", 2)
+	dept := mustInsertDepartment(t, q, "engineering", 2)
 	for i := 0; i < 3; i++ {
 		if _, err := q.InsertTicket(ctx, store.InsertTicketParams{
 			DepartmentID: dept.ID, Objective: fmt.Sprintf("t%d", i),
@@ -94,7 +94,7 @@ func TestDeferredEventPickedUpOnPoll(t *testing.T) {
 		PollInterval: "1s",
 	})
 
-	dept := mustInsertDepartment(t, q, "eng", 1)
+	dept := mustInsertDepartment(t, q, "engineering", 1)
 	for i := 0; i < 2; i++ {
 		if _, err := q.InsertTicket(ctx, store.InsertTicketParams{
 			DepartmentID: dept.ID, Objective: fmt.Sprintf("t%d", i),
@@ -123,7 +123,7 @@ func TestDepartmentNotExistMarksProcessed(t *testing.T) {
 	payload := `{"ticket_id":"11111111-1111-1111-1111-111111111111","department_id":"22222222-2222-2222-2222-222222222222"}`
 	var eventID pgtype.UUID
 	if err := pool.QueryRow(ctx,
-		`INSERT INTO event_outbox (channel, payload) VALUES ('work.ticket.created', $1::jsonb) RETURNING id`,
+		`INSERT INTO event_outbox (channel, payload) VALUES ('work.ticket.created.engineering.todo', $1::jsonb) RETURNING id`,
 		payload,
 	).Scan(&eventID); err != nil {
 		t.Fatalf("insert orphan event: %v", err)
@@ -174,7 +174,7 @@ func TestCapZeroPauses(t *testing.T) {
 		PollInterval: "1s",
 	})
 
-	dept := mustInsertDepartment(t, q, "eng", 0)
+	dept := mustInsertDepartment(t, q, "engineering", 0)
 	if _, err := q.InsertTicket(ctx, store.InsertTicketParams{
 		DepartmentID: dept.ID, Objective: "paused",
 	}); err != nil {
@@ -223,7 +223,7 @@ func TestStartupFallbackPollBeforeListen(t *testing.T) {
 	// INSERT fires the trigger which writes an event_outbox row and
 	// pg_notify — but with no listener, the notification is lost.
 	// Only the event_outbox row survives.
-	dept := mustInsertDepartment(t, q, "eng", 2)
+	dept := mustInsertDepartment(t, q, "engineering", 2)
 	if _, err := q.InsertTicket(ctx, store.InsertTicketParams{
 		DepartmentID: dept.ID, Objective: "pre-existing",
 	}); err != nil {
@@ -290,7 +290,7 @@ func TestRecoveryMarksStaleRunning(t *testing.T) {
 	q := store.New(pool)
 	ctx := context.Background()
 
-	dept := mustInsertDepartment(t, q, "eng", 2)
+	dept := mustInsertDepartment(t, q, "engineering", 2)
 	ticket, err := q.InsertTicket(ctx, store.InsertTicketParams{
 		DepartmentID: dept.ID, Objective: "stale",
 	})
@@ -380,7 +380,7 @@ func TestHundredTicketVolume(t *testing.T) {
 		PollInterval: "1s",
 	})
 
-	dept := mustInsertDepartment(t, q, "eng", 2)
+	dept := mustInsertDepartment(t, q, "engineering", 2)
 
 	// Start sampler before inserting tickets so we catch the ramp-up too.
 	sampleCtx, stopSampler := context.WithCancel(ctx)

@@ -9,6 +9,7 @@ import (
 	"os"
 	"sync/atomic"
 
+	"github.com/garrison-hq/garrison/supervisor/internal/agents"
 	"github.com/garrison-hq/garrison/supervisor/internal/config"
 	"github.com/garrison-hq/garrison/supervisor/internal/events"
 	"github.com/garrison-hq/garrison/supervisor/internal/health"
@@ -30,24 +31,42 @@ const (
 	ExitSigkillEscalation = 5
 )
 
-const usage = `Usage: supervisor [FLAGS]
+// EngineeringTicketChannel is the qualified pg_notify channel the M2.1
+// dispatcher registers against. After M2.1 ships, introducing a second
+// department is purely additive (register the additional channel) per
+// plan.md §internal/events.
+const EngineeringTicketChannel = "work.ticket.created.engineering.todo"
+
+const usage = `Usage: supervisor [FLAGS] | mcp-postgres
 
 Garrison supervisor daemon. Listens on Postgres pg_notify and spawns
-agent subprocesses on work.ticket.created events.
+Claude Code subprocesses on work.ticket.created.<dept>.<column> events.
+
+Subcommands:
+  mcp-postgres          Run the in-tree Postgres MCP server on stdio.
+                        Used by Claude Code via --mcp-config. Reads
+                        GARRISON_PGMCP_DSN from env.
 
 Flags:
-  --version         Print version and exit.
-  --help, -h        Print this message and exit.
-  --migrate         Run goose migrations against GARRISON_DATABASE_URL and exit.
+  --version             Print version and exit.
+  --help, -h            Print this message and exit.
+  --migrate             Run goose migrations against GARRISON_DATABASE_URL and exit.
 
 Environment variables (daemon mode):
   GARRISON_DATABASE_URL        required   Postgres connection URL.
-  GARRISON_FAKE_AGENT_CMD      required   Command template for the fake agent.
+  GARRISON_AGENT_RO_PASSWORD   required   Password for the garrison_agent_ro role.
+  GARRISON_CLAUDE_BIN          optional   Absolute path to the claude binary.
+                                          Falls back to exec.LookPath("claude").
+  GARRISON_CLAUDE_MODEL        optional   Model override; empty = per-agent DB value.
+  GARRISON_CLAUDE_BUDGET_USD   0.05       Per-invocation --max-budget-usd.
+  GARRISON_MCP_CONFIG_DIR      /var/lib/garrison/mcp/   Directory for per-spawn MCP configs.
   GARRISON_POLL_INTERVAL       5s         Fallback poll interval (min 1s).
   GARRISON_SUBPROCESS_TIMEOUT  60s        Per-subprocess timeout.
   GARRISON_SHUTDOWN_GRACE      30s        Graceful shutdown deadline.
   GARRISON_HEALTH_PORT         8080       HTTP health server port.
   GARRISON_LOG_LEVEL           info       Log level (debug|info|warn|error).
+  GARRISON_FAKE_AGENT_CMD      (test-only) Flip into fake-agent mode; suppresses
+                                          the real-Claude precondition checks.
 `
 
 func main() {
@@ -55,6 +74,15 @@ func main() {
 }
 
 func run(args []string) int {
+	// Subcommand dispatch takes the first positional arg. mcp-postgres
+	// runs a different code path that does not load the daemon config
+	// (it only needs GARRISON_PGMCP_DSN). Handling it before flag.Parse
+	// keeps a missing GARRISON_DATABASE_URL from shadowing the missing
+	// GARRISON_PGMCP_DSN error.
+	if len(args) > 0 && args[0] == "mcp-postgres" {
+		return runMCPPostgres()
+	}
+
 	fs := flag.NewFlagSet("supervisor", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	fs.Usage = func() { fmt.Fprint(os.Stdout, usage) }
@@ -110,23 +138,19 @@ func runDaemon() int {
 		"poll_interval", cfg.PollInterval,
 		"subprocess_timeout", cfg.SubprocessTimeout,
 		"shutdown_grace", cfg.ShutdownGrace,
-		"health_port", cfg.HealthPort)
+		"health_port", cfg.HealthPort,
+		"use_fake_agent", cfg.UseFakeAgent,
+		"claude_bin", cfg.ClaudeBin,
+		"mcp_config_dir", cfg.MCPConfigDir,
+	)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Install signal handlers before any potentially long-running operation
-	// (pgdb.Connect can loop in FR-017 backoff; advisory-lock acquire can
-	// block). Without this, a SIGTERM delivered during that window would hit
-	// the Go default handler and exit with code 143, violating the
-	// contracts/cli.md graceful-shutdown contract.
 	sigCh, stopSignals := installSignalHandler()
 	defer stopSignals()
 	go watchSignals(ctx, sigCh, cancel, logger)
 
-	// FR-017 initial connect with 100ms→30s backoff. Connect blocks until
-	// success or ctx cancel, so a signal during this window triggers a clean
-	// early exit with no lock acquisition.
 	pool, listenConn, err := pgdb.Connect(ctx, cfg)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
@@ -140,8 +164,6 @@ func runDaemon() int {
 	defer func() { _ = listenConn.Close(context.Background()) }()
 	logger.Info("connected to Postgres")
 
-	// FR-018 advisory lock on the dedicated listen conn. Lock is session-bound,
-	// released implicitly when the conn closes above.
 	if err := pgdb.AcquireAdvisoryLock(ctx, listenConn); err != nil {
 		if errors.Is(err, pgdb.ErrAdvisoryLockHeld) {
 			logger.Error("advisory lock held by another supervisor; exiting")
@@ -156,22 +178,50 @@ func runDaemon() int {
 	state := health.NewState()
 	var sigkillCounter atomic.Int64
 
-	// Build the spawn dependency bundle once; the handler closure captures it.
+	// Agents cache is populated at startup; hot-reload is deferred per
+	// plan §internal/agents. In fake-agent mode the cache is still built
+	// (it's cheap and harmless) so tests can exercise it incidentally.
+	agentsCache, err := agents.NewCache(ctx, queries)
+	if err != nil {
+		logger.Error("agents cache init failed", "error", err)
+		return ExitFailure
+	}
+	logger.Info("agents cache loaded", "count", agentsCache.Len())
+
+	// The supervisor writes its own absolute path into mcp-config-<uuid>.
+	// json so Claude's MCP launcher can exec `supervisor mcp-postgres` —
+	// os.Executable is the portable way to get that path without hard-
+	// coding /usr/local/bin/supervisor. If it fails, we log and fall
+	// back to os.Args[0]; spawn_failed will surface in the agent_instances
+	// row if the resulting path can't actually execute.
+	supervisorBin, err := os.Executable()
+	if err != nil {
+		logger.Warn("os.Executable failed; using os.Args[0]", "err", err)
+		supervisorBin = os.Args[0]
+	}
+
 	spawnDeps := spawn.Deps{
 		Pool:               pool,
 		Queries:            queries,
-		FakeAgentCmd:       cfg.FakeAgentCmd,
-		SubprocessTimeout:  cfg.SubprocessTimeout,
 		Logger:             logger,
+		SubprocessTimeout:  cfg.SubprocessTimeout,
 		SigkillEscalations: &sigkillCounter,
+		FakeAgentCmd:       cfg.FakeAgentCmd,
+		UseFakeAgent:       cfg.UseFakeAgent,
+		AgentsCache:        agentsCache,
+		ClaudeBin:          cfg.ClaudeBin,
+		ClaudeModel:        cfg.ClaudeModel,
+		ClaudeBudgetUSD:    cfg.ClaudeBudgetUSD,
+		MCPConfigDir:       cfg.MCPConfigDir,
+		SupervisorBin:      supervisorBin,
+		AgentRODSN:         cfg.AgentRODSN(),
 	}
 
-	// Static dispatcher (FR-014). `work.ticket.created` is the only M1 channel.
 	ticketCreatedHandler := func(ctx context.Context, eventID pgtype.UUID) error {
 		return spawn.Spawn(ctx, spawnDeps, eventID)
 	}
 	dispatcher := events.NewDispatcher(map[string]events.Handler{
-		"work.ticket.created": ticketCreatedHandler,
+		EngineeringTicketChannel: ticketCreatedHandler,
 	})
 
 	healthServer := health.NewServer(cfg, state, pool)

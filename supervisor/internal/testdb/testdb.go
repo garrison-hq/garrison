@@ -35,19 +35,25 @@ var (
 )
 
 // Start returns a migrated *pgxpool.Pool backed by a shared postgres:17
-// container. The first call boots the container and applies both M1
-// migrations; later calls reuse the same pool. Every caller registers a
-// TRUNCATE-on-Cleanup so tests do not observe each other's rows.
+// container. The first call boots the container and applies every
+// migration (M1 + M2.1); later calls reuse the same pool. Each Start
+// call both TRUNCATEs eagerly (so tests are order-independent regardless
+// of migration seeds) and registers a post-test TRUNCATE via t.Cleanup
+// (so the next test still starts clean even if the pool grew new rows
+// this run). M2.1 tables (agents, companies, ticket_transitions) are
+// included so CASCADE semantics wipe the full working set.
 func Start(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	initOnce.Do(func() { initErr = bootContainer() })
 	if initErr != nil {
 		t.Fatalf("testdb: init: %v", initErr)
 	}
-	t.Cleanup(func() {
+	truncate := func() {
 		_, _ = sharedPool.Exec(context.Background(),
-			"TRUNCATE agent_instances, event_outbox, tickets, departments RESTART IDENTITY CASCADE")
-	})
+			"TRUNCATE agent_instances, event_outbox, tickets, ticket_transitions, agents, departments, companies RESTART IDENTITY CASCADE")
+	}
+	truncate()
+	t.Cleanup(truncate)
 	return sharedPool
 }
 
