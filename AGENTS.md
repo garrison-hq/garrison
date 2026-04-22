@@ -24,7 +24,7 @@ Garrison is being built milestone-by-milestone (M1 through M8). Each milestone s
   - **M2.2** — MemPalace MCP wiring (spike-first)
 - **M3** through **M8** — see `ARCHITECTURE.md`.
 
-Current milestone: **M2.1 — Claude Code invocation** (research spike pending; spec not yet started).
+Current milestone: **M2.1 — Claude Code invocation** (spike complete at `docs/research/m2-spike.md`; context file pending).
 
 ---
 
@@ -76,9 +76,11 @@ Before producing any code in this repository, explicitly bring relevant domain k
 ### M2.1 — Claude Code invocation (active)
 
 When working on M2.1, additionally activate:
+
 - **Claude Code non-interactive invocation contract**: exact flags, input format, stdout/stderr shape, exit code vocabulary. The specifics come from `docs/research/m2-spike.md` (Part 1), which is the binding source. Do not activate assumptions — activate the spike's findings.
-- **MCP server wiring as consumed by a child Claude Code process**: config file vs flag vs env var, per-invocation vs shared-server model. Specifics from the spike.
-- **Subprocess log parsing under structured output**: if Claude Code emits JSON-lines stdout, the supervisor's per-stream line-scanning goroutines from M1 need to parse rather than just log.
+- **stream-json event routing**: every invocation uses `--output-format stream-json --verbose`. The first event is `system`/`init`; subsequent events are `assistant`, `user` (tool_result), `rate_limit_event`, and a terminal `result`. The supervisor parses NDJSON line-by-line and routes by `type`.
+- **MCP health via init event**: the supervisor does NOT pre-spawn MCP servers for health checks. It parses the `mcp_servers[]` array in the `system`/`init` event. A server with `status == "connected"` is healthy; anything else (`failed`, `needs-auth`, or an unknown value) means the supervisor kills the Claude process group immediately and records the agent_instance as failed with `exit_reason = "mcp_<server>_<status>"`. Unknown status values are treated as failures (fail-closed). This rule comes from the M2 spike §2.5 and §A.
+- **Subprocess log parsing under structured output**: Claude's stdout is NDJSON, not log lines. The M1 per-stream line-scanning goroutines are reused, but each line is parsed as JSON and routed rather than emitted verbatim to slog.
 
 ### M2.2 — MemPalace MCP wiring
 
@@ -163,6 +165,7 @@ These apply throughout the supervisor code:
 4. Every spawned subprocess uses `exec.CommandContext(ctx, ...)` with a timeout-derived context. Context cancellation kills the subprocess (SIGTERM, 5s grace, SIGKILL).
 5. Channels: specify sender vs receiver responsibility; close from the sender side only; buffered channels need a documented reason.
 6. Terminal writes during graceful shutdown use `context.WithoutCancel(ctx)` plus a `TerminalWriteGrace` timeout, not the already-cancelled root context. See M1 retro §2 for the bug that established this rule.
+7. **Spawned subprocesses that may themselves spawn children (Claude Code from M2.1 onwards) run in their own process group.** Set `SysProcAttr.Setpgid = true` on the `exec.Cmd`, and when terminating, signal the group with `syscall.Kill(-pgid, SIGTERM)` / `SIGKILL` — never just the PID. PID-level signals allow children to survive past a supposedly-killed parent. See M1 retro addendum and `docs/research/m2-spike.md` §2.7.
 
 ---
 
@@ -188,7 +191,7 @@ Milestones ship end-to-end functional. If a task list produces scaffolding that 
 
 At the end of each milestone, write a retro capturing what worked, what surprised you, and what changed vs. the spec.
 
-- **M1 retro**: `docs/retros/m1.md`. Plain markdown. Written before MemPalace existed.
+- **M1 retro**: `docs/retros/m1.md`. Plain markdown. Written before MemPalace existed. An addendum at the bottom captures findings from the M2 spike that changed how M2.1 approaches subprocess termination.
 - **M2.1 retro**: `docs/retros/m2-1.md`. Plain markdown. MemPalace is not yet wired up as of M2.1 (that's the point of M2.2), so this retro cannot use MemPalace as its store.
 - **M2.2 onwards**: retros go to MemPalace directly (`wing_company / hall_events`), with a pointer at `docs/retros/m{N}.md` that links to the palace entry. This is the first milestone where the system dogfoods its own memory contract.
 
@@ -256,8 +259,8 @@ garrison/
 ├── specs/
 │   ├── _context/
 │   │   ├── m1-context.md
-│   │   ├── m2-1-context.md       ← to be written after the M2 spike
-│   │   └── m2-2-context.md       ← to be written after the M2 spike
+│   │   ├── m2-1-context.md       ← to be written next
+│   │   └── m2-2-context.md       ← to be written next
 │   ├── 001-m1-event-bus/
 │   ├── 002-m2-1-claude-code/     ← future
 │   └── 003-m2-2-mempalace/       ← future
@@ -270,7 +273,7 @@ garrison/
 ├── migrations/                   ← SQL, consumed by sqlc (Go) and Drizzle (TS)
 ├── docs/
 │   ├── research/
-│   │   └── m2-spike.md           ← produced before M2.1 speccing
+│   │   └── m2-spike.md           ← M2.1 and M2.2 binding input
 │   └── retros/
 │       ├── m1.md
 │       └── m2-1.md               ← future
@@ -295,6 +298,8 @@ When in doubt about where a file belongs, look at what this tree implies and fol
 - Do not mark a task complete until you've actually verified the acceptance criterion. "Seems right" is not done (see `obra/superpowers/verification-before-completion`).
 - Do not reproduce large portions of `ARCHITECTURE.md`, `RATIONALE.md`, or spike documents in commit messages, specs, or PR descriptions. Link to them; don't paraphrase them into drift.
 - Do not treat a research spike as a design phase. Spikes report observations; they do not make decisions.
+- **Do not run `mempalace init` against any git-tracked directory.** MemPalace's `init` command auto-modifies `.gitignore` in the scanned directory and drops `mempalace.yaml` / `entities.json` into it. The palace must be bootstrapped in a dedicated path (`~/.garrison/palace/` or an operator-configured path), never against the Garrison repo or the supervisor workspace. See `docs/research/m2-spike.md` §3.2.
+- **Do not rely on Claude Code's exit code to detect MCP server failures.** `--strict-mcp-config` with a broken server exits 0. The supervisor must parse the `system`/`init` event and check `mcp_servers[].status == "connected"` for each required server. See `docs/research/m2-spike.md` §2.5 and §A.
 
 ---
 

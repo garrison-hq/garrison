@@ -35,6 +35,10 @@ The supervisor does not reason. It is a process manager.
 
 **Stack**: Go 1.23+, `jackc/pgx/v5` for Postgres and LISTEN/NOTIFY, `sqlc` for typed query generation, `log/slog` for structured logging, `golang.org/x/sync/errgroup` for concurrent subsystem management, stdlib `os/exec` with `CommandContext` for subprocess lifecycle. Deployed as a single static binary via Docker on Hetzner + Coolify. The allowed-dependency list is locked — agents implementing the supervisor cannot add dependencies without an explicit hiring-style proposal.
 
+**Subprocess lifecycle**: Claude Code subprocesses are spawned under their own process group (`SysProcAttr.Setpgid = true`) and signaled by process group, not PID. This is required because Claude Code may spawn child processes (MCP servers, tool executions) that must be terminated alongside the parent. PID-level signals are insufficient. This rule applies to all subprocesses from M2.1 onwards.
+
+**MCP health detection**: the supervisor does not manage MCP servers directly. Each Claude subprocess spawns its own MCP servers per the `--mcp-config` file. To detect broken MCP servers, the supervisor parses Claude Code's `system`/`init` event (first NDJSON line of stdout in stream-json mode) and checks the `mcp_servers[]` array — any server whose `status` is not `"connected"` causes the supervisor to kill the Claude process group immediately and mark the agent_instance as failed. Claude Code's exit code is not a reliable MCP health signal; broken MCP servers produce `exit 0` with `--strict-mcp-config`. This contract is binding from M2.1 onwards and was characterized in `docs/research/m2-spike.md`.
+
 **Missed-event handling**: LISTEN is the fast path, but notifications are lost during reconnects. The event tables include a `processed_at` column, and the supervisor runs a fallback poll (`SELECT ... WHERE processed_at IS NULL LIMIT N`) every N seconds as a safety net.
 
 ### Agent processes
@@ -416,11 +420,11 @@ Some milestones carry genuine external unknowns — how a tool actually behaves 
 
 **M1 — Event bus + supervisor core.** ✅ Shipped 2026-04-22. Spec the pg_notify contract, the processed_at fallback, concurrency accounting, and the subprocess spawn contract. Deliverable: a Go binary that listens on a channel, spawns a fake agent (`echo "hello from ticket $TICKET_ID"`), respects concurrency caps, handles timeouts and cleanup. No Claude Code yet, no MemPalace. Proves the plumbing and establishes the Go idioms before real agent work lands. Retro: `docs/retros/m1.md`.
 
-**M2 — First real agent loop.** Split into M2.1 and M2.2 because carrying both Claude Code and MemPalace unknowns through a single spec is a scope-creep forcing function. Each sub-milestone is independently shippable.
+**M2 — First real agent loop.** Split into M2.1 and M2.2 because carrying both Claude Code and MemPalace unknowns through a single spec is a scope-creep forcing function. Each sub-milestone is independently shippable. The M2 research spike (`docs/research/m2-spike.md`) produced binding characterization for both; no additional spike is needed.
 
-**M2.1 — Claude Code invocation (spike-first).** Begins with a research spike (`docs/research/m2-spike.md`) characterizing Claude Code's non-interactive invocation contract: flags, input/output shape, exit codes, MCP wiring, kill behavior, cost surfaces. Then swap the M1 fake subprocess for actual Claude Code invocation with a minimal `agent.md`, one department (engineering), one trivial workflow. No MemPalace yet — M2.1 agents do not write to the palace, they just exist and exit cleanly. Create a ticket manually via SQL, watch an agent pick it up, do trivial work (write a hello-world file to its workspace), exit successfully. The M1 deferred items re-enter here: real runtime base image, `agent_instances.pid` backfill, acceptance step 9 clarification.
+**M2.1 — Claude Code invocation.** Swap the M1 fake subprocess for actual Claude Code invocation with a minimal `agent.md`, one department (engineering), one trivial workflow. No MemPalace yet — M2.1 agents do not write to the palace, they just exist and exit cleanly. Create a ticket manually via SQL, watch an agent pick it up, do trivial work (write a hello-world file to its workspace), exit successfully. The M1 deferred items re-enter here: real runtime base image, `agent_instances.pid` backfill, acceptance step 9 clarification, and the SIGTERM-to-pgid fix surfaced in the M1 retro addendum.
 
-**M2.2 — MemPalace MCP wiring (spike-first).** Spike characterizes MemPalace as an MCP server under Garrison's concurrent-access pattern: startup model (daemon vs per-invocation), wing/drawer mechanics under simultaneous writes, KG triple behavior, storage layout, failure modes. Then wire MemPalace into every spawn — MCP tool always available, wake-up context injection, the completion protocol writes from `agent.md` become real. The hygiene dashboard concept appears first here as a read-only query ("which transitions are missing expected writes?"); the full hygiene UI waits for M3.
+**M2.2 — MemPalace MCP wiring.** Wire MemPalace into every spawn — MCP tool always available, wake-up context injection, the completion protocol writes from `agent.md` become real. The palace is bootstrapped at a dedicated path outside any git-tracked directory (per the spike's finding that `init` mutates `.gitignore`). The hygiene dashboard concept appears first here as a read-only query ("which transitions are missing expected writes?"); the full hygiene UI waits for M3.
 
 After M2.2 ships, the architecture's memory thesis is validated or falsified. If agents reliably write useful diaries and the palace makes future agents smarter, the rest of the roadmap is extension. If the write contract produces thin or useless entries, everything downstream has to be reconsidered before it's built.
 
@@ -518,7 +522,7 @@ The UI is the product. Views to build across M3 and M4:
 ## Open questions for later
 
 - **Runaway control**: agent-spawned tickets can fan out. A per-department weekly ticket-creation budget, visible in the dashboard, covered in M8.
-- **Cost accounting**: per-ticket and per-agent-instance token burn. Log from the Claude Code SDK's response, roll up in the dashboard. First pass lands in M2.1 (cost surfaces are one of the spike's investigation points); the aggregated view comes in M6 alongside hygiene.
+- **Cost accounting**: per-ticket and per-agent-instance token burn. The M2 spike established that Claude Code emits `total_cost_usd` on the final `result` event in stream-json mode; the supervisor captures this per-invocation starting in M2.1. The aggregated view across tickets and agents comes in M6 alongside hygiene.
 - **Cross-department notification**: when the CTO sets a ticket to `needs_review` because it needs design input, who knows? A simple "needs_review" view in org overview is enough — the CEO doesn't need pushed alerts, you check the dashboard.
 - **Model override per spawn**: skip for early milestones. All agents use their configured model. Add per-spawn overrides only when a specific task demonstrates a need.
 - **Multi-company**: the schema has `companies` as a top-level entity but the initial build is single-company. Don't build multi-tenant until you need it.
@@ -530,4 +534,4 @@ The UI is the product. Views to build across M3 and M4:
 
 - It is not a general orchestrator. Agents run Claude Code; that's the only runtime we care about supporting.
 - It is not a no-code tool. Agents are configured by markdown + YAML. Dashboards edit those, but the model is "config files as first-class data in a database," not "visual workflow builder."
-- It is not trying to replicate every feature of the earlier multi-agent setup I ran. It's trying to solve the core value — cross-team agent orchestration — with something event-driven, memory-backed, and cheaper.
+- It is not trying to replicate every feature of the earlier multi-agent setup I ran. It's trying to replace its value prop — cross-team agent orchestration — with something event-driven, memory-backed, and cheaper.
