@@ -340,11 +340,51 @@ func Adjudicate(result Result, wait WaitDetail, helloTxtOK bool) (status, exitRe
 		return "failed", ExitNoResult
 	case result.IsError:
 		return "failed", ExitClaudeError
+	case result.ResultSeen && isBudgetTerminalReason(result.TerminalReason):
+		// M2.2 / FR-220: terminal result reports the --max-budget-usd
+		// was exceeded. Happens with is_error=false when Claude wraps
+		// up mid-turn under a budget ceiling; kept ABOVE the hello.txt
+		// check because a truncated run shouldn't be re-classified as
+		// acceptance_failed on a missing artefact — it's a cost issue.
+		// The exact TerminalReason string on 2.1.117 is not spike-pinned;
+		// case-insensitive substring match on "budget" is the defensive
+		// shim per plan §"Error vocabulary". Real-Claude observations
+		// feed back into a tighter enum post-M2.2.
+		return "failed", ExitBudgetExceeded
 	case !helloTxtOK:
 		return "failed", ExitAcceptanceFailed
 	default:
 		return "succeeded", ExitCompleted
 	}
+}
+
+// isBudgetTerminalReason returns true if the string looks like a
+// budget-overrun signal from Claude 2.1.117. Case-insensitive substring
+// match on "budget" — narrow enough to avoid false positives on
+// "completed"/"end_turn" but permissive to catch variants until the
+// exact enum value is pinned through observation.
+func isBudgetTerminalReason(s string) bool {
+	for i := 0; i+6 <= len(s); i++ {
+		c0 := toLowerASCII(s[i])
+		if c0 != 'b' {
+			continue
+		}
+		if toLowerASCII(s[i+1]) == 'u' &&
+			toLowerASCII(s[i+2]) == 'd' &&
+			toLowerASCII(s[i+3]) == 'g' &&
+			toLowerASCII(s[i+4]) == 'e' &&
+			toLowerASCII(s[i+5]) == 't' {
+			return true
+		}
+	}
+	return false
+}
+
+func toLowerASCII(b byte) byte {
+	if b >= 'A' && b <= 'Z' {
+		return b + 32
+	}
+	return b
 }
 
 // uuidString formats a pgtype.UUID for structured log context. Kept local

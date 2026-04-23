@@ -29,6 +29,7 @@ const (
 	ExitNoResult           = "no_result"           // subprocess exit without parsed result event (FR-110a, clarify Q3).
 	ExitAcceptanceFailed   = "acceptance_failed"   // hello.txt missing or contents mismatch (FR-112).
 	ExitAgentMissing       = "agent_missing"       // no agents row for the department+role.
+	ExitBudgetExceeded     = "budget_exceeded"     // terminal result reports --max-budget-usd overrun (M2.2 NFR-201 / FR-220).
 
 	// M1-inherited values; preserved for the fake-agent path and recovery.
 	ExitSupervisorRestart = "supervisor_restarted" // M1 recovery query.

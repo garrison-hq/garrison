@@ -408,3 +408,52 @@ func TestPipelineLogsMempalaceToolUsePairs(t *testing.T) {
 		}
 	}
 }
+
+// TestAdjudicateBudgetExceeded — M2.2 / FR-220: result with TerminalReason
+// containing "budget" → (failed, budget_exceeded).
+func TestAdjudicateBudgetExceeded(t *testing.T) {
+	got, reason := Adjudicate(
+		Result{ResultSeen: true, IsError: false, TerminalReason: "budget_exceeded", TotalCostUSD: "0.11"},
+		WaitDetail{ExitCode: 0},
+		false, // helloTxtOK — irrelevant; budget path outranks
+	)
+	if got != "failed" || reason != ExitBudgetExceeded {
+		t.Errorf("got (%s, %s); want (failed, %s)", got, reason, ExitBudgetExceeded)
+	}
+}
+
+// TestAdjudicateBudgetCaseInsensitive — Max_Budget_USD_Exceeded / other
+// capitalizations should also match.
+func TestAdjudicateBudgetCaseInsensitive(t *testing.T) {
+	cases := []string{"budget_exceeded", "Budget_Exceeded", "MAX_BUDGET_USD_EXCEEDED", "stopped_due_to_budget"}
+	for _, tr := range cases {
+		t.Run(tr, func(t *testing.T) {
+			got, reason := Adjudicate(
+				Result{ResultSeen: true, TerminalReason: tr, TotalCostUSD: "0.11"},
+				WaitDetail{ExitCode: 0},
+				false,
+			)
+			if got != "failed" || reason != ExitBudgetExceeded {
+				t.Errorf("terminal_reason=%q → (%s, %s); want (failed, %s)", tr, got, reason, ExitBudgetExceeded)
+			}
+		})
+	}
+}
+
+// TestAdjudicateBudgetDoesNotOverrideMCPBail — MCPBail precedence wins.
+func TestAdjudicateBudgetDoesNotOverrideMCPBail(t *testing.T) {
+	got, reason := Adjudicate(
+		Result{
+			MCPBailed:         true,
+			MCPOffenderName:   "mempalace",
+			MCPOffenderStatus: "failed",
+			ResultSeen:        true,
+			TerminalReason:    "budget_exceeded",
+		},
+		WaitDetail{ExitCode: 0},
+		false,
+	)
+	if got != "failed" || reason != "mcp_mempalace_failed" {
+		t.Errorf("got (%s, %s); want (failed, mcp_mempalace_failed) — MCP bail must outrank budget", got, reason)
+	}
+}
