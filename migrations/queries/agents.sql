@@ -11,3 +11,6 @@ ORDER BY department_id, role_slug;
 UPDATE agents
 SET agent_md = $2
 WHERE id = $1;
+
+-- name: GetAgentByID :one
+SELECT * FROM agents WHERE id = $1;

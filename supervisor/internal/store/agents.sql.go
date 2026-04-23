@@ -40,6 +40,29 @@ func (q *Queries) GetAgentByDepartmentAndRole(ctx context.Context, arg GetAgentB
 	return i, err
 }
 
+const getAgentByID = `-- name: GetAgentByID :one
+SELECT id, department_id, role_slug, agent_md, model, skills, mcp_tools, listens_for, palace_wing, status, created_at FROM agents WHERE id = $1
+`
+
+func (q *Queries) GetAgentByID(ctx context.Context, id pgtype.UUID) (Agent, error) {
+	row := q.db.QueryRow(ctx, getAgentByID, id)
+	var i Agent
+	err := row.Scan(
+		&i.ID,
+		&i.DepartmentID,
+		&i.RoleSlug,
+		&i.AgentMd,
+		&i.Model,
+		&i.Skills,
+		&i.McpTools,
+		&i.ListensFor,
+		&i.PalaceWing,
+		&i.Status,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const listActiveAgents = `-- name: ListActiveAgents :many
 SELECT id, department_id, role_slug, agent_md, model, skills, mcp_tools, listens_for, palace_wing, status, created_at FROM agents
 WHERE status = 'active'

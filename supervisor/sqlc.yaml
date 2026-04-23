@@ -6,6 +6,7 @@ sql:
       - ../migrations/20260421000001_initial_schema.sql
       - ../migrations/20260421000002_event_trigger.sql
       - ../migrations/20260422000003_m2_1_claude_invocation.sql
+      - ../migrations/20260423000004_m2_2_mempalace.sql
     gen:
       go:
         package: store
