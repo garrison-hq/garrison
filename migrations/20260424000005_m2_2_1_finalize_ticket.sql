@@ -21,7 +21,9 @@
 
 -- +goose Up
 
--- (1) engineer seed update.
+-- (1) engineer seed update. The no-op `status = status` after the
+-- embed lets the embed tool append its trailing comma without breaking
+-- UPDATE syntax (matches M2.2's migration pattern).
 -- +goose StatementBegin
 UPDATE agents
 SET agent_md =
@@ -113,6 +115,7 @@ exhaustion mid-turn → `exit_reason=budget_exceeded`. Neither path
 blocks other tickets.
 $engineer_md$,
 -- +embed-agent-md:engineer:end
+    status = status -- no-op: absorbs the embed's trailing comma
 WHERE role_slug = 'engineer';
 -- +goose StatementEnd
 
@@ -209,5 +212,6 @@ postgres MCP (read-only SQL), mempalace MCP (29 tools; especially
 `exit_reason=budget_exceeded`. Neither blocks other tickets.
 $qa_engineer_md$,
 -- +embed-agent-md:qa-engineer:end
+    status = status -- no-op: absorbs the embed's trailing comma
 WHERE role_slug = 'qa-engineer';
 -- +goose StatementEnd

@@ -74,8 +74,8 @@ func TestM22EngineerPlusQAHappyPath(t *testing.T) {
 	mockBin := buildMockClaudeBinary(t)
 
 	// Per-role script fixtures — the committed T016 fixtures.
-	engineerScript := repoFile(t, "internal/spawn/mockclaude/scripts/m2_2_happy_path.ndjson")
-	qaScript := repoFile(t, "internal/spawn/mockclaude/scripts/m2_2_qa_happy_path.ndjson")
+	engineerScript := repoFile(t, "internal/spawn/mockclaude/scripts/m2_2_1_finalize_happy_path.ndjson")
+	qaScript := repoFile(t, "internal/spawn/mockclaude/scripts/m2_2_1_finalize_happy_path.ndjson")
 
 	// mcp-config-dir owned by the test. 0o750 per NFR-105.
 	mcpDir := t.TempDir()

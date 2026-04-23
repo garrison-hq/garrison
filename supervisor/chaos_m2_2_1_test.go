@@ -107,13 +107,17 @@ func TestM221AtomicWriteChaosPalaceKillMidTransaction(t *testing.T) {
 
 	waitForAgentInstanceCount(ctx, t, pool, ticketID, 1, 60*time.Second)
 
-	var status, exitReason, hyg string
+	// agent_instances carries the primary M2.2.1 failure signal via
+	// exit_reason. (hygiene_status lives on ticket_transitions, which
+	// doesn't exist on the failure path — no transition committed.)
+	var status, exitReason string
 	_ = pool.QueryRow(ctx, `
-		SELECT status, COALESCE(exit_reason,''), COALESCE(hygiene_status,'(null)')
+		SELECT status, COALESCE(exit_reason,'')
 		FROM agent_instances
 		WHERE ticket_id=$1 AND role_slug='engineer'`,
 		ticketID,
-	).Scan(&status, &exitReason, &hyg)
+	).Scan(&status, &exitReason)
+	t.Logf("SC-255 observed: status=%s exit_reason=%s", status, exitReason)
 
 	validReasons := map[string]bool{
 		"finalize_palace_write_failed": true,
@@ -123,12 +127,6 @@ func TestM221AtomicWriteChaosPalaceKillMidTransaction(t *testing.T) {
 	if !validReasons[exitReason] {
 		t.Errorf("exit_reason=%q; want one of {finalize_palace_write_failed, finalize_commit_failed, finalize_write_timeout} (SC-255)",
 			exitReason)
-	}
-	if hyg != "finalize_partial" && hyg != "(null)" {
-		// Hygiene evaluator may not yet have run; null is acceptable
-		// if the test completes before the sweep; non-null should be
-		// finalize_partial.
-		t.Errorf("hygiene_status=%q; want finalize_partial or null (SC-255)", hyg)
 	}
 	// No transition row on the failure paths.
 	var n int

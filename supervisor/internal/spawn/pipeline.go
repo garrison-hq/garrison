@@ -551,17 +551,19 @@ func Adjudicate(result Result, wait WaitDetail, helloTxtOK bool, finalize Finali
 		// A subprocess killed by the per-invocation timeout always lands
 		// here, regardless of whether finalize was expected.
 		return "timeout", ExitTimeout
-	case wait.Signaled && finalize.CapExhausted && result.ResultSeen && isBudgetTerminalReason(result.TerminalReason):
+	case finalize.CapExhausted && result.ResultSeen && isBudgetTerminalReason(result.TerminalReason):
 		// M2.2.1 precedence (T002 / SC-258): budget_exceeded wins over
 		// finalize_invalid when the subprocess reports a budget-shaped
-		// result before/during the retry counter's SIGTERM. Keeps M2.2's
-		// budget surface stable under the M2.2.1 retry-loop scenarios.
+		// result before/during the retry counter's SIGTERM. Checked
+		// BEFORE the bare CapExhausted branch so budget stays the
+		// canonical reason when both apply.
 		return "failed", ExitBudgetExceeded
-	case wait.Signaled && finalize.CapExhausted:
-		// M2.2.1 (T006 / FR-257): the retry counter SIGTERMed the process
-		// group after three failed finalize attempts. Preferred over the
-		// generic signaled_SIGTERM label because the root cause is the
-		// schema-validation loop, not an external signal.
+	case finalize.CapExhausted:
+		// M2.2.1 (T006 / FR-257): the retry counter flagged cap-
+		// exhaustion after three failed finalize attempts. Independent
+		// of wait.Signaled because spawn.go's bailed flag suppresses
+		// Signaled for counter-driven bails (to distinguish them from
+		// operator SIGKILL / external signals).
 		return "failed", ExitFinalizeInvalid
 	case wait.Signaled:
 		return "failed", FormatSignalled(wait.Signal)
