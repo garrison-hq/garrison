@@ -77,6 +77,13 @@ type Deps struct {
 	MCPConfigDir    string
 	SupervisorBin   string
 	AgentRODSN      string
+
+	// M2.2 additions — mempalace entry in the per-invocation MCP config,
+	// plus wake-up/hygiene collaborators that land in spawn.go via T013.
+	DockerBin          string
+	MempalaceContainer string
+	PalacePath         string
+	DockerHost         string
 }
 
 // UseFake decides which branch Spawn runs. UseFakeAgent wins if set;
@@ -326,7 +333,13 @@ func runRealClaude(
 	// Step 4: write per-invocation MCP config. Disk errors here land in
 	// the spawn_failed terminal (clarify-session Q2) — dispatcher continues
 	// onto the next event.
-	mcpPath, err := mcpconfig.Write(ctx, deps.MCPConfigDir, instanceID, deps.SupervisorBin, deps.AgentRODSN)
+	mcpPath, err := mcpconfig.Write(ctx, deps.MCPConfigDir, instanceID, deps.SupervisorBin, deps.AgentRODSN,
+		mcpconfig.MempalaceParams{
+			DockerBin:          deps.DockerBin,
+			MempalaceContainer: deps.MempalaceContainer,
+			PalacePath:         deps.PalacePath,
+			DockerHost:         deps.DockerHost,
+		})
 	if err != nil {
 		logger.Error("mcpconfig.Write failed; recording spawn_failed", "err", err)
 		return writeTerminalCost(ctx, deps, instanceID, eventID, ticketUUID, "failed", ExitSpawnFailed, pgtype.Numeric{}, false)
