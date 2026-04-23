@@ -104,6 +104,35 @@ func (q *Queries) RecoverStaleRunning(ctx context.Context) (int64, error) {
 	return result.RowsAffected(), nil
 }
 
+const selectAgentInstanceFinalizedState = `-- name: SelectAgentInstanceFinalizedState :one
+SELECT
+    ai.status,
+    EXISTS(
+        SELECT 1 FROM ticket_transitions tt
+        WHERE tt.triggered_by_agent_instance_id = ai.id
+    ) AS has_transition
+FROM agent_instances ai
+WHERE ai.id = $1
+`
+
+type SelectAgentInstanceFinalizedStateRow struct {
+	Status        string
+	HasTransition bool
+}
+
+// M2.2.1 FR-260: the finalize MCP server calls this on every tool call
+// to detect the already-committed state. Returns (status, has_transition).
+// If status='succeeded' AND has_transition=true, the server rejects the
+// call with error_type=schema per Clarification 2026-04-23 Q2. Also used
+// by the hygiene evaluator's listener/sweep (T008) to obtain the
+// hasTransition input to EvaluateFinalizeOutcome.
+func (q *Queries) SelectAgentInstanceFinalizedState(ctx context.Context, id pgtype.UUID) (SelectAgentInstanceFinalizedStateRow, error) {
+	row := q.db.QueryRow(ctx, selectAgentInstanceFinalizedState, id)
+	var i SelectAgentInstanceFinalizedStateRow
+	err := row.Scan(&i.Status, &i.HasTransition)
+	return i, err
+}
+
 const updateInstanceTerminal = `-- name: UpdateInstanceTerminal :exec
 UPDATE agent_instances
 SET status = $2,

@@ -452,3 +452,51 @@ func TestM22AgentMempalaceDSNComposition(t *testing.T) {
 		t.Errorf("DSN missing host/db: %q", dsn)
 	}
 }
+
+// TestConfigParsesFinalizeWriteTimeout — M2.2.1 T001: a non-default
+// GARRISON_FINALIZE_WRITE_TIMEOUT is parsed into cfg.FinalizeWriteTimeout.
+func TestConfigParsesFinalizeWriteTimeout(t *testing.T) {
+	t.Setenv("GARRISON_DATABASE_URL", "postgres://u:p@h/db")
+	t.Setenv("GARRISON_FAKE_AGENT_CMD", "/bin/echo")
+	t.Setenv("GARRISON_FINALIZE_WRITE_TIMEOUT", "45s")
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load returned err: %v", err)
+	}
+	if cfg.FinalizeWriteTimeout != 45*time.Second {
+		t.Errorf("FinalizeWriteTimeout = %s; want 45s", cfg.FinalizeWriteTimeout)
+	}
+}
+
+// TestConfigDefaultFinalizeWriteTimeout — M2.2.1 T001: unset env uses
+// the 30-second default per spec Clarification 2026-04-23 Q5.
+func TestConfigDefaultFinalizeWriteTimeout(t *testing.T) {
+	t.Setenv("GARRISON_DATABASE_URL", "postgres://u:p@h/db")
+	t.Setenv("GARRISON_FAKE_AGENT_CMD", "/bin/echo")
+	t.Setenv("GARRISON_FINALIZE_WRITE_TIMEOUT", "")
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load returned err: %v", err)
+	}
+	if cfg.FinalizeWriteTimeout != 30*time.Second {
+		t.Errorf("FinalizeWriteTimeout = %s; want 30s (default)", cfg.FinalizeWriteTimeout)
+	}
+}
+
+// TestConfigRejectsNegativeFinalizeTimeout — M2.2.1 T001: non-positive
+// values fail fast at startup with a recognisable message.
+func TestConfigRejectsNegativeFinalizeTimeout(t *testing.T) {
+	t.Setenv("GARRISON_DATABASE_URL", "postgres://u:p@h/db")
+	t.Setenv("GARRISON_FAKE_AGENT_CMD", "/bin/echo")
+	t.Setenv("GARRISON_FINALIZE_WRITE_TIMEOUT", "-1s")
+
+	_, err := config.Load()
+	if err == nil {
+		t.Fatal("expected error on negative FinalizeWriteTimeout")
+	}
+	if !strings.Contains(err.Error(), "GARRISON_FINALIZE_WRITE_TIMEOUT") {
+		t.Errorf("error should name the env var: %v", err)
+	}
+}
