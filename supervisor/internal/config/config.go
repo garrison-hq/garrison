@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -31,14 +32,43 @@ const (
 	// DefaultLogLevel matches plan.md §"Config" (NFR-008).
 	DefaultLogLevel = slog.LevelInfo
 	// DefaultClaudeBudgetUSD is the per-invocation hard ceiling passed to Claude
-	// as --max-budget-usd (plan.md §"internal/config").
-	DefaultClaudeBudgetUSD = 0.05
+	// as --max-budget-usd. M2.2 bumps from 0.05 to 0.10 per NFR-201 (real-world
+	// cost baseline after M2.1 ship).
+	DefaultClaudeBudgetUSD = 0.10
 	// DefaultMCPConfigDir matches the Dockerfile runtime stage
 	// (plan.md §"internal/config", §"Dockerfile + claude binary install").
 	DefaultMCPConfigDir = "/var/lib/garrison/mcp/"
 	// AgentRORole is the Postgres login role that MCP-initiated queries use.
 	// The read-only grant set is established in the M2.1 migration (NFR-104).
 	AgentRORole = "garrison_agent_ro"
+
+	// M2.2 additions below.
+
+	// AgentMempalaceRole is the Postgres login role the hygiene checker
+	// authenticates as. The SELECT-only grant set is established in the
+	// M2.2 migration per FR-221.
+	AgentMempalaceRole = "garrison_agent_mempalace"
+	// DefaultMempalaceContainer is the compose service/container name of
+	// the MemPalace sidecar (see supervisor/docker-compose.yml). Override
+	// via GARRISON_MEMPALACE_CONTAINER.
+	DefaultMempalaceContainer = "garrison-mempalace"
+	// DefaultPalacePath is the path inside the MemPalace sidecar where the
+	// palace volume is mounted. Override via GARRISON_PALACE_PATH. T001
+	// finding F5: this is a container-internal path, NOT a supervisor-
+	// host path, under the 2b topology.
+	DefaultPalacePath = "/palace"
+	// DefaultDockerHost is the TCP URL of the filtered docker-proxy on the
+	// compose network. T001 finding F5: linuxserver/socket-proxy is a
+	// HAProxy TCP listener on :2375, NOT a unix-socket proxy. Inherits
+	// from DOCKER_HOST env if set; otherwise this default applies.
+	DefaultDockerHost = "tcp://garrison-docker-proxy:2375"
+	// DefaultHygieneDelay is the pause between transition notification
+	// arrival and hygiene evaluation (FR-212, NFR-203). Tunable via
+	// GARRISON_HYGIENE_DELAY.
+	DefaultHygieneDelay = 5 * time.Second
+	// DefaultHygieneSweepInterval is the cadence of the periodic sweep
+	// (FR-216, NFR-204). Tunable via GARRISON_HYGIENE_SWEEP_INTERVAL.
+	DefaultHygieneSweepInterval = 60 * time.Second
 )
 
 // Config mirrors the env vars in plan.md §"Config" one-to-one using
@@ -60,7 +90,32 @@ type Config struct {
 	MCPConfigDir    string
 	UseFakeAgent    bool
 
-	agentROPassword string
+	// M2.2 fields (plan.md §"internal/config (CHANGED — env var set differs)").
+	MempalaceContainer   string
+	PalacePath           string
+	DockerBin            string
+	DockerHost           string
+	HygieneDelay         time.Duration
+	HygieneSweepInterval time.Duration
+
+	agentROPassword        string
+	agentMempalacePassword string
+}
+
+// AgentMempalaceDSN returns the SELECT-only DSN the hygiene checker uses.
+// Derived from DatabaseURL with userinfo replaced by
+// garrison_agent_mempalace + AgentMempalacePassword. Parallel to M2.1's
+// AgentRODSN.
+func (c *Config) AgentMempalaceDSN() string {
+	if c.DatabaseURL == "" {
+		return ""
+	}
+	u, err := url.Parse(c.DatabaseURL)
+	if err != nil {
+		return ""
+	}
+	u.User = url.UserPassword(AgentMempalaceRole, c.agentMempalacePassword)
+	return u.String()
 }
 
 // AgentRODSN returns the read-only DSN handed to the in-tree MCP server. It is
@@ -84,13 +139,18 @@ func (c *Config) AgentRODSN() string {
 // the offending env var on any failure.
 func Load() (*Config, error) {
 	cfg := &Config{
-		PollInterval:      DefaultPollInterval,
-		SubprocessTimeout: DefaultSubprocessTimeout,
-		ShutdownGrace:     DefaultShutdownGrace,
-		HealthPort:        DefaultHealthPort,
-		LogLevel:          DefaultLogLevel,
-		ClaudeBudgetUSD:   DefaultClaudeBudgetUSD,
-		MCPConfigDir:      DefaultMCPConfigDir,
+		PollInterval:         DefaultPollInterval,
+		SubprocessTimeout:    DefaultSubprocessTimeout,
+		ShutdownGrace:        DefaultShutdownGrace,
+		HealthPort:           DefaultHealthPort,
+		LogLevel:             DefaultLogLevel,
+		ClaudeBudgetUSD:      DefaultClaudeBudgetUSD,
+		MCPConfigDir:         DefaultMCPConfigDir,
+		MempalaceContainer:   DefaultMempalaceContainer,
+		PalacePath:           DefaultPalacePath,
+		DockerHost:           DefaultDockerHost,
+		HygieneDelay:         DefaultHygieneDelay,
+		HygieneSweepInterval: DefaultHygieneSweepInterval,
 	}
 
 	dbURL := os.Getenv("GARRISON_DATABASE_URL")
@@ -181,8 +241,47 @@ func Load() (*Config, error) {
 		cfg.MCPConfigDir = v
 	}
 
-	// From here on we enforce M2.1 preconditions that only matter to the
-	// real-Claude path. The fake-agent escape hatch skips them wholesale.
+	// M2.2 additions: palace path + sidecar container + hygiene timings.
+	// These are parsed regardless of UseFakeAgent so tests can assert
+	// default values with an empty env.
+	if v := os.Getenv("GARRISON_MEMPALACE_CONTAINER"); v != "" {
+		if strings.TrimSpace(v) == "" {
+			return nil, fmt.Errorf("config: GARRISON_MEMPALACE_CONTAINER %q is whitespace-only", v)
+		}
+		cfg.MempalaceContainer = v
+	}
+	if v := os.Getenv("GARRISON_PALACE_PATH"); v != "" {
+		cfg.PalacePath = v
+	}
+	// DOCKER_HOST is the stdlib-standard name (not GARRISON_-prefixed).
+	// Compose sets it in the supervisor service's env; tests can override
+	// via os.Setenv("DOCKER_HOST", ...). Empty env uses DefaultDockerHost.
+	if v := os.Getenv("DOCKER_HOST"); v != "" {
+		cfg.DockerHost = v
+	}
+	if v := os.Getenv("GARRISON_HYGIENE_DELAY"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return nil, fmt.Errorf("config: GARRISON_HYGIENE_DELAY %q is not a valid duration: %w", v, err)
+		}
+		if d <= 0 {
+			return nil, fmt.Errorf("config: GARRISON_HYGIENE_DELAY must be positive (got %s)", d)
+		}
+		cfg.HygieneDelay = d
+	}
+	if v := os.Getenv("GARRISON_HYGIENE_SWEEP_INTERVAL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return nil, fmt.Errorf("config: GARRISON_HYGIENE_SWEEP_INTERVAL %q is not a valid duration: %w", v, err)
+		}
+		if d <= 0 {
+			return nil, fmt.Errorf("config: GARRISON_HYGIENE_SWEEP_INTERVAL must be positive (got %s)", d)
+		}
+		cfg.HygieneSweepInterval = d
+	}
+
+	// From here on we enforce M2.1/M2.2 preconditions that only matter to
+	// the real-Claude path. The fake-agent escape hatch skips them wholesale.
 	if cfg.UseFakeAgent {
 		return cfg, nil
 	}
@@ -192,6 +291,14 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("config: required env var GARRISON_AGENT_RO_PASSWORD is unset or empty")
 	}
 	cfg.agentROPassword = pw
+
+	// M2.2: garrison_agent_mempalace password is required for the hygiene
+	// checker's dedicated connection. Parallel to GARRISON_AGENT_RO_PASSWORD.
+	mpw := os.Getenv("GARRISON_AGENT_MEMPALACE_PASSWORD")
+	if mpw == "" {
+		return nil, fmt.Errorf("config: required env var GARRISON_AGENT_MEMPALACE_PASSWORD is unset or empty")
+	}
+	cfg.agentMempalacePassword = mpw
 
 	if err := ensureWritableDir(cfg.MCPConfigDir); err != nil {
 		return nil, fmt.Errorf("config: GARRISON_MCP_CONFIG_DIR %q: %w", cfg.MCPConfigDir, err)
@@ -203,7 +310,28 @@ func Load() (*Config, error) {
 	}
 	cfg.ClaudeBin = bin
 
+	// M2.2: resolve the docker CLI binary. Parallel to ClaudeBin resolution.
+	dockerBin, err := resolveDockerBin(os.Getenv("GARRISON_DOCKER_BIN"))
+	if err != nil {
+		return nil, err
+	}
+	cfg.DockerBin = dockerBin
+
 	return cfg, nil
+}
+
+// resolveDockerBin honours GARRISON_DOCKER_BIN and otherwise falls back
+// to exec.LookPath("docker"). Parallel to resolveClaudeBin. The docker
+// CLI is installed in the supervisor runtime image per T002.
+func resolveDockerBin(override string) (string, error) {
+	if override != "" {
+		return override, nil
+	}
+	bin, err := exec.LookPath("docker")
+	if err != nil {
+		return "", errors.New("config: cannot find docker binary on $PATH and GARRISON_DOCKER_BIN is unset")
+	}
+	return bin, nil
 }
 
 // resolveClaudeBin honours an explicit GARRISON_CLAUDE_BIN override and
