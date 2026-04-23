@@ -279,8 +279,21 @@ func TestM21BrokenMCPConfigBailsWithin2Seconds(t *testing.T) {
 	if row.Status != "failed" {
 		t.Errorf("status = %q; want failed", row.Status)
 	}
-	if row.ExitReason == nil || *row.ExitReason != "mcp_postgres_failed" {
-		t.Errorf("exit_reason = %v; want mcp_postgres_failed", row.ExitReason)
+	// M2.2 widened the MCP set: postgres + mempalace both point at the
+	// broken override path, and Claude's init_event reports them in
+	// indeterminate order — whichever the broken binary fails on first
+	// becomes the bail reason. Accept either mcp_postgres_failed (M2.1
+	// acceptance path) or mcp_mempalace_pending / mcp_mempalace_failed
+	// (M2.2 equivalent). The load-bearing assertion is that SOME MCP
+	// bail happened within NFR-106's window, not which server lost
+	// first.
+	validBails := map[string]bool{
+		"mcp_postgres_failed":   true,
+		"mcp_mempalace_failed":  true,
+		"mcp_mempalace_pending": true,
+	}
+	if row.ExitReason == nil || !validBails[*row.ExitReason] {
+		t.Errorf("exit_reason = %v; want one of {mcp_postgres_failed, mcp_mempalace_*}", row.ExitReason)
 	}
 
 	// finished_at - started_at should comfortably fit the NFR-106

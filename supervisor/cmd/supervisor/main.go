@@ -196,9 +196,10 @@ func runDaemon() int {
 	// M2.2 — palace bootstrap runs unconditionally (T001 finding F1:
 	// mempalace init --yes is idempotent in 3.3.2) BEFORE the agents
 	// cache loads so a broken palace surface halts startup cleanly.
-	// Fake-agent mode skips this — tests that don't exercise the real
-	// spawn path can't reach the sidecar either.
-	if !cfg.UseFakeAgent {
+	// Fake-agent mode and the GARRISON_DISABLE_PALACE_BOOTSTRAP test-hook
+	// skip this — tests that don't exercise the real spawn path or don't
+	// stand up the mempalace sidecar can't reach it either.
+	if !cfg.UseFakeAgent && !cfg.DisablePalaceBootstrap {
 		if err := mempalace.Bootstrap(ctx, mempalace.BootstrapConfig{
 			DockerBin:          cfg.DockerBin,
 			MempalaceContainer: cfg.MempalaceContainer,
@@ -316,8 +317,9 @@ func runDaemon() int {
 	// M2.2 — hygiene listener + sweep. Both goroutines join the errgroup
 	// so a SIGTERM cascades to them via root-ctx cancellation; each one
 	// finishes its in-flight UPDATE through context.WithoutCancel +
-	// TerminalWriteGrace per FR-217.
-	if !cfg.UseFakeAgent {
+	// TerminalWriteGrace per FR-217. GARRISON_DISABLE_PALACE_BOOTSTRAP
+	// gates these off alongside the bootstrap itself (same test-hook).
+	if !cfg.UseFakeAgent && !cfg.DisablePalaceBootstrap {
 		palaceClient := &hygiene.Client{
 			DockerBin:          cfg.DockerBin,
 			MempalaceContainer: cfg.MempalaceContainer,

@@ -128,6 +128,7 @@ func Spawn(ctx context.Context, deps Deps, eventID pgtype.UUID, roleSlug string)
 	var payload struct {
 		TicketID     string `json:"ticket_id"`
 		DepartmentID string `json:"department_id"`
+		ColumnSlug   string `json:"column_slug"`
 	}
 	if err := json.Unmarshal(evt.Payload, &payload); err != nil {
 		_ = tx.Rollback(ctx)
@@ -219,6 +220,7 @@ func runFakeAgent(
 	payload struct {
 		TicketID     string `json:"ticket_id"`
 		DepartmentID string `json:"department_id"`
+		ColumnSlug   string `json:"column_slug"`
 	},
 ) error {
 	execCtx, execCancel := context.WithTimeout(context.Background(), deps.SubprocessTimeout)
@@ -313,6 +315,7 @@ func runRealClaude(
 	payload struct {
 		TicketID     string `json:"ticket_id"`
 		DepartmentID string `json:"department_id"`
+		ColumnSlug   string `json:"column_slug"`
 	},
 	roleSlug string,
 ) error {
@@ -581,7 +584,9 @@ func runRealClaude(
 	// terminal `result` event + the mempalace writes (hygiene checker's
 	// concern); no supervisor-side file check runs. acceptanceGateSatisfied
 	// treats M2.2 roles as pre-passing so the M1 fallback doesn't trip.
-	helloTxtOK := acceptanceGateSatisfied(roleSlug)
+	// M2.1 compat: when the engineer is being spawned against the old
+	// `todo` column the hello.txt check still applies.
+	helloTxtOK := acceptanceGateSatisfied(roleSlug, payload.ColumnSlug)
 	if !helloTxtOK && dept.WorkspacePath != nil && *dept.WorkspacePath != "" {
 		helloTxtOK = checkHelloTxt(*dept.WorkspacePath, payload.TicketID)
 	}
@@ -611,33 +616,49 @@ func runRealClaude(
 	// in_dev → qa_review; qa-engineer transitions qa_review → done. Any
 	// other role (fake-agent M2.1 tests that default to "engineer" via
 	// Spawn's backward-compat branch) lands on the M2.1 todo → done path.
-	fromCol, toCol := transitionColumns(roleSlug)
+	fromCol, toCol := transitionColumns(roleSlug, payload.ColumnSlug)
 	return writeTerminalCostAndWakeup(termCtx, deps, instanceID, eventID, ticketUUID,
 		status, exitReason, cost, string(wakeUpStatus), insertTransition, fromCol, toCol)
 }
 
-// acceptanceGateSatisfied returns true for roles that have no
-// supervisor-side file-check acceptance gate. M2.2 roles (engineer,
-// qa-engineer) trust the terminal result event; M1/M2.1 roles still
-// exercise the hello.txt gate. Unknown/future roles default to
-// false — falling through to checkHelloTxt preserves the M1 safety
-// net until a role's own gate semantics are set.
-func acceptanceGateSatisfied(roleSlug string) bool {
+// acceptanceGateSatisfied returns true for (role, origin-column) pairs
+// where the supervisor should skip the M1 hello.txt check. M2.2's
+// engineer@in_dev and qa-engineer@qa_review trust the terminal result
+// event + mempalace writes (the hygiene checker's concern). M2.1's
+// engineer@todo still exercises the hello.txt gate because the M2.1
+// integration suite asserts that codepath directly
+// (TestM21AcceptanceFailedWhenHelloTxt*). Unknown roles / blank column
+// default to false so the M1 safety net stays in place.
+func acceptanceGateSatisfied(roleSlug, fromColumn string) bool {
 	switch roleSlug {
-	case "engineer", "qa-engineer":
+	case "engineer":
+		// M2.2 only skips the check when the engineer is running the
+		// in_dev workflow. M2.1 engineer@todo and any call without
+		// column info fall through to the M1 hello.txt check.
+		return fromColumn == "in_dev"
+	case "qa-engineer":
 		return true
 	default:
 		return false
 	}
 }
 
-// transitionColumns maps role_slug to the (from, to) column pair the
-// supervisor inserts into ticket_transitions on a succeeded M2.2 run.
-// Unknown roles fall back to the M2.1 default so the fake-agent path and
-// any future role the migration adds remain write-safe.
-func transitionColumns(roleSlug string) (from, to string) {
+// transitionColumns maps role_slug + origin column to the (from, to)
+// pair the supervisor inserts into ticket_transitions on a succeeded
+// run. fromColumn is the ticket's column at spawn time (carried on the
+// event payload's "column_slug"). The engineer role is polymorphic:
+// on M2.1's todo column it lands at done (single-transition workflow);
+// on M2.2's in_dev column it lands at qa_review (two-transition
+// workflow with qa-engineer picking up the qa_review → done leg).
+// Unknown roles / blank fromColumn fall back to the M2.1 default so
+// the fake-agent path and any future role the migration adds remain
+// write-safe.
+func transitionColumns(roleSlug, fromColumn string) (from, to string) {
 	switch roleSlug {
 	case "engineer":
+		if fromColumn == "todo" {
+			return "todo", "done"
+		}
 		return "in_dev", "qa_review"
 	case "qa-engineer":
 		return "qa_review", "done"

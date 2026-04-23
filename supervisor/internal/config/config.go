@@ -98,6 +98,13 @@ type Config struct {
 	HygieneDelay         time.Duration
 	HygieneSweepInterval time.Duration
 
+	// DisablePalaceBootstrap is a test-only hook (GARRISON_DISABLE_PALACE_BOOTSTRAP=1)
+	// used by M2.1 integration tests that exercise the mock-claude path
+	// but don't stand up the mempalace sidecar. Production deployments
+	// leave this unset; the bootstrap + hygiene goroutines then run as
+	// designed. Not documented for operator use.
+	DisablePalaceBootstrap bool
+
 	agentROPassword        string
 	agentMempalacePassword string
 }
@@ -278,6 +285,10 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("config: GARRISON_HYGIENE_SWEEP_INTERVAL must be positive (got %s)", d)
 		}
 		cfg.HygieneSweepInterval = d
+	}
+
+	if v := os.Getenv("GARRISON_DISABLE_PALACE_BOOTSTRAP"); v == "1" || strings.EqualFold(v, "true") {
+		cfg.DisablePalaceBootstrap = true
 	}
 
 	// From here on we enforce M2.1/M2.2 preconditions that only matter to
