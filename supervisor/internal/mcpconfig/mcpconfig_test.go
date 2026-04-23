@@ -30,7 +30,7 @@ func TestWriteHappyPath(t *testing.T) {
 	dir := t.TempDir()
 	id := mustUUID(t, "11111111-1111-4111-8111-111111111111")
 
-	path, err := Write(context.Background(), dir, id, "/usr/local/bin/supervisor", "postgres://roonly@localhost/garrison", MempalaceParams{})
+	path, err := Write(context.Background(), dir, id, "/usr/local/bin/supervisor", "postgres://roonly@localhost/garrison", MempalaceParams{}, FinalizeParams{})
 	if err != nil {
 		t.Fatalf("Write: %v", err)
 	}
@@ -85,11 +85,11 @@ func TestWriteIsolationAcrossInvocations(t *testing.T) {
 	idA := mustUUID(t, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
 	idB := mustUUID(t, "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
 
-	pathA, err := Write(context.Background(), dir, idA, "/bin/supA", "dsnA", MempalaceParams{})
+	pathA, err := Write(context.Background(), dir, idA, "/bin/supA", "dsnA", MempalaceParams{}, FinalizeParams{})
 	if err != nil {
 		t.Fatalf("write A: %v", err)
 	}
-	pathB, err := Write(context.Background(), dir, idB, "/bin/supB", "dsnB", MempalaceParams{})
+	pathB, err := Write(context.Background(), dir, idB, "/bin/supB", "dsnB", MempalaceParams{}, FinalizeParams{})
 	if err != nil {
 		t.Fatalf("write B: %v", err)
 	}
@@ -129,7 +129,7 @@ func TestRemoveMissingFile(t *testing.T) {
 func TestRemoveRealFile(t *testing.T) {
 	dir := t.TempDir()
 	id := mustUUID(t, "22222222-2222-4222-8222-222222222222")
-	path, err := Write(context.Background(), dir, id, "/bin/sup", "dsn", MempalaceParams{})
+	path, err := Write(context.Background(), dir, id, "/bin/sup", "dsn", MempalaceParams{}, FinalizeParams{})
 	if err != nil {
 		t.Fatalf("Write: %v", err)
 	}
@@ -169,7 +169,7 @@ func TestWriteReturnsErrorOnDiskFull(t *testing.T) {
 	ops := &fakeOps{writeErr: syscall.ENOSPC}
 	id := mustUUID(t, "33333333-3333-4333-8333-333333333333")
 
-	_, err := WriteWithOps(context.Background(), ops, "/var/lib/garrison/mcp", id, "/bin/sup", "dsn", MempalaceParams{})
+	_, err := WriteWithOps(context.Background(), ops, "/var/lib/garrison/mcp", id, "/bin/sup", "dsn", MempalaceParams{}, FinalizeParams{})
 	if err == nil {
 		t.Fatalf("expected error, got nil")
 	}
@@ -190,7 +190,7 @@ func TestWriteReturnsErrorOnDiskFull(t *testing.T) {
 func TestWriteReturnsErrorOnPermissionDenied(t *testing.T) {
 	ops := &fakeOps{writeErr: syscall.EACCES}
 	id := mustUUID(t, "44444444-4444-4444-8444-444444444444")
-	_, err := WriteWithOps(context.Background(), ops, "/var/lib/garrison/mcp", id, "/bin/sup", "dsn", MempalaceParams{})
+	_, err := WriteWithOps(context.Background(), ops, "/var/lib/garrison/mcp", id, "/bin/sup", "dsn", MempalaceParams{}, FinalizeParams{})
 	if err == nil || !errors.Is(err, syscall.EACCES) {
 		t.Fatalf("expected EACCES-wrapped error, got %v", err)
 	}
@@ -223,7 +223,7 @@ func TestWritePostgresPlusMempalace(t *testing.T) {
 		PalacePath:         "/palace",
 		DockerHost:         "tcp://garrison-docker-proxy:2375",
 	}
-	path, err := Write(context.Background(), dir, id, "/bin/sup", "dsn", mp)
+	path, err := Write(context.Background(), dir, id, "/bin/sup", "dsn", mp, FinalizeParams{})
 	if err != nil {
 		t.Fatalf("Write: %v", err)
 	}
@@ -278,7 +278,7 @@ func TestWriteMempalaceEnvCarriesDockerHost(t *testing.T) {
 		PalacePath:         "/palace",
 		DockerHost:         "tcp://override:9999",
 	}
-	path, err := Write(context.Background(), dir, id, "/bin/sup", "dsn", mp)
+	path, err := Write(context.Background(), dir, id, "/bin/sup", "dsn", mp, FinalizeParams{})
 	if err != nil {
 		t.Fatalf("Write: %v", err)
 	}
@@ -294,7 +294,7 @@ func TestWriteMempalaceEnvCarriesDockerHost(t *testing.T) {
 func TestWriteEmptyMempalaceParamsOmitsEntry(t *testing.T) {
 	dir := t.TempDir()
 	id := mustUUID(t, "77777777-7777-4777-8777-777777777777")
-	path, err := Write(context.Background(), dir, id, "/bin/sup", "dsn", MempalaceParams{})
+	path, err := Write(context.Background(), dir, id, "/bin/sup", "dsn", MempalaceParams{}, FinalizeParams{})
 	if err != nil {
 		t.Fatalf("Write: %v", err)
 	}
@@ -304,5 +304,73 @@ func TestWriteEmptyMempalaceParamsOmitsEntry(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), "postgres") {
 		t.Errorf("postgres entry missing from output:\n%s", raw)
+	}
+}
+
+// TestBuildConfigIncludesFinalizeEntry — M2.2.1 T004: when finalize
+// params are enabled, the emitted JSON carries a third `finalize` MCP
+// entry alongside postgres + mempalace, with the agent-instance-id and
+// DSN injected into its env block per FR-256 / spec Clarification
+// 2026-04-23 Q4.
+func TestBuildConfigIncludesFinalizeEntry(t *testing.T) {
+	dir := t.TempDir()
+	id := mustUUID(t, "88888888-8888-4888-8888-888888888888")
+	mp := MempalaceParams{
+		DockerBin:          "/usr/bin/docker",
+		MempalaceContainer: "garrison-mempalace",
+		PalacePath:         "/palace",
+		DockerHost:         "tcp://garrison-docker-proxy:2375",
+	}
+	fp := FinalizeParams{
+		SupervisorBin:   "/usr/local/bin/supervisor",
+		AgentInstanceID: "a1b2c3d4-1111-2222-3333-444455556666",
+		DatabaseURL:     "postgres://garrison_agent_ro:pw@pg/garrison",
+	}
+	path, err := Write(context.Background(), dir, id, "/bin/sup", "dsn", mp, fp)
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read emitted file: %v", err)
+	}
+	s := string(raw)
+	if !strings.Contains(s, `"finalize"`) {
+		t.Errorf("finalize entry missing from emitted JSON:\n%s", s)
+	}
+	if !strings.Contains(s, `"command": "/usr/local/bin/supervisor"`) {
+		t.Errorf("finalize command must be FinalizeParams.SupervisorBin; got:\n%s", s)
+	}
+	if !strings.Contains(s, `"mcp"`) || !strings.Contains(s, `"finalize"`) {
+		t.Errorf("finalize args missing [mcp, finalize]:\n%s", s)
+	}
+	if !strings.Contains(s, `"GARRISON_AGENT_INSTANCE_ID": "a1b2c3d4-1111-2222-3333-444455556666"`) {
+		t.Errorf("GARRISON_AGENT_INSTANCE_ID env missing or wrong:\n%s", s)
+	}
+	if !strings.Contains(s, `"GARRISON_DATABASE_URL": "postgres://garrison_agent_ro:pw@pg/garrison"`) {
+		t.Errorf("GARRISON_DATABASE_URL env missing or wrong:\n%s", s)
+	}
+	if !strings.Contains(s, `"postgres"`) {
+		t.Errorf("postgres entry missing:\n%s", s)
+	}
+	if !strings.Contains(s, `"mempalace"`) {
+		t.Errorf("mempalace entry missing:\n%s", s)
+	}
+}
+
+// TestBuildConfigOmitsFinalizeEntryWhenParamsEmpty — back-compat: empty
+// FinalizeParams mean no finalize entry emitted. M2.1/M2.2 callers
+// that don't yet know about finalize keep producing the same
+// postgres+mempalace output.
+func TestBuildConfigOmitsFinalizeEntryWhenParamsEmpty(t *testing.T) {
+	dir := t.TempDir()
+	id := mustUUID(t, "99999999-9999-4999-8999-999999999999")
+	path, err := Write(context.Background(), dir, id, "/bin/sup", "dsn", MempalaceParams{}, FinalizeParams{})
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	raw, _ := os.ReadFile(path)
+	if strings.Contains(string(raw), `"finalize"`) {
+		t.Errorf("empty FinalizeParams should not emit finalize entry; got:\n%s", raw)
 	}
 }

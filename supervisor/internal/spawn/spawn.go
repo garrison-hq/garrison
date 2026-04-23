@@ -377,13 +377,20 @@ func runRealClaude(
 	// Step 4: write per-invocation MCP config. Disk errors here land in
 	// the spawn_failed terminal (clarify-session Q2) — dispatcher continues
 	// onto the next event.
+	// M2.2.1 T004: FinalizeParams is optional from mcpconfig's POV.
+	// T011 will populate SupervisorBin / DatabaseURL from Deps. For now
+	// we pass a zero-value FinalizeParams to preserve M2.2 behaviour
+	// until the supervisor's main-wiring task runs; the finalize MCP
+	// entry is suppressed when !finalizeParams.enabled().
 	mcpPath, err := mcpconfig.Write(ctx, deps.MCPConfigDir, instanceID, deps.SupervisorBin, deps.AgentRODSN,
 		mcpconfig.MempalaceParams{
 			DockerBin:          deps.DockerBin,
 			MempalaceContainer: deps.MempalaceContainer,
 			PalacePath:         deps.PalacePath,
 			DockerHost:         deps.DockerHost,
-		})
+		},
+		mcpconfig.FinalizeParams{},
+	)
 	if err != nil {
 		logger.Error("mcpconfig.Write failed; recording spawn_failed", "err", err)
 		return writeFail(ExitSpawnFailed)
