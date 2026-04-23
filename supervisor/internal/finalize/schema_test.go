@@ -34,6 +34,30 @@ func expectSchemaError(t *testing.T, raw json.RawMessage, wantField string) {
 	if wantField != "" && verr.Field != wantField {
 		t.Errorf("field = %q; want %q (message: %s)", verr.Field, wantField, verr.Message)
 	}
+	// M2.2.2 FR-316: every schema rejection carries the richer-error
+	// fields. This helper asserts presence only (type coverage lives
+	// in richer_error_test.go); the check runs on every legacy
+	// rejection test so drift is caught early.
+	assertRichErrorPresence(t, raw)
+}
+
+// assertRichErrorPresence re-runs Validate and asserts that Failure
+// and Hint are non-empty on any rejection — the presence guarantee
+// behind FR-305 + FR-301. Per-Constraint semantic assertions live in
+// richer_error_test.go; this helper is the smoke check every legacy
+// schema-rejection test inherits.
+func assertRichErrorPresence(t *testing.T, raw json.RawMessage) {
+	t.Helper()
+	_, verr := Validate(raw)
+	if verr == nil {
+		return // expectSchemaError already fatal'd
+	}
+	if verr.Failure == "" {
+		t.Errorf("Failure is empty; FR-301 requires one of {decode, validation, state}")
+	}
+	if verr.Hint == "" {
+		t.Errorf("Hint is empty; FR-305 requires non-empty on every error")
+	}
 }
 
 func TestSchemaRejectsMissingTicketID(t *testing.T) {
