@@ -1,0 +1,9 @@
+# M2.2.1 atomic-write chaos fixture — T016 / SC-255.
+# Emits one valid finalize_ticket tool_use. The chaos test orchestrates
+# external MemPalace sidecar kill between AddDrawer and commit; the
+# mock itself just produces the trigger event. No result event after
+# finalize — the subprocess either exits naturally or is terminated.
+#init-mcp-servers [{"name":"postgres","status":"connected"},{"name":"mempalace","status":"connected"},{"name":"finalize","status":"connected"}]
+{"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","content":[{"type":"text","text":"Chaos-test scenario: calling finalize while the palace is about to be killed."}]}}
+#finalize-tool-use-ok 1 {"ticket_id":"{{TICKET_ID}}","outcome":"Mock chaos fixture — finalize with palace kill impending","diary_entry":{"rationale":"This mock emits a valid finalize payload. The chaos harness will kill the mempalace sidecar between the supervisor's AddDrawer and Postgres Commit calls; observed outcome depends on timing.","artifacts":["changes/hello-{{TICKET_ID}}.md"],"blockers":[],"discoveries":[]},"kg_triples":[{"subject":"agent_instance_mock","predicate":"completed","object":"ticket_{{TICKET_ID}}","valid_from":"now"}]}
+#sleep 3s

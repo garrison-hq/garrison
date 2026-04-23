@@ -1,0 +1,8 @@
+# M2.2.1 finalize happy-path fixture — engineer spawn.
+# One successful finalize_ticket tool_use → commit via T007 WriteFinalize.
+# The supervisor's atomic writer commits the terminal row; no result
+# event follows (subprocess exits cleanly after finalize).
+#init-mcp-servers [{"name":"postgres","status":"connected"},{"name":"mempalace","status":"connected"},{"name":"finalize","status":"connected"}]
+{"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","content":[{"type":"text","text":"Reading ticket and composing finalize payload."}]}}
+#finalize-tool-use-ok 1 {"ticket_id":"{{TICKET_ID}}","outcome":"Mock finalize happy path — engineer committed deliverable","diary_entry":{"rationale":"The mock engineer did the work and is now finalizing. Wrote the deliverable and is handing off to QA via the supervisor-driven atomic transition.","artifacts":["changes/hello-{{TICKET_ID}}.md"],"blockers":[],"discoveries":[]},"kg_triples":[{"subject":"agent_instance_mock","predicate":"completed","object":"ticket_{{TICKET_ID}}","valid_from":"now"}]}
+{"type":"result","subtype":"success","is_error":false,"duration_ms":950,"duration_api_ms":700,"total_cost_usd":0.032,"stop_reason":"end_turn","terminal_reason":"completed","result":"Finalized","session_id":"mock-session-m221-happy","permission_denials":[]}

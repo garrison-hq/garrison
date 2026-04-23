@@ -1,0 +1,12 @@
+# M2.2.1 retry-exhausted fixture. Three failed attempts → counter hits
+# 3 → supervisor SIGTERMs, exit_reason=finalize_invalid.
+#init-mcp-servers [{"name":"postgres","status":"connected"},{"name":"mempalace","status":"connected"},{"name":"finalize","status":"connected"}]
+{"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","content":[{"type":"text","text":"Attempt 1 — malformed."}]}}
+#finalize-tool-use-fail 1 schema kg_triples
+{"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","content":[{"type":"text","text":"Attempt 2 — still malformed."}]}}
+#finalize-tool-use-fail 2 schema diary_entry.rationale
+{"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","content":[{"type":"text","text":"Attempt 3 — giving up."}]}}
+#finalize-tool-use-fail 3 schema outcome
+# Supervisor will SIGTERM at this point; mock catches the signal via
+# the standard handler and exits. No result event follows.
+#sleep 500ms
