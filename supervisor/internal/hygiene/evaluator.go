@@ -10,11 +10,19 @@
 // exhaustively unit-testable without docker, postgres, or MemPalace.
 package hygiene
 
-import "time"
+import (
+	"time"
+
+	"github.com/garrison-hq/garrison/supervisor/internal/mempalace"
+)
 
 // Status is the value written to ticket_transitions.hygiene_status per
 // FR-214. Terminal values: Clean, MissingDiary, MissingKG, Thin. Non-
 // terminal: Pending (palace query failed; sweep re-evaluates).
+//
+// M2.2.1 adds the FinalizeFailed / FinalizePartial / Stuck vocabulary
+// (per FR-267); those live alongside and are set by EvaluateFinalizeOutcome
+// (T008), not by Evaluate.
 type Status string
 
 const (
@@ -30,28 +38,16 @@ const (
 	ThinBodyThreshold = 100
 )
 
-// PalaceDrawer is the shape palace.Client.Query returns per drawer. Body
-// is the drawer's textual content (the hygiene checker searches for the
-// ticket id substring here). Wing matches the drawer's wing (used to
-// filter to the agent's own palace_wing). CreatedAt is when MemPalace
-// filed the drawer; the evaluator uses it to restrict to the agent
-// instance's run window.
-type PalaceDrawer struct {
-	Body      string
-	Wing      string
-	CreatedAt time.Time
-}
+// PalaceDrawer is a type alias for mempalace.Drawer (M2.2.1 T003).
+// Preserved so evaluator_test.go literals like PalaceDrawer{...} keep
+// compiling; new code should prefer mempalace.Drawer directly.
+type PalaceDrawer = mempalace.Drawer
 
-// PalaceTriple is the shape palace.Client.Query returns per KG triple.
-// Subject/Predicate/Object are the triple's parts. ValidFrom is when
-// MemPalace recorded the triple; the evaluator uses it to restrict to
-// the agent instance's run window.
-type PalaceTriple struct {
-	Subject   string
-	Predicate string
-	Object    string
-	ValidFrom time.Time
-}
+// PalaceTriple is a type alias for mempalace.Triple (M2.2.1 T003).
+type PalaceTriple = mempalace.Triple
+
+// unused import guard so goimports/gopls doesn't strip "time".
+var _ = time.Time{}
 
 // EvaluationInput is the pure-logic input to Evaluate. TicketIDText is
 // the "ticket_<uuid>" form — the evaluator uses substring matching
