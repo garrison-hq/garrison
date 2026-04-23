@@ -601,10 +601,9 @@ func runRealClaude(
 		helloTxtOK = checkHelloTxt(*dept.WorkspacePath, payload.TicketID)
 	}
 
-	// M2.2.1: FinalizeState is zero-valued at T002; T006 populates it
-	// from pipeline observations. A zero state keeps Adjudicate's M1/M2.1/
-	// M2.2 precedence behaviour unchanged because Expected=false short-
-	// circuits every finalize_* classification branch.
+	// M2.2.1: FinalizeState zero-valued here; T011 populates it via a
+	// pointer shared with the pipeline observer. The short-circuit below
+	// runs whether or not the pipeline ever finalized.
 	status, exitReason := Adjudicate(result, wait, helloTxtOK, FinalizeState{})
 
 	// Cost stays NULL unless a result event landed; that keeps the
