@@ -14,7 +14,7 @@ Observed outcomes across the test suites:
 | Integration (`-tags=integration`) | PASS — 136s, all 12+ tests green | 136s |
 | Chaos (`-tags=chaos`) | PASS — 24s, including TestM221AtomicWriteChaosPalaceKillMidTransaction | 24s |
 | Live compliance, haiku (`-tags=live_acceptance`) | **MIXED** — see compliance findings below | 367s, $0.0927 spent |
-| Live compliance, opus | Deferred (budget + time — not executed this pass) | — |
+| Live compliance, opus | **MIXED** — see compliance findings below | 367s, $0.2564 spent |
 | No-new-deps guardrail | PASS — `git diff origin/main..HEAD supervisor/go.{mod,sum}` returned empty | — |
 
 ## Context criteria 1–12
@@ -125,12 +125,71 @@ or a follow-up patch):
    strictness (e.g., accepting free-text diary) and tightening over
    attempts, rather than rejecting attempt 1 on a strict shape.
 
-### Opus comparison (deferred)
+### Opus comparison — executed
 
-Not executed this acceptance pass. The operator can run
-`go test -tags=live_acceptance -run='TestM221ComplianceModelIndependent/claude-opus-4-7' .`
-for the cross-model comparison. Expected opus cost: ~$0.50-$1.00 per
-run (estimated from haiku's $0.09 × 5-10x opus price multiplier).
+**First pass bug (caught + fixed)**: the initial opus run actually
+used haiku because `spawn.go`'s `model := agent.Model` prefers the
+seeded `agents.model` column (hardcoded to `claude-haiku-4-5-20251001`
+in SeedM22) over `deps.ClaudeModel`. Fixed by `UPDATE agents SET
+model = <test-model>` in the test setup before starting the
+supervisor. After the fix, opus-4-7 was confirmed via the assistant
+events' `"model"` field.
+
+**Actual opus-4-7 observation** (log at
+`/tmp/m221-compliance-claude-opus-4-7.log`):
+
+- Opus emitted only 4 stream events (2 `thinking`, 2 `tool_use`) in
+  6 seconds before hitting its **internal** budget cap at $0.2564.
+- Neither `tool_use` was `finalize_ticket` — opus didn't reach the
+  completion tool before its budget fired.
+- Terminal event: `is_error=true`, `terminal_reason=
+  "error_max_budget_usd"`. Claude's binary enforces its own cap
+  (passed via `--max-budget-usd 0.20`), but opus overran it ($0.2564
+  on a $0.20 cap — claude's budget is advisory, not a hard gate).
+- Supervisor's Adjudicate classified as `exit_reason=claude_error`
+  (is_error=true precedence runs before the budget-terminal-reason
+  branch). The $0.2564 > $0.20 observation is a Claude-Code billing
+  anomaly, NOT a supervisor bug.
+
+**Cross-model cost summary**:
+
+| Model | Finalize attempts | Tool calls observed | Cost | Terminal reason |
+|---|---|---|---|---|
+| haiku-4-5-20251001 | 1 (failed schema) | finalize×1, mempalace×3 (search/status/list/kg_query) | $0.0927 | finalize_never_called (natural exit) |
+| opus-4-7 | 0 (budget hit first) | 2 tool_use (not finalize or mempalace) | $0.2564 | claude_error (Claude's internal budget cap fired) |
+
+### Adjudicate precedence observation (M2.2 bug, not M2.2.1)
+
+The opus run surfaced that Claude's `is_error=true + terminal_reason=
+"error_max_budget_usd"` combination gets classified as `claude_error`
+rather than `budget_exceeded` because `case result.IsError` runs
+above `case isBudgetTerminalReason` in the switch. This is a
+pre-existing M2.2 behaviour (the case ordering was set in M2.1); the
+budget signal is masked when Claude reports it with is_error=true.
+
+Recommendation for M3 or a focused M2.2.2 patch: swap the
+precedence — check `isBudgetTerminalReason` BEFORE `IsError` when
+`ResultSeen=true`. This would correctly classify opus's budget-cap
+failure as `budget_exceeded` (more actionable for the operator).
+
+### Refined thesis assessment
+
+The cross-model data shows:
+
+- **M2.2.1's tool-architectural attractor works for haiku but not
+  opus.** Haiku reaches for `finalize_ticket` (good); opus doesn't
+  reach it before burning its budget on thinking + a different tool.
+- **Strict-schema first-attempt is the wrong design point for both
+  models.** Haiku attempts but doesn't retry on schema error; opus
+  doesn't attempt within budget.
+- **SC-261 "haiku ≡ opus outcome" is NOT achieved in the observed
+  sense**: both fail to finalize, but for different reasons. The
+  cross-model parity assertion holds in a trivial negative sense
+  (both fail) but not in the intended validated-thesis sense.
+
+M2.2.1 is still strictly better than M2.2 (haiku at least reaches
+for the tool), but the thesis needs M3-era refinement before it's
+product-ready.
 
 ## Live-run mechanics observed
 

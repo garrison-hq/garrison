@@ -112,6 +112,17 @@ func runComplianceOnce(t *testing.T, claudeBin, model string) runResult {
 		res.Error = fmt.Sprintf("lookup dept: %v", err)
 		return res
 	}
+	// Override the seeded agents.model so the spawn path uses the
+	// requested model (spawn.go prefers agent.Model over
+	// deps.ClaudeModel when both are set; SeedM22 hard-codes
+	// claude-haiku-4-5-20251001 which would override the env).
+	if _, err := pool.Exec(context.Background(),
+		`UPDATE agents SET model = $1 WHERE role_slug IN ('engineer','qa-engineer')`,
+		model,
+	); err != nil {
+		res.Error = fmt.Sprintf("override agent model: %v", err)
+		return res
+	}
 	testdb.SetAgentMempalacePassword(t, "live-compliance-mp-pw")
 	testdb.SetAgentROPassword(t, "live-compliance-ro-pw")
 
