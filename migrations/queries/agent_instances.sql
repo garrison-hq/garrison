@@ -60,14 +60,14 @@ WHERE status = 'running'
   AND started_at < NOW() - INTERVAL '5 minutes';
 
 -- name: SelectAgentInstanceFinalizedState :one
--- M2.2.1 FR-260: the finalize MCP server calls this on every tool call
--- to detect the already-committed state. Returns (status, has_transition).
--- If status='succeeded' AND has_transition=true, the server rejects the
--- call with error_type=schema per Clarification 2026-04-23 Q2. Also used
--- by the hygiene evaluator's listener/sweep (T008) to obtain the
--- hasTransition input to EvaluateFinalizeOutcome.
+-- M2.2.1 FR-260 + T008: the finalize MCP server calls this on every
+-- tool call to detect the already-committed state (Clarification
+-- 2026-04-23 Q2). The hygiene listener/sweep also uses exit_reason to
+-- route between the finalize path (EvaluateFinalizeOutcome) and the
+-- legacy M2.2 palace-query path (Evaluate).
 SELECT
     ai.status,
+    ai.exit_reason,
     EXISTS(
         SELECT 1 FROM ticket_transitions tt
         WHERE tt.triggered_by_agent_instance_id = ai.id

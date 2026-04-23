@@ -107,6 +107,7 @@ func (q *Queries) RecoverStaleRunning(ctx context.Context) (int64, error) {
 const selectAgentInstanceFinalizedState = `-- name: SelectAgentInstanceFinalizedState :one
 SELECT
     ai.status,
+    ai.exit_reason,
     EXISTS(
         SELECT 1 FROM ticket_transitions tt
         WHERE tt.triggered_by_agent_instance_id = ai.id
@@ -117,19 +118,19 @@ WHERE ai.id = $1
 
 type SelectAgentInstanceFinalizedStateRow struct {
 	Status        string
+	ExitReason    *string
 	HasTransition bool
 }
 
-// M2.2.1 FR-260: the finalize MCP server calls this on every tool call
-// to detect the already-committed state. Returns (status, has_transition).
-// If status='succeeded' AND has_transition=true, the server rejects the
-// call with error_type=schema per Clarification 2026-04-23 Q2. Also used
-// by the hygiene evaluator's listener/sweep (T008) to obtain the
-// hasTransition input to EvaluateFinalizeOutcome.
+// M2.2.1 FR-260 + T008: the finalize MCP server calls this on every
+// tool call to detect the already-committed state (Clarification
+// 2026-04-23 Q2). The hygiene listener/sweep also uses exit_reason to
+// route between the finalize path (EvaluateFinalizeOutcome) and the
+// legacy M2.2 palace-query path (Evaluate).
 func (q *Queries) SelectAgentInstanceFinalizedState(ctx context.Context, id pgtype.UUID) (SelectAgentInstanceFinalizedStateRow, error) {
 	row := q.db.QueryRow(ctx, selectAgentInstanceFinalizedState, id)
 	var i SelectAgentInstanceFinalizedStateRow
-	err := row.Scan(&i.Status, &i.HasTransition)
+	err := row.Scan(&i.Status, &i.ExitReason, &i.HasTransition)
 	return i, err
 }
 
