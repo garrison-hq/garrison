@@ -1,0 +1,10 @@
+# M2.2 QA-engineer happy-path fixture.
+# QA reads the engineer's prior work via mempalace_search, verifies it,
+# writes its own diary + KG triple, and exits successfully. Supervisor
+# handles the qa_review → done transition.
+#init-mcp-servers [{"name":"postgres","status":"connected"},{"name":"mempalace","status":"connected"}]
+{"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","content":[{"type":"text","text":"Reviewing the engineer's work for ticket {{TICKET_ID}}."}]}}
+#mempalace-tool-use mempalace_search {"query":"ticket {{TICKET_ID}}","wing":"wing_frontend_engineer"}
+#mempalace-tool-use mempalace_add_drawer {"wing":"wing_qa_engineer","room":"hall_events","content":"Reviewed ticket {{TICKET_ID}} — engineer's deliverable looks good."}
+#mempalace-tool-use mempalace_kg_add {"subject":"agent_instance_xyz","predicate":"reviewed","object":"ticket_{{TICKET_ID}}"}
+{"type":"result","subtype":"success","is_error":false,"duration_ms":530,"duration_api_ms":400,"total_cost_usd":0.032,"stop_reason":"end_turn","terminal_reason":"completed","result":"QA verified; palace updated","session_id":"mock-session-m22-qa","permission_denials":[]}

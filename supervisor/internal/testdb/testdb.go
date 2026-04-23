@@ -1,4 +1,4 @@
-//go:build integration || chaos
+//go:build integration || chaos || live_acceptance
 
 // Package testdb provides a shared Postgres harness for integration tests
 // (T013). A single testcontainers-go postgres:17 container is booted lazily
@@ -125,6 +125,103 @@ func SeedM21(t *testing.T, workspacePath string) pgtype.UUID {
 		t.Fatalf("SeedM21: insert agent: %v", err)
 	}
 	return deptID
+}
+
+// SetAgentMempalacePassword — M2.2 equivalent of SetAgentROPassword for
+// the garrison_agent_mempalace SELECT-only role. Tests that exercise the
+// hygiene checker's dedicated connection must call this with the same
+// password their test supervisor uses via GARRISON_AGENT_MEMPALACE_
+// PASSWORD, otherwise the hygiene goroutine's dial fails.
+func SetAgentMempalacePassword(t *testing.T, password string) {
+	t.Helper()
+	initOnce.Do(func() { initErr = bootContainer() })
+	if initErr != nil {
+		t.Fatalf("testdb: init: %v", initErr)
+	}
+	if _, err := sharedPool.Exec(context.Background(),
+		fmt.Sprintf(`ALTER ROLE garrison_agent_mempalace WITH PASSWORD '%s'`, password),
+	); err != nil {
+		t.Fatalf("SetAgentMempalacePassword: %v", err)
+	}
+}
+
+// SeedM22 inserts the M2.2 minimum working set: one company, one
+// engineering department with the M2.2 4-column workflow, one engineer
+// agent (palace_wing='wing_frontend_engineer', listens_for=
+// created.engineering.in_dev), one qa-engineer agent (palace_wing=
+// 'wing_qa_engineer', listens_for=transitioned.engineering.
+// in_dev.qa_review). Returns both agent row IDs.
+//
+// Start's TRUNCATE-CASCADE wipes the migration's seed rows at test
+// start, so SeedM22 re-INSERTs them. The agent_md fields are
+// abbreviated integration-test bodies — tests that need the full
+// T005 content read the committed files directly.
+//
+// workspacePath is the engineering department's workspace_path; typically
+// a test-scoped temp directory.
+func SeedM22(t *testing.T, workspacePath string) (engineerAgentID, qaEngineerAgentID pgtype.UUID) {
+	t.Helper()
+	pool := Start(t)
+	ctx := context.Background()
+
+	var companyID pgtype.UUID
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO companies (id, name) VALUES (gen_random_uuid(), 'garrison test co') RETURNING id`,
+	).Scan(&companyID); err != nil {
+		t.Fatalf("SeedM22: insert company: %v", err)
+	}
+
+	var deptID pgtype.UUID
+	workflow := `{
+	  "columns": [
+	    {"slug":"todo","label":"To do","entry_from":["backlog"]},
+	    {"slug":"in_dev","label":"In dev","entry_from":["todo"]},
+	    {"slug":"qa_review","label":"QA review","entry_from":["in_dev"]},
+	    {"slug":"done","label":"Done","entry_from":["qa_review"]}
+	  ],
+	  "transitions": {
+	    "todo":["in_dev"], "in_dev":["qa_review"], "qa_review":["done"]
+	  }
+	}`
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO departments (id, company_id, slug, name, concurrency_cap, workspace_path, workflow)
+		VALUES (gen_random_uuid(), $1, 'engineering', 'Engineering', 1, $2, $3::jsonb)
+		RETURNING id`,
+		companyID, workspacePath, workflow,
+	).Scan(&deptID); err != nil {
+		t.Fatalf("SeedM22: insert department: %v", err)
+	}
+
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO agents (id, department_id, role_slug, agent_md, model, skills, mcp_tools, listens_for, palace_wing, status)
+		VALUES (
+			gen_random_uuid(), $1, 'engineer',
+			'# Engineer (M2.2 integration-test body)\n\nPlaceholder for real content from migrations/seed/engineer.md',
+			'claude-haiku-4-5-20251001',
+			'[]'::jsonb, '[]'::jsonb,
+			'["work.ticket.created.engineering.in_dev"]'::jsonb,
+			'wing_frontend_engineer', 'active'
+		) RETURNING id`,
+		deptID,
+	).Scan(&engineerAgentID); err != nil {
+		t.Fatalf("SeedM22: insert engineer: %v", err)
+	}
+
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO agents (id, department_id, role_slug, agent_md, model, skills, mcp_tools, listens_for, palace_wing, status)
+		VALUES (
+			gen_random_uuid(), $1, 'qa-engineer',
+			'# QA Engineer (M2.2 integration-test body)\n\nPlaceholder for real content from migrations/seed/qa-engineer.md',
+			'claude-haiku-4-5-20251001',
+			'[]'::jsonb, '[]'::jsonb,
+			'["work.ticket.transitioned.engineering.in_dev.qa_review"]'::jsonb,
+			'wing_qa_engineer', 'active'
+		) RETURNING id`,
+		deptID,
+	).Scan(&qaEngineerAgentID); err != nil {
+		t.Fatalf("SeedM22: insert qa-engineer: %v", err)
+	}
+	return engineerAgentID, qaEngineerAgentID
 }
 
 // URL exposes the shared postgres connection string so tests that need to

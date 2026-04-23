@@ -20,6 +20,7 @@ import (
 	"github.com/garrison-hq/garrison/supervisor/internal/agents"
 	"github.com/garrison-hq/garrison/supervisor/internal/concurrency"
 	"github.com/garrison-hq/garrison/supervisor/internal/mcpconfig"
+	"github.com/garrison-hq/garrison/supervisor/internal/mempalace"
 	"github.com/garrison-hq/garrison/supervisor/internal/store"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -77,6 +78,13 @@ type Deps struct {
 	MCPConfigDir    string
 	SupervisorBin   string
 	AgentRODSN      string
+
+	// M2.2 additions — mempalace entry in the per-invocation MCP config,
+	// plus wake-up/hygiene collaborators that land in spawn.go via T013.
+	DockerBin          string
+	MempalaceContainer string
+	PalacePath         string
+	DockerHost         string
 }
 
 // UseFake decides which branch Spawn runs. UseFakeAgent wins if set;
@@ -97,7 +105,10 @@ func (d Deps) UseFake() bool {
 // fake-agent and real-Claude paths. Only after that commit do the two
 // paths diverge — the fake path runs the M1 exec-and-scan loop; the real
 // path runs the M2.1 agent-resolve + MCP-config + NDJSON-pipeline flow.
-func Spawn(ctx context.Context, deps Deps, eventID pgtype.UUID) error {
+func Spawn(ctx context.Context, deps Deps, eventID pgtype.UUID, roleSlug string) error {
+	if roleSlug == "" {
+		roleSlug = "engineer" // M1/M2.1 back-compat default for fake-agent test paths
+	}
 	tx, err := deps.Pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("spawn: begin dedupe tx: %w", err)
@@ -117,6 +128,7 @@ func Spawn(ctx context.Context, deps Deps, eventID pgtype.UUID) error {
 	var payload struct {
 		TicketID     string `json:"ticket_id"`
 		DepartmentID string `json:"department_id"`
+		ColumnSlug   string `json:"column_slug"`
 	}
 	if err := json.Unmarshal(evt.Payload, &payload); err != nil {
 		_ = tx.Rollback(ctx)
@@ -176,6 +188,7 @@ func Spawn(ctx context.Context, deps Deps, eventID pgtype.UUID) error {
 	instanceID, err := q.InsertRunningInstance(ctx, store.InsertRunningInstanceParams{
 		DepartmentID: deptUUID,
 		TicketID:     ticketUUID,
+		RoleSlug:     roleSlug,
 	})
 	if err != nil {
 		_ = tx.Rollback(ctx)
@@ -188,7 +201,7 @@ func Spawn(ctx context.Context, deps Deps, eventID pgtype.UUID) error {
 	if deps.UseFake() {
 		return runFakeAgent(ctx, deps, instanceID, eventID, ticketUUID, payload)
 	}
-	return runRealClaude(ctx, deps, instanceID, eventID, ticketUUID, dept, payload)
+	return runRealClaude(ctx, deps, instanceID, eventID, ticketUUID, dept, payload, roleSlug)
 }
 
 // -----------------------------------------------------------------------
@@ -207,6 +220,7 @@ func runFakeAgent(
 	payload struct {
 		TicketID     string `json:"ticket_id"`
 		DepartmentID string `json:"department_id"`
+		ColumnSlug   string `json:"column_slug"`
 	},
 ) error {
 	execCtx, execCancel := context.WithTimeout(context.Background(), deps.SubprocessTimeout)
@@ -301,35 +315,78 @@ func runRealClaude(
 	payload struct {
 		TicketID     string `json:"ticket_id"`
 		DepartmentID string `json:"department_id"`
+		ColumnSlug   string `json:"column_slug"`
 	},
+	roleSlug string,
 ) error {
 	logger := deps.Logger.With(
 		"event_id", formatUUID(eventID),
 		"instance_id", formatUUID(instanceID),
 		"ticket_id", payload.TicketID,
 		"department_id", payload.DepartmentID,
+		"role_slug", roleSlug,
 	)
+	instanceIDText := formatUUID(instanceID)
+	ticketIDText := payload.TicketID
 
-	// Step 3: resolve agent row from the startup cache. A missing cache or
-	// a missing row is terminal with exit_reason='agent_missing' — the
-	// supervisor has already committed a running row and must close it out.
-	if deps.AgentsCache == nil {
-		logger.Error("agents cache not wired; cannot resolve engineer")
-		return writeTerminalCost(ctx, deps, instanceID, eventID, ticketUUID, "failed", ExitAgentMissing, pgtype.Numeric{}, false)
+	// M2.2 terminal-write helper closure: always captures wake_up_status
+	// (possibly "" for pre-wake-up bailouts) + fromColumn/toColumn pair.
+	writeFail := func(exitReason string) error {
+		return writeTerminalCostAndWakeup(ctx, deps, instanceID, eventID, ticketUUID,
+			"failed", exitReason, pgtype.Numeric{}, "", false, "", "")
 	}
-	agent, err := deps.AgentsCache.GetForDepartmentAndRole(ctx, dept.ID, "engineer")
+
+	// Step 3: resolve agent row from the startup cache. Role-slug
+	// parameterized per T013 — no longer hardcoded to "engineer".
+	if deps.AgentsCache == nil {
+		logger.Error("agents cache not wired; cannot resolve agent", "role_slug", roleSlug)
+		return writeFail(ExitAgentMissing)
+	}
+	agent, err := deps.AgentsCache.GetForDepartmentAndRole(ctx, dept.ID, roleSlug)
 	if err != nil {
-		logger.Error("no engineer agent for department", "err", err)
-		return writeTerminalCost(ctx, deps, instanceID, eventID, ticketUUID, "failed", ExitAgentMissing, pgtype.Numeric{}, false)
+		logger.Error("no agent for department+role", "role_slug", roleSlug, "err", err)
+		return writeFail(ExitAgentMissing)
+	}
+
+	// Step 3a: wake-up context capture. Non-blocking on failure per FR-207b.
+	var wakeUpStdout string
+	wakeUpStatus := mempalace.StatusSkipped // M2.2 never writes 'skipped' in
+	// practice, but this sentinel tracks "no wake-up attempted" distinctly
+	// from StatusOK ("tried, got empty output"). It only surfaces to the DB
+	// if the agent.PalaceWing is nil (no wing configured → skip wake-up).
+	if agent.PalaceWing != nil && *agent.PalaceWing != "" {
+		wakeUpCtx, wakeUpCancel := context.WithTimeout(ctx, 2*time.Second)
+		stdout, status, elapsed, werr := mempalace.Wakeup(wakeUpCtx, mempalace.WakeupConfig{
+			DockerBin:          deps.DockerBin,
+			MempalaceContainer: deps.MempalaceContainer,
+			PalacePath:         deps.PalacePath,
+			Timeout:            2 * time.Second,
+			Logger:             logger,
+		}, *agent.PalaceWing)
+		wakeUpCancel()
+		_ = werr // non-blocking: Wakeup returns nil err on every failure mode
+		wakeUpStdout = stdout
+		wakeUpStatus = status
+		logger.Info("wake_up_complete",
+			"palace_wing", *agent.PalaceWing,
+			"wake_up_status", string(status),
+			"elapsed_ms", elapsed.Milliseconds(),
+		)
 	}
 
 	// Step 4: write per-invocation MCP config. Disk errors here land in
 	// the spawn_failed terminal (clarify-session Q2) — dispatcher continues
 	// onto the next event.
-	mcpPath, err := mcpconfig.Write(ctx, deps.MCPConfigDir, instanceID, deps.SupervisorBin, deps.AgentRODSN)
+	mcpPath, err := mcpconfig.Write(ctx, deps.MCPConfigDir, instanceID, deps.SupervisorBin, deps.AgentRODSN,
+		mcpconfig.MempalaceParams{
+			DockerBin:          deps.DockerBin,
+			MempalaceContainer: deps.MempalaceContainer,
+			PalacePath:         deps.PalacePath,
+			DockerHost:         deps.DockerHost,
+		})
 	if err != nil {
 		logger.Error("mcpconfig.Write failed; recording spawn_failed", "err", err)
-		return writeTerminalCost(ctx, deps, instanceID, eventID, ticketUUID, "failed", ExitSpawnFailed, pgtype.Numeric{}, false)
+		return writeFail(ExitSpawnFailed)
 	}
 	// Remove the MCP config file on every exit path.
 	defer func() {
@@ -346,14 +403,19 @@ func runRealClaude(
 	if model == "" {
 		model = deps.ClaudeModel
 	}
+	// M2.2: task description names both ticket_id and instance_id so the
+	// agent has them accessible without having to query either. The full
+	// instance_id also appears in the system-prompt "This turn" block
+	// (M2.2 Session 2026-04-23 Q2) via mempalace.ComposeSystemPrompt.
 	taskDescription := fmt.Sprintf(
-		"You are the engineer on ticket %s. Read it from Postgres and perform the task described in your system prompt.",
-		payload.TicketID,
+		"You are the %s on ticket %s (agent_instance %s). Read it, then execute your completion protocol from the system prompt.",
+		roleSlug, ticketIDText, instanceIDText,
 	)
 	budget := deps.ClaudeBudgetUSD
 	if budget <= 0 {
-		budget = 0.05
+		budget = 0.10 // M2.2 default per NFR-201
 	}
+	systemPrompt := mempalace.ComposeSystemPrompt(agent.AgentMD, wakeUpStdout, ticketIDText, instanceIDText)
 	argv := []string{
 		"-p", taskDescription,
 		"--output-format", "stream-json",
@@ -363,7 +425,7 @@ func runRealClaude(
 		"--max-budget-usd", strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.6f", budget), "0"), "."),
 		"--mcp-config", mcpPath,
 		"--strict-mcp-config",
-		"--system-prompt", agent.AgentMD,
+		"--system-prompt", systemPrompt,
 		"--permission-mode", "bypassPermissions",
 	}
 	cmd := exec.CommandContext(execCtx, deps.ClaudeBin, argv...)
@@ -380,23 +442,23 @@ func runRealClaude(
 	stdin, err := os.Open(os.DevNull)
 	if err != nil {
 		logger.Error("open /dev/null failed", "err", err)
-		return writeTerminalCost(ctx, deps, instanceID, eventID, ticketUUID, "failed", ExitSpawnFailed, pgtype.Numeric{}, false)
+		return writeFail(ExitSpawnFailed)
 	}
 	defer stdin.Close()
 	cmd.Stdin = stdin
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return writeTerminalCost(ctx, deps, instanceID, eventID, ticketUUID, "failed", ExitSpawnFailed, pgtype.Numeric{}, false)
+		return writeFail(ExitSpawnFailed)
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
-		return writeTerminalCost(ctx, deps, instanceID, eventID, ticketUUID, "failed", ExitSpawnFailed, pgtype.Numeric{}, false)
+		return writeFail(ExitSpawnFailed)
 	}
 
 	// Step 7: cmd.Start.
 	if err := cmd.Start(); err != nil {
 		logger.Error("claude cmd.Start failed; recording spawn_failed", "err", err)
-		return writeTerminalCost(ctx, deps, instanceID, eventID, ticketUUID, "failed", ExitSpawnFailed, pgtype.Numeric{}, false)
+		return writeFail(ExitSpawnFailed)
 	}
 
 	logger = logger.With("pid", cmd.Process.Pid, "session_prep_model", model)
@@ -437,7 +499,7 @@ func runRealClaude(
 	stderrDone := make(chan struct{})
 	go func() {
 		defer close(pipelineDone)
-		result, pipelineErr = Run(execCtx, stdout, instanceID, logger, onBail)
+		result, pipelineErr = Run(execCtx, stdout, instanceID, ticketUUID, logger, onBail)
 	}()
 	go func() {
 		defer close(stderrDone)
@@ -511,10 +573,21 @@ func runRealClaude(
 		wait.Signal = signalFromName(sigName)
 	}
 
-	// Step 11: post-run hello.txt check (deferred per plan §pipeline.
-	// Adjudicate — only considered if nothing more urgent already matched).
-	helloTxtOK := false
-	if dept.WorkspacePath != nil && *dept.WorkspacePath != "" {
+	// Step 11: post-run acceptance gate.
+	//
+	// M2.1 used hello.txt + contents==ticket_id as the fake-agent and
+	// real-claude engineer acceptance check. M2.2's engineer writes
+	// changes/hello-<ticket>.md per the seed agent.md, and qa-engineer
+	// writes no artefact file at all — so the M1 check returns false
+	// and Adjudicate would misclassify a successful run as
+	// acceptance_failed. For M2.2 roles the supervisor trusts the
+	// terminal `result` event + the mempalace writes (hygiene checker's
+	// concern); no supervisor-side file check runs. acceptanceGateSatisfied
+	// treats M2.2 roles as pre-passing so the M1 fallback doesn't trip.
+	// M2.1 compat: when the engineer is being spawned against the old
+	// `todo` column the hello.txt check still applies.
+	helloTxtOK := acceptanceGateSatisfied(roleSlug, payload.ColumnSlug)
+	if !helloTxtOK && dept.WorkspacePath != nil && *dept.WorkspacePath != "" {
 		helloTxtOK = checkHelloTxt(*dept.WorkspacePath, payload.TicketID)
 	}
 
@@ -538,7 +611,60 @@ func runRealClaude(
 	termCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), TerminalWriteGrace)
 	defer cancel()
 	insertTransition := status == "succeeded"
-	return writeTerminalCost(termCtx, deps, instanceID, eventID, ticketUUID, status, exitReason, cost, insertTransition)
+
+	// M2.2: role-slug-based from/to column mapping. Engineer transitions
+	// in_dev → qa_review; qa-engineer transitions qa_review → done. Any
+	// other role (fake-agent M2.1 tests that default to "engineer" via
+	// Spawn's backward-compat branch) lands on the M2.1 todo → done path.
+	fromCol, toCol := transitionColumns(roleSlug, payload.ColumnSlug)
+	return writeTerminalCostAndWakeup(termCtx, deps, instanceID, eventID, ticketUUID,
+		status, exitReason, cost, string(wakeUpStatus), insertTransition, fromCol, toCol)
+}
+
+// acceptanceGateSatisfied returns true for (role, origin-column) pairs
+// where the supervisor should skip the M1 hello.txt check. M2.2's
+// engineer@in_dev and qa-engineer@qa_review trust the terminal result
+// event + mempalace writes (the hygiene checker's concern). M2.1's
+// engineer@todo still exercises the hello.txt gate because the M2.1
+// integration suite asserts that codepath directly
+// (TestM21AcceptanceFailedWhenHelloTxt*). Unknown roles / blank column
+// default to false so the M1 safety net stays in place.
+func acceptanceGateSatisfied(roleSlug, fromColumn string) bool {
+	switch roleSlug {
+	case "engineer":
+		// M2.2 only skips the check when the engineer is running the
+		// in_dev workflow. M2.1 engineer@todo and any call without
+		// column info fall through to the M1 hello.txt check.
+		return fromColumn == "in_dev"
+	case "qa-engineer":
+		return true
+	default:
+		return false
+	}
+}
+
+// transitionColumns maps role_slug + origin column to the (from, to)
+// pair the supervisor inserts into ticket_transitions on a succeeded
+// run. fromColumn is the ticket's column at spawn time (carried on the
+// event payload's "column_slug"). The engineer role is polymorphic:
+// on M2.1's todo column it lands at done (single-transition workflow);
+// on M2.2's in_dev column it lands at qa_review (two-transition
+// workflow with qa-engineer picking up the qa_review → done leg).
+// Unknown roles / blank fromColumn fall back to the M2.1 default so
+// the fake-agent path and any future role the migration adds remain
+// write-safe.
+func transitionColumns(roleSlug, fromColumn string) (from, to string) {
+	switch roleSlug {
+	case "engineer":
+		if fromColumn == "todo" {
+			return "todo", "done"
+		}
+		return "in_dev", "qa_review"
+	case "qa-engineer":
+		return "qa_review", "done"
+	default:
+		return "todo", "done"
+	}
 }
 
 // checkHelloTxt reads workspace/hello.txt and returns true iff the contents,
@@ -701,6 +827,76 @@ func writeTerminalCost(
 		if err := q.UpdateTicketColumnSlug(ctx, store.UpdateTicketColumnSlugParams{
 			ID:         ticketID,
 			ColumnSlug: "done",
+		}); err != nil {
+			_ = tx.Rollback(ctx)
+			return fmt.Errorf("spawn: UpdateTicketColumnSlug: %w", err)
+		}
+	}
+	if err := q.MarkEventProcessed(ctx, eventID); err != nil {
+		_ = tx.Rollback(ctx)
+		return fmt.Errorf("spawn: MarkEventProcessed: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("spawn: commit terminal: %w", err)
+	}
+	return nil
+}
+
+// writeTerminalCostAndWakeup is the M2.2 widened terminal tx. Writes
+// wake_up_status alongside the M2.1 terminal (status, exit_reason, cost),
+// supports role-slug-configurable transition column pairs, and commits
+// everything in one tx with MarkEventProcessed.
+//
+// wakeUpStatus is a typed string ("ok" / "failed" / "skipped"); empty
+// string writes NULL to the column (pre-wake-up bailout paths).
+//
+// fromCol / toCol: empty strings skip the transition writes entirely.
+// Non-empty on the succeeded path insert a ticket_transitions row and
+// update tickets.column_slug to toCol.
+func writeTerminalCostAndWakeup(
+	ctx context.Context,
+	deps Deps,
+	instanceID, eventID, ticketID pgtype.UUID,
+	status, exitReason string,
+	cost pgtype.Numeric,
+	wakeUpStatus string,
+	insertTransition bool,
+	fromCol, toCol string,
+) error {
+	tx, err := deps.Pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("spawn: begin terminal tx: %w", err)
+	}
+	q := deps.Queries.WithTx(tx)
+	reason := exitReason
+	var wakeUpPtr *string
+	if wakeUpStatus != "" {
+		wakeUpPtr = &wakeUpStatus
+	}
+	if err := q.UpdateInstanceTerminalWithCostAndWakeup(ctx, store.UpdateInstanceTerminalWithCostAndWakeupParams{
+		ID:           instanceID,
+		Status:       status,
+		ExitReason:   &reason,
+		TotalCostUsd: cost,
+		WakeUpStatus: wakeUpPtr,
+	}); err != nil {
+		_ = tx.Rollback(ctx)
+		return fmt.Errorf("spawn: UpdateInstanceTerminalWithCostAndWakeup: %w", err)
+	}
+	if insertTransition && ticketID.Valid && fromCol != "" && toCol != "" {
+		from := fromCol
+		if _, err := q.InsertTicketTransition(ctx, store.InsertTicketTransitionParams{
+			TicketID:                   ticketID,
+			FromColumn:                 &from,
+			ToColumn:                   toCol,
+			TriggeredByAgentInstanceID: instanceID,
+		}); err != nil {
+			_ = tx.Rollback(ctx)
+			return fmt.Errorf("spawn: InsertTicketTransition: %w", err)
+		}
+		if err := q.UpdateTicketColumnSlug(ctx, store.UpdateTicketColumnSlugParams{
+			ID:         ticketID,
+			ColumnSlug: toCol,
 		}); err != nil {
 			_ = tx.Rollback(ctx)
 			return fmt.Errorf("spawn: UpdateTicketColumnSlug: %w", err)

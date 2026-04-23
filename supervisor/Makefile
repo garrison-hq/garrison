@@ -24,14 +24,25 @@ test-chaos: copy-migrations
 sqlc:
 	sqlc generate
 
-# seed-engineer-agent re-embeds examples/agents/engineer.md into the
-# engineer-role seed INSERT in the M2.1 migration. Idempotent — run it
+# seed-engineer-agent re-embeds migrations/seed/engineer.md into the
+# engineer-role seed UPDATE in the M2.2 migration. Idempotent — run it
 # whenever the markdown file changes so the DB seed stays in sync. The
 # paths are relative to supervisor/ (this Makefile's dir).
+# (M2.1 embedded into examples/agents/engineer.md; M2.2 moves the canonical
+# location to migrations/seed/ for centralised migration-embedded assets.)
 seed-engineer-agent:
 	go run ./internal/tools/embed-agent-md \
-		../examples/agents/engineer.md \
-		../migrations/20260422000003_m2_1_claude_invocation.sql
+		-role=engineer \
+		../migrations/seed/engineer.md \
+		../migrations/20260423000004_m2_2_mempalace.sql
+
+# seed-qa-engineer-agent re-embeds migrations/seed/qa-engineer.md into the
+# qa-engineer INSERT in the M2.2 migration. Same tool, different role.
+seed-qa-engineer-agent:
+	go run ./internal/tools/embed-agent-md \
+		-role=qa-engineer \
+		../migrations/seed/qa-engineer.md \
+		../migrations/20260423000004_m2_2_mempalace.sql
 
 migrate: build
 	./bin/supervisor --migrate

@@ -1,0 +1,13 @@
+# M2.2 happy-path fixture — engineer spawn.
+# init event reports both postgres + mempalace connected.
+# Engineer writes changes/hello-<ticket>.md (via #write-hello-txt for test
+# simplicity; production engineer writes the real file), performs two
+# mempalace_* tool calls (add_drawer + kg_add), and emits a success
+# terminal result. Supervisor's writeTerminalCostAndWakeup then inserts
+# the in_dev → qa_review transition on its own.
+#init-mcp-servers [{"name":"postgres","status":"connected"},{"name":"mempalace","status":"connected"}]
+#write-hello-txt
+{"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","content":[{"type":"text","text":"Reading the ticket and writing to the palace."}]}}
+#mempalace-tool-use mempalace_add_drawer {"wing":"wing_frontend_engineer","room":"hall_events","content":"Wrote hello for ticket {{TICKET_ID}}"}
+#mempalace-tool-use mempalace_kg_add {"subject":"agent_instance_xyz","predicate":"completed","object":"ticket_{{TICKET_ID}}"}
+{"type":"result","subtype":"success","is_error":false,"duration_ms":842,"duration_api_ms":612,"total_cost_usd":0.045,"stop_reason":"end_turn","terminal_reason":"completed","result":"hello.txt written; palace updated","session_id":"mock-session-m22","permission_denials":[]}

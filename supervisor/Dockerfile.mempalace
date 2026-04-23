@@ -1,0 +1,44 @@
+# Garrison MemPalace sidecar image.
+#
+# One container per deployment; shared across every agent invocation.
+# Supervisor drives via `docker exec` through garrison-docker-proxy (filtered
+# socket). Container is idle (sleep infinity) — all real work is per-exec.
+#
+# T001 findings:
+#   F3 — base MUST be python:3.11-slim, not alpine. chromadb's Rust-compiled
+#        transitives (tokenizers et al.) have no musl wheels on PyPI; alpine
+#        falls back to source build and fails without a Rust toolchain.
+#        python:3.11-slim (debian-glibc) installs from prebuilt wheels.
+#   F4 — pip --require-hashes needs ALL transitive deps pinned. The lockfile
+#        at supervisor/requirements-lock.txt is pip-compile-generated with
+#        full hash coverage; regenerate on every mempalace version bump.
+#   F6 — python:3.11-slim has no ps/pgrep; procps installed for human ops
+#        (`docker exec garrison-mempalace ps aux`). Test code uses /proc
+#        directly to stay tool-agnostic.
+#
+# Sidecar image size observed in T001: ~478 MB (chromadb + embedding model
+# dominate).
+
+FROM python:3.11-slim
+
+# Human-ops convenience: ps/pgrep/top available inside the container.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends procps \
+ && rm -rf /var/lib/apt/lists/*
+
+# Hash-verified install via pip-compile'd lockfile. Mempalace 3.3.2 and
+# every transitive dep have pinned versions and sha256 hashes.
+COPY requirements-lock.txt /tmp/requirements-lock.txt
+RUN pip install --no-cache-dir --require-hashes -r /tmp/requirements-lock.txt
+
+# Palace lives on a named volume mounted at /palace (see docker-compose.yml).
+# Supervisor writes via docker exec; this image does not own palace state.
+RUN mkdir -p /palace && chown -R nobody:nogroup /palace
+
+USER nobody
+WORKDIR /palace
+
+# Idle host: supervisor drives work via `docker exec`. Never kill-restart
+# this container without coordinating with supervisor shutdown — in-flight
+# mempalace.mcp_server processes will be interrupted.
+ENTRYPOINT ["sleep", "infinity"]

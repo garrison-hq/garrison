@@ -59,7 +59,11 @@ RUN apk add --no-cache ca-certificates gnupg curl jq \
 # Claude Code setup docs specify libgcc, libstdc++, and ripgrep as required
 # packages on musl distros, plus USE_BUILTIN_RIPGREP=0 in the environment.
 FROM alpine:3.20
-RUN apk add --no-cache ca-certificates libgcc libstdc++ ripgrep
+# M2.2: docker-cli is the supervisor's handle for talking to the
+# garrison-docker-proxy sidecar (filtered docker socket). Used to exec
+# into garrison-mempalace for palace bootstrap, wake-up, hygiene palace
+# queries, and for Claude subprocesses spawning mempalace.mcp_server.
+RUN apk add --no-cache ca-certificates libgcc libstdc++ ripgrep docker-cli
 COPY --from=build /out/supervisor /supervisor
 COPY --from=claude-install /work/claude /usr/local/bin/claude
 ENV USE_BUILTIN_RIPGREP=0 \

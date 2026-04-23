@@ -26,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/garrison-hq/garrison/supervisor/internal/mempalace"
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
@@ -62,6 +63,21 @@ func (osOps) Remove(name string) error { return os.Remove(name) }
 // internal use).
 var DefaultOps fileOps = osOps{}
 
+// MempalaceParams bundles the four values the mempalace MCP entry needs.
+// Passing a struct keeps Write's signature from ballooning. Empty values
+// suppress the mempalace entry entirely (useful for M2.1-era tests that
+// exercise a postgres-only shape).
+type MempalaceParams struct {
+	DockerBin          string
+	MempalaceContainer string
+	PalacePath         string
+	DockerHost         string
+}
+
+func (mp MempalaceParams) enabled() bool {
+	return mp.DockerBin != "" && mp.MempalaceContainer != "" && mp.PalacePath != ""
+}
+
 // Write creates the per-invocation MCP config file. Returns the absolute
 // path on success. The caller is expected to `defer Remove(path)` against
 // the returned path so every exit path (success, claude error, timeout,
@@ -73,12 +89,17 @@ var DefaultOps fileOps = osOps{}
 // write failure is surfaced verbatim so the caller can distinguish
 // ENOSPC from permission-denied and emit a matching exit_reason
 // (FR-103 + clarify Q2 → exit_reason="spawn_failed", dispatcher continues).
-func Write(ctx context.Context, dir string, instanceID pgtype.UUID, supervisorBin, dsn string) (string, error) {
-	return WriteWithOps(ctx, DefaultOps, dir, instanceID, supervisorBin, dsn)
+//
+// M2.2 extension (T011): if mempalace is non-zero, a second `mempalace`
+// entry is added to mcpServers per plan §"MCP config extension" /
+// internal/mempalace.MCPServerSpec. FR-204 / FR-205 (additive; postgres
+// entry untouched).
+func Write(ctx context.Context, dir string, instanceID pgtype.UUID, supervisorBin, dsn string, mempalaceParams MempalaceParams) (string, error) {
+	return WriteWithOps(ctx, DefaultOps, dir, instanceID, supervisorBin, dsn, mempalaceParams)
 }
 
 // WriteWithOps is the testable form. Production callers use Write.
-func WriteWithOps(_ context.Context, ops fileOps, dir string, instanceID pgtype.UUID, supervisorBin, dsn string) (string, error) {
+func WriteWithOps(_ context.Context, ops fileOps, dir string, instanceID pgtype.UUID, supervisorBin, dsn string, mempalaceParams MempalaceParams) (string, error) {
 	if dir == "" {
 		return "", errors.New("mcpconfig: dir is empty")
 	}
@@ -92,15 +113,28 @@ func WriteWithOps(_ context.Context, ops fileOps, dir string, instanceID pgtype.
 	}
 	path := filepath.Join(dir, "mcp-config-"+idText+".json")
 
-	cfg := mcpConfig{
-		MCPServers: map[string]mcpServerSpec{
-			"postgres": {
-				Command: supervisorBin,
-				Args:    []string{"mcp-postgres"},
-				Env:     map[string]string{"GARRISON_PGMCP_DSN": dsn},
-			},
+	servers := map[string]mcpServerSpec{
+		"postgres": {
+			Command: supervisorBin,
+			Args:    []string{"mcp-postgres"},
+			Env:     map[string]string{"GARRISON_PGMCP_DSN": dsn},
 		},
 	}
+	if mempalaceParams.enabled() {
+		command, args, env := mempalace.MCPServerSpec(mempalace.SpecConfig{
+			DockerBin:          mempalaceParams.DockerBin,
+			MempalaceContainer: mempalaceParams.MempalaceContainer,
+			PalacePath:         mempalaceParams.PalacePath,
+			DockerHost:         mempalaceParams.DockerHost,
+		})
+		servers["mempalace"] = mcpServerSpec{
+			Command: command,
+			Args:    args,
+			Env:     env,
+		}
+	}
+
+	cfg := mcpConfig{MCPServers: servers}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		// encoding/json never errors for this shape, but surface it

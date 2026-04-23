@@ -2,48 +2,59 @@
 //
 // Usage:
 //
-//	go run ./internal/tools/embed-agent-md <agent-md-path> <migration-path>
+//	go run ./internal/tools/embed-agent-md [-role <slug>] <agent-md-path> <migration-path>
 //
 // The tool locates a pair of sentinel comments in the migration file:
 //
-//	-- +embed-agent-md:engineer:begin
+//	-- +embed-agent-md:<role>:begin
 //	...arbitrary content...
-//	-- +embed-agent-md:engineer:end
+//	-- +embed-agent-md:<role>:end
 //
 // and replaces everything between them with a PostgreSQL dollar-quoted
 // string carrying the agent.md file contents verbatim, followed by a
 // trailing comma (matching the INSERT statement's value-list shape).
 // Re-running the tool is idempotent.
 //
-// The tool writes the migration file back atomically via a temp file and
-// rename. Errors exit non-zero. stdout reports the number of bytes the
-// embedded block changed by; stderr carries any diagnostic.
+// The dollar-quote tag is `<role>_md` (e.g. `engineer_md`, `qa_engineer_md`
+// — dashes in the role slug are translated to underscores in the tag).
 //
-// Scope for M2.1: the marker label is hard-coded as "engineer"; the dollar-
-// quote tag is "engineer_md". Future milestones that embed other agent.md
-// files will either parameterize this tool or ship sibling copies keyed to
-// their own label. YAGNI keeps M2.1 minimal.
+// The tool writes the migration file back atomically via a temp file and
+// rename. Errors exit non-zero.
+//
+// M2.1: hard-coded to `engineer`. M2.2 (T005): parameterized via -role so
+// the same binary handles both the engineer UPDATE and the qa-engineer
+// INSERT in the M2.2 migration. Default role is "engineer" for backward
+// compatibility with the M2.1 Makefile target.
 package main
 
 import (
+	"flag"
 	"fmt"
 	"os"
 	"strings"
 )
 
-const (
-	beginMarker = "-- +embed-agent-md:engineer:begin"
-	endMarker   = "-- +embed-agent-md:engineer:end"
-	dollarTag   = "engineer_md"
-)
-
 func main() {
-	if len(os.Args) != 3 {
-		fmt.Fprintln(os.Stderr, "usage: embed-agent-md <agent-md-path> <migration-path>")
+	fs := flag.NewFlagSet("embed-agent-md", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	role := fs.String("role", "engineer", "role slug used in sentinel markers and dollar-quote tag")
+	fs.Usage = func() {
+		fmt.Fprintln(os.Stderr, "usage: embed-agent-md [-role <slug>] <agent-md-path> <migration-path>")
+	}
+	if err := fs.Parse(os.Args[1:]); err != nil {
 		os.Exit(2)
 	}
-	mdPath := os.Args[1]
-	migPath := os.Args[2]
+	if fs.NArg() != 2 {
+		fs.Usage()
+		os.Exit(2)
+	}
+	mdPath := fs.Arg(0)
+	migPath := fs.Arg(1)
+
+	// Dollar-quote tags can't contain dashes in plain Postgres; translate.
+	tag := strings.ReplaceAll(*role, "-", "_") + "_md"
+	beginMarker := "-- +embed-agent-md:" + *role + ":begin"
+	endMarker := "-- +embed-agent-md:" + *role + ":end"
 
 	mdBytes, err := os.ReadFile(mdPath)
 	if err != nil {
@@ -51,8 +62,8 @@ func main() {
 		os.Exit(1)
 	}
 	md := string(mdBytes)
-	if strings.Contains(md, "$"+dollarTag+"$") {
-		fmt.Fprintf(os.Stderr, "refusing to embed: %s contains the dollar-quote tag $%s$ which would terminate the literal\n", mdPath, dollarTag)
+	if strings.Contains(md, "$"+tag+"$") {
+		fmt.Fprintf(os.Stderr, "refusing to embed: %s contains the dollar-quote tag $%s$ which would terminate the literal\n", mdPath, tag)
 		os.Exit(1)
 	}
 
@@ -77,20 +88,16 @@ func main() {
 	// Replace the span from the end of the begin line to the start of the
 	// end-marker line with the freshly-embedded dollar-quoted literal.
 	beginLineEnd := beginIdx + len(beginMarker)
-	// Skip the newline right after the begin marker if present; leave one
-	// newline between the marker and the literal for readability.
 	if beginLineEnd < len(mig) && mig[beginLineEnd] == '\n' {
 		beginLineEnd++
 	}
 
-	// Rewind to the start of the end-marker line (keeping its leading indent
-	// intact) so the generated block ends just before that line.
 	endLineStart := endIdx
 	for endLineStart > 0 && mig[endLineStart-1] != '\n' {
 		endLineStart--
 	}
 
-	embedded := "  $" + dollarTag + "$" + md + "$" + dollarTag + "$,\n"
+	embedded := "  $" + tag + "$" + md + "$" + tag + "$,\n"
 	updated := mig[:beginLineEnd] + embedded + mig[endLineStart:]
 
 	tmp := migPath + ".embed-tmp"

@@ -590,10 +590,19 @@ func TestM21HelloWorldEndToEnd(t *testing.T) {
 		t.Errorf("tickets.column_slug = %q; want 'done'", columnSlug)
 	}
 
-	// event_outbox.processed_at is set.
+	// event_outbox.processed_at is set on the created.engineering.todo
+	// row. Scoping by channel is load-bearing: M2.2's emit_ticket_
+	// transitioned trigger writes a second event_outbox row
+	// (transitioned.engineering.todo.done) as a side effect of the
+	// InsertTicketTransition call inside writeTerminalCostAndWakeup;
+	// that row has no handler registered in this test's dispatcher and
+	// stays NULL by design. The assertion targets the `created.todo`
+	// row the engineer is supposed to close out.
 	var processed pgtype.Timestamptz
-	if err := pool.QueryRow(ctx,
-		`SELECT processed_at FROM event_outbox ORDER BY created_at DESC LIMIT 1`,
+	if err := pool.QueryRow(ctx, `
+		SELECT processed_at FROM event_outbox
+		WHERE channel = 'work.ticket.created.engineering.todo'
+		ORDER BY created_at DESC LIMIT 1`,
 	).Scan(&processed); err != nil {
 		t.Fatalf("fetch event_outbox: %v", err)
 	}

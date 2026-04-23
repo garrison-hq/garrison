@@ -30,7 +30,7 @@ func TestWriteHappyPath(t *testing.T) {
 	dir := t.TempDir()
 	id := mustUUID(t, "11111111-1111-4111-8111-111111111111")
 
-	path, err := Write(context.Background(), dir, id, "/usr/local/bin/supervisor", "postgres://roonly@localhost/garrison")
+	path, err := Write(context.Background(), dir, id, "/usr/local/bin/supervisor", "postgres://roonly@localhost/garrison", MempalaceParams{})
 	if err != nil {
 		t.Fatalf("Write: %v", err)
 	}
@@ -85,11 +85,11 @@ func TestWriteIsolationAcrossInvocations(t *testing.T) {
 	idA := mustUUID(t, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
 	idB := mustUUID(t, "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
 
-	pathA, err := Write(context.Background(), dir, idA, "/bin/supA", "dsnA")
+	pathA, err := Write(context.Background(), dir, idA, "/bin/supA", "dsnA", MempalaceParams{})
 	if err != nil {
 		t.Fatalf("write A: %v", err)
 	}
-	pathB, err := Write(context.Background(), dir, idB, "/bin/supB", "dsnB")
+	pathB, err := Write(context.Background(), dir, idB, "/bin/supB", "dsnB", MempalaceParams{})
 	if err != nil {
 		t.Fatalf("write B: %v", err)
 	}
@@ -129,7 +129,7 @@ func TestRemoveMissingFile(t *testing.T) {
 func TestRemoveRealFile(t *testing.T) {
 	dir := t.TempDir()
 	id := mustUUID(t, "22222222-2222-4222-8222-222222222222")
-	path, err := Write(context.Background(), dir, id, "/bin/sup", "dsn")
+	path, err := Write(context.Background(), dir, id, "/bin/sup", "dsn", MempalaceParams{})
 	if err != nil {
 		t.Fatalf("Write: %v", err)
 	}
@@ -169,7 +169,7 @@ func TestWriteReturnsErrorOnDiskFull(t *testing.T) {
 	ops := &fakeOps{writeErr: syscall.ENOSPC}
 	id := mustUUID(t, "33333333-3333-4333-8333-333333333333")
 
-	_, err := WriteWithOps(context.Background(), ops, "/var/lib/garrison/mcp", id, "/bin/sup", "dsn")
+	_, err := WriteWithOps(context.Background(), ops, "/var/lib/garrison/mcp", id, "/bin/sup", "dsn", MempalaceParams{})
 	if err == nil {
 		t.Fatalf("expected error, got nil")
 	}
@@ -190,7 +190,7 @@ func TestWriteReturnsErrorOnDiskFull(t *testing.T) {
 func TestWriteReturnsErrorOnPermissionDenied(t *testing.T) {
 	ops := &fakeOps{writeErr: syscall.EACCES}
 	id := mustUUID(t, "44444444-4444-4444-8444-444444444444")
-	_, err := WriteWithOps(context.Background(), ops, "/var/lib/garrison/mcp", id, "/bin/sup", "dsn")
+	_, err := WriteWithOps(context.Background(), ops, "/var/lib/garrison/mcp", id, "/bin/sup", "dsn", MempalaceParams{})
 	if err == nil || !errors.Is(err, syscall.EACCES) {
 		t.Fatalf("expected EACCES-wrapped error, got %v", err)
 	}
@@ -207,4 +207,102 @@ func keys(m map[string]struct {
 		out = append(out, k)
 	}
 	return out
+}
+
+// ------------------------------------------------------------------
+// M2.2 — T011 tests for the mempalace entry.
+// ------------------------------------------------------------------
+
+func TestWritePostgresPlusMempalace(t *testing.T) {
+	dir := t.TempDir()
+	id := mustUUID(t, "55555555-5555-4555-8555-555555555555")
+
+	mp := MempalaceParams{
+		DockerBin:          "/usr/bin/docker",
+		MempalaceContainer: "garrison-mempalace",
+		PalacePath:         "/palace",
+		DockerHost:         "tcp://garrison-docker-proxy:2375",
+	}
+	path, err := Write(context.Background(), dir, id, "/bin/sup", "dsn", mp)
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	var cfg struct {
+		MCPServers map[string]struct {
+			Command string            `json:"command"`
+			Args    []string          `json:"args"`
+			Env     map[string]string `json:"env"`
+		} `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	// Both entries present.
+	if _, ok := cfg.MCPServers["postgres"]; !ok {
+		t.Errorf("postgres entry missing")
+	}
+	m, ok := cfg.MCPServers["mempalace"]
+	if !ok {
+		t.Fatalf("mempalace entry missing; keys=%v", keys(cfg.MCPServers))
+	}
+	if m.Command != "/usr/bin/docker" {
+		t.Errorf("mempalace.command=%q", m.Command)
+	}
+	wantArgs := []string{"exec", "-i", "garrison-mempalace", "python", "-m", "mempalace.mcp_server", "--palace", "/palace"}
+	if len(m.Args) != len(wantArgs) {
+		t.Errorf("args len=%d; want %d", len(m.Args), len(wantArgs))
+	}
+	for i, a := range m.Args {
+		if a != wantArgs[i] {
+			t.Errorf("args[%d]=%q; want %q", i, a, wantArgs[i])
+		}
+	}
+	if m.Env["DOCKER_HOST"] != "tcp://garrison-docker-proxy:2375" {
+		t.Errorf("env.DOCKER_HOST=%q", m.Env["DOCKER_HOST"])
+	}
+}
+
+// TestWriteMempalaceEnvCarriesDockerHost isolates the env.DOCKER_HOST
+// shape (T011 completion condition).
+func TestWriteMempalaceEnvCarriesDockerHost(t *testing.T) {
+	dir := t.TempDir()
+	id := mustUUID(t, "66666666-6666-4666-8666-666666666666")
+	mp := MempalaceParams{
+		DockerBin:          "/usr/bin/docker",
+		MempalaceContainer: "garrison-mempalace",
+		PalacePath:         "/palace",
+		DockerHost:         "tcp://override:9999",
+	}
+	path, err := Write(context.Background(), dir, id, "/bin/sup", "dsn", mp)
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	raw, _ := os.ReadFile(path)
+	if !strings.Contains(string(raw), `"DOCKER_HOST": "tcp://override:9999"`) {
+		t.Errorf("DOCKER_HOST override not found in emitted JSON: %s", raw)
+	}
+}
+
+// TestWriteEmptyMempalaceParamsOmitsEntry pins the M2.1 back-compat path:
+// when all four MempalaceParams fields are empty, no mempalace entry is
+// emitted (postgres-only output, byte-identical to M2.1).
+func TestWriteEmptyMempalaceParamsOmitsEntry(t *testing.T) {
+	dir := t.TempDir()
+	id := mustUUID(t, "77777777-7777-4777-8777-777777777777")
+	path, err := Write(context.Background(), dir, id, "/bin/sup", "dsn", MempalaceParams{})
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	raw, _ := os.ReadFile(path)
+	if strings.Contains(string(raw), "mempalace") {
+		t.Errorf("empty MempalaceParams should not emit mempalace entry; got:\n%s", raw)
+	}
+	if !strings.Contains(string(raw), "postgres") {
+		t.Errorf("postgres entry missing from output:\n%s", raw)
+	}
 }

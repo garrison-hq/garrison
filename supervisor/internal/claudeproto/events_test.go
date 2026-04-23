@@ -329,3 +329,40 @@ func TestRouteInitBailsOnMCPFailure(t *testing.T) {
 		t.Fatalf("expected Route to propagate OnInit's Bail action")
 	}
 }
+
+// TestAssistantEventToolUses verifies the M2.2 tool_use extraction. A
+// real Claude assistant line can carry multiple content blocks with
+// mixed types (thinking / text / tool_use). The router should populate
+// ToolUses with only the tool_use blocks, carrying name/id/input.
+func TestAssistantEventToolUses(t *testing.T) {
+	raw := []byte(`{"type":"assistant","message":{"model":"claude-haiku","content":[` +
+		`{"type":"thinking","signature":"x"},` +
+		`{"type":"text","text":"calling two tools"},` +
+		`{"type":"tool_use","id":"toolu_01","name":"mempalace_add_drawer","input":{"wing":"wing_x","room":"hall_events","content":"..."}},` +
+		`{"type":"tool_use","id":"toolu_02","name":"mempalace_kg_add","input":{"subject":"a","predicate":"p","object":"b"}}` +
+		`]}}`)
+	r := &captureRouter{}
+	if _, err := Route(context.Background(), raw, r); err != nil {
+		t.Fatalf("Route err: %v", err)
+	}
+	if r.assistant == nil {
+		t.Fatalf("expected OnAssistant to fire")
+	}
+	a := *r.assistant
+	if len(a.ToolUses) != 2 {
+		t.Fatalf("expected 2 tool_uses, got %d: %+v", len(a.ToolUses), a.ToolUses)
+	}
+	if a.ToolUses[0].Name != "mempalace_add_drawer" {
+		t.Errorf("ToolUses[0].Name=%q", a.ToolUses[0].Name)
+	}
+	if a.ToolUses[0].ToolUseID != "toolu_01" {
+		t.Errorf("ToolUses[0].ToolUseID=%q", a.ToolUses[0].ToolUseID)
+	}
+	if a.ToolUses[1].Name != "mempalace_kg_add" {
+		t.Errorf("ToolUses[1].Name=%q", a.ToolUses[1].Name)
+	}
+	// InputRaw preserved as json.RawMessage for downstream processing.
+	if len(a.ToolUses[0].InputRaw) == 0 {
+		t.Errorf("ToolUses[0].InputRaw is empty")
+	}
+}

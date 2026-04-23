@@ -23,9 +23,48 @@ func (q *Queries) CountRunningByDepartment(ctx context.Context, departmentID pgt
 	return count, err
 }
 
+const getAgentInstanceRunWindow = `-- name: GetAgentInstanceRunWindow :one
+SELECT ai.id,
+       ai.started_at,
+       ai.finished_at,
+       ai.department_id,
+       ai.role_slug,
+       a.palace_wing
+FROM agent_instances ai
+LEFT JOIN agents a
+  ON a.department_id = ai.department_id AND a.role_slug = ai.role_slug
+WHERE ai.id = $1
+`
+
+type GetAgentInstanceRunWindowRow struct {
+	ID           pgtype.UUID
+	StartedAt    pgtype.Timestamptz
+	FinishedAt   pgtype.Timestamptz
+	DepartmentID pgtype.UUID
+	RoleSlug     string
+	PalaceWing   *string
+}
+
+// Resolves agent_instance_id → (started_at, finished_at, palace_wing, role_slug)
+// for the hygiene checker (FR-213). Palace wing comes from the agents table
+// via the (department_id, role_slug) key.
+func (q *Queries) GetAgentInstanceRunWindow(ctx context.Context, id pgtype.UUID) (GetAgentInstanceRunWindowRow, error) {
+	row := q.db.QueryRow(ctx, getAgentInstanceRunWindow, id)
+	var i GetAgentInstanceRunWindowRow
+	err := row.Scan(
+		&i.ID,
+		&i.StartedAt,
+		&i.FinishedAt,
+		&i.DepartmentID,
+		&i.RoleSlug,
+		&i.PalaceWing,
+	)
+	return i, err
+}
+
 const insertRunningInstance = `-- name: InsertRunningInstance :one
-INSERT INTO agent_instances (department_id, ticket_id, pid, status)
-VALUES ($1, $2, $3, 'running')
+INSERT INTO agent_instances (department_id, ticket_id, pid, status, role_slug)
+VALUES ($1, $2, $3, 'running', $4)
 RETURNING id
 `
 
@@ -33,10 +72,16 @@ type InsertRunningInstanceParams struct {
 	DepartmentID pgtype.UUID
 	TicketID     pgtype.UUID
 	Pid          *int32
+	RoleSlug     string
 }
 
 func (q *Queries) InsertRunningInstance(ctx context.Context, arg InsertRunningInstanceParams) (pgtype.UUID, error) {
-	row := q.db.QueryRow(ctx, insertRunningInstance, arg.DepartmentID, arg.TicketID, arg.Pid)
+	row := q.db.QueryRow(ctx, insertRunningInstance,
+		arg.DepartmentID,
+		arg.TicketID,
+		arg.Pid,
+		arg.RoleSlug,
+	)
 	var id pgtype.UUID
 	err := row.Scan(&id)
 	return id, err
@@ -100,6 +145,35 @@ func (q *Queries) UpdateInstanceTerminalWithCost(ctx context.Context, arg Update
 		arg.Status,
 		arg.ExitReason,
 		arg.TotalCostUsd,
+	)
+	return err
+}
+
+const updateInstanceTerminalWithCostAndWakeup = `-- name: UpdateInstanceTerminalWithCostAndWakeup :exec
+UPDATE agent_instances
+SET status = $2,
+    finished_at = NOW(),
+    exit_reason = $3,
+    total_cost_usd = $4,
+    wake_up_status = $5
+WHERE id = $1
+`
+
+type UpdateInstanceTerminalWithCostAndWakeupParams struct {
+	ID           pgtype.UUID
+	Status       string
+	ExitReason   *string
+	TotalCostUsd pgtype.Numeric
+	WakeUpStatus *string
+}
+
+func (q *Queries) UpdateInstanceTerminalWithCostAndWakeup(ctx context.Context, arg UpdateInstanceTerminalWithCostAndWakeupParams) error {
+	_, err := q.db.Exec(ctx, updateInstanceTerminalWithCostAndWakeup,
+		arg.ID,
+		arg.Status,
+		arg.ExitReason,
+		arg.TotalCostUsd,
+		arg.WakeUpStatus,
 	)
 	return err
 }

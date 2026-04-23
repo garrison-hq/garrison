@@ -1,0 +1,7 @@
+# M2.2 fixture — Claude terminates under the --max-budget-usd ceiling.
+# init OK, one assistant text line, then terminal result with
+# terminal_reason="budget_exceeded". Adjudicate's isBudgetTerminalReason
+# catch should route this to exit_reason=budget_exceeded.
+#init-mcp-servers [{"name":"postgres","status":"connected"},{"name":"mempalace","status":"connected"}]
+{"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","content":[{"type":"text","text":"Starting work on ticket {{TICKET_ID}}..."}]}}
+#budget-exceeded

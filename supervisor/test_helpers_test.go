@@ -1,4 +1,4 @@
-//go:build integration || chaos
+//go:build integration || chaos || live_acceptance
 
 package supervisor_test
 
@@ -38,11 +38,12 @@ type supervisorOpts struct {
 
 	// Real-Claude mode — leave ClaudeBin and AgentROPassword unset to
 	// stay in fake-agent mode (FakeAgentCmd above).
-	ClaudeBin        string
-	AgentROPassword  string
-	MCPConfigDir     string
-	MockClaudeScript string // forwarded as GARRISON_MOCK_CLAUDE_SCRIPT
-	SignalMarker     string // forwarded as GARRISON_MOCK_CLAUDE_SIGNAL_MARKER
+	ClaudeBin              string
+	AgentROPassword        string
+	AgentMempalacePassword string // M2.2: required in real-claude mode. Auto-defaults to "integration-test-mp" when ClaudeBin is set and this is left blank.
+	MCPConfigDir           string
+	MockClaudeScript       string // forwarded as GARRISON_MOCK_CLAUDE_SCRIPT
+	SignalMarker           string // forwarded as GARRISON_MOCK_CLAUDE_SIGNAL_MARKER
 
 	// HomeOverride sets HOME for the supervisor subprocess (used by the
 	// session-persistence test to scope claude's writes under a tempdir).
@@ -124,6 +125,25 @@ func startSupervisor(t *testing.T, opts supervisorOpts) (int, *exec.Cmd) {
 	}
 	if opts.AgentROPassword != "" {
 		env = append(env, "GARRISON_AGENT_RO_PASSWORD="+opts.AgentROPassword)
+	}
+	// M2.2: real-claude mode requires GARRISON_AGENT_MEMPALACE_PASSWORD.
+	// Auto-default when ClaudeBin is set but the opts field is left blank
+	// so M2.1 integration tests (which pre-date the M2.2 env check)
+	// continue to pass without every test having to set it explicitly.
+	// Also disable the palace bootstrap + hygiene goroutines — M2.1 tests
+	// use mock-claude fixtures that don't exercise MemPalace, and CI
+	// doesn't stand up a mempalace sidecar for them. M2.2-specific tests
+	// that do need MemPalace (integration_m2_2_*) live in their own files
+	// and don't use startSupervisor.
+	if opts.ClaudeBin != "" {
+		mpw := opts.AgentMempalacePassword
+		if mpw == "" {
+			mpw = "integration-test-mp"
+		}
+		env = append(env,
+			"GARRISON_AGENT_MEMPALACE_PASSWORD="+mpw,
+			"GARRISON_DISABLE_PALACE_BOOTSTRAP=1",
+		)
 	}
 	if opts.MCPConfigDir != "" {
 		env = append(env, "GARRISON_MCP_CONFIG_DIR="+opts.MCPConfigDir)

@@ -29,6 +29,14 @@ var allEnvVars = []string{
 	"GARRISON_CLAUDE_BUDGET_USD",
 	"GARRISON_MCP_CONFIG_DIR",
 	"GARRISON_AGENT_RO_PASSWORD",
+	// M2.2 additions
+	"GARRISON_MEMPALACE_CONTAINER",
+	"GARRISON_PALACE_PATH",
+	"GARRISON_DOCKER_BIN",
+	"GARRISON_AGENT_MEMPALACE_PASSWORD",
+	"GARRISON_HYGIENE_DELAY",
+	"GARRISON_HYGIENE_SWEEP_INTERVAL",
+	"DOCKER_HOST",
 }
 
 // clearAll unsets every GARRISON_* env var the config package reads, so a test
@@ -125,15 +133,19 @@ func realAgentEnv(t *testing.T) {
 	clearAll(t)
 	t.Setenv("GARRISON_DATABASE_URL", validDBURL)
 	t.Setenv("GARRISON_AGENT_RO_PASSWORD", "secret-ro-pw")
+	// M2.2: real-claude path requires the mempalace-role password.
+	t.Setenv("GARRISON_AGENT_MEMPALACE_PASSWORD", "secret-mp-pw")
 	t.Setenv("GARRISON_MCP_CONFIG_DIR", t.TempDir())
 
-	// Build an isolated $PATH containing exactly one fake claude binary so
-	// exec.LookPath succeeds without depending on the host having claude
-	// installed.
+	// Build an isolated $PATH containing fake claude + docker binaries so
+	// exec.LookPath succeeds without depending on the host having either
+	// installed. M2.2 requires both.
 	binDir := t.TempDir()
-	fakeBin := filepath.Join(binDir, "claude")
-	if err := os.WriteFile(fakeBin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-		t.Fatalf("seed fake claude: %v", err)
+	for _, name := range []string{"claude", "docker"} {
+		fakeBin := filepath.Join(binDir, name)
+		if err := os.WriteFile(fakeBin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatalf("seed fake %s: %v", name, err)
+		}
 	}
 	t.Setenv("PATH", binDir)
 }
@@ -170,8 +182,10 @@ func TestLoadFailsWhenClaudeMissing(t *testing.T) {
 	clearAll(t)
 	t.Setenv("GARRISON_DATABASE_URL", validDBURL)
 	t.Setenv("GARRISON_AGENT_RO_PASSWORD", "secret-ro-pw")
+	t.Setenv("GARRISON_AGENT_MEMPALACE_PASSWORD", "secret-mp-pw")
 	t.Setenv("GARRISON_MCP_CONFIG_DIR", t.TempDir())
-	// Isolated empty PATH so exec.LookPath cannot find claude.
+	// Isolated empty PATH so exec.LookPath cannot find claude (or docker —
+	// but the claude check fires first in Load's order so we assert on it).
 	t.Setenv("PATH", t.TempDir())
 
 	_, err := config.Load()
@@ -307,5 +321,134 @@ func TestLoadHonoursFakeAgentFlag(t *testing.T) {
 	}
 	if cfg.AgentRODSN() == "" {
 		t.Errorf("AgentRODSN() = empty; want a DSN even when password is empty (host/db still composed)")
+	}
+}
+
+// ------------------------------------------------------------------
+// M2.2 — T009 tests for the new env vars and validation.
+// ------------------------------------------------------------------
+
+func TestM22ConfigDefaults(t *testing.T) {
+	t.Setenv("GARRISON_DATABASE_URL", "postgres://u:p@h/db")
+	t.Setenv("GARRISON_FAKE_AGENT_CMD", "/bin/echo") // skip real-claude preconditions
+	// Clear any overrides from the surrounding env.
+	t.Setenv("GARRISON_MEMPALACE_CONTAINER", "")
+	t.Setenv("GARRISON_PALACE_PATH", "")
+	t.Setenv("GARRISON_HYGIENE_DELAY", "")
+	t.Setenv("GARRISON_HYGIENE_SWEEP_INTERVAL", "")
+	t.Setenv("DOCKER_HOST", "")
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load returned err: %v", err)
+	}
+	if cfg.ClaudeBudgetUSD != 0.10 {
+		t.Errorf("ClaudeBudgetUSD=%v; want 0.10 (NFR-201)", cfg.ClaudeBudgetUSD)
+	}
+	if cfg.HygieneDelay != 5*time.Second {
+		t.Errorf("HygieneDelay=%s; want 5s", cfg.HygieneDelay)
+	}
+	if cfg.HygieneSweepInterval != 60*time.Second {
+		t.Errorf("HygieneSweepInterval=%s; want 60s", cfg.HygieneSweepInterval)
+	}
+	if cfg.MempalaceContainer != "garrison-mempalace" {
+		t.Errorf("MempalaceContainer=%q; want garrison-mempalace", cfg.MempalaceContainer)
+	}
+	if cfg.PalacePath != "/palace" {
+		t.Errorf("PalacePath=%q; want /palace", cfg.PalacePath)
+	}
+	if cfg.DockerHost != "tcp://garrison-docker-proxy:2375" {
+		t.Errorf("DockerHost=%q; want tcp://garrison-docker-proxy:2375", cfg.DockerHost)
+	}
+}
+
+func TestM22ConfigHonoursDockerHostOverride(t *testing.T) {
+	t.Setenv("GARRISON_DATABASE_URL", "postgres://u:p@h/db")
+	t.Setenv("GARRISON_FAKE_AGENT_CMD", "/bin/echo")
+	t.Setenv("DOCKER_HOST", "tcp://foo.example:2375")
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load returned err: %v", err)
+	}
+	if cfg.DockerHost != "tcp://foo.example:2375" {
+		t.Errorf("DockerHost=%q; want tcp://foo.example:2375", cfg.DockerHost)
+	}
+}
+
+func TestM22ConfigRejectsZeroHygieneDelay(t *testing.T) {
+	t.Setenv("GARRISON_DATABASE_URL", "postgres://u:p@h/db")
+	t.Setenv("GARRISON_FAKE_AGENT_CMD", "/bin/echo")
+	t.Setenv("GARRISON_HYGIENE_DELAY", "0s")
+
+	_, err := config.Load()
+	if err == nil {
+		t.Fatal("expected error on zero hygiene delay")
+	}
+	if !strings.Contains(err.Error(), "GARRISON_HYGIENE_DELAY") {
+		t.Errorf("error should name the env var: %v", err)
+	}
+}
+
+func TestM22ConfigRejectsNegativeSweepInterval(t *testing.T) {
+	t.Setenv("GARRISON_DATABASE_URL", "postgres://u:p@h/db")
+	t.Setenv("GARRISON_FAKE_AGENT_CMD", "/bin/echo")
+	t.Setenv("GARRISON_HYGIENE_SWEEP_INTERVAL", "-5s")
+
+	_, err := config.Load()
+	if err == nil {
+		t.Fatal("expected error on negative sweep interval")
+	}
+	if !strings.Contains(err.Error(), "GARRISON_HYGIENE_SWEEP_INTERVAL") {
+		t.Errorf("error should name the env var: %v", err)
+	}
+}
+
+func TestM22ConfigRequiresMempalacePassword(t *testing.T) {
+	t.Setenv("GARRISON_DATABASE_URL", "postgres://u:p@h/db")
+	// Not fake-agent; real-path requires GARRISON_AGENT_MEMPALACE_PASSWORD.
+	t.Setenv("GARRISON_FAKE_AGENT_CMD", "")
+	t.Setenv("GARRISON_AGENT_RO_PASSWORD", "x")
+	t.Setenv("GARRISON_AGENT_MEMPALACE_PASSWORD", "")
+	// MCPConfigDir and CLAUDE_BIN need something to satisfy Load before
+	// hitting the mempalace-password check.
+	t.Setenv("GARRISON_MCP_CONFIG_DIR", t.TempDir())
+	t.Setenv("GARRISON_CLAUDE_BIN", "/bin/true")
+
+	_, err := config.Load()
+	if err == nil {
+		t.Fatal("expected error when GARRISON_AGENT_MEMPALACE_PASSWORD is empty")
+	}
+	if !strings.Contains(err.Error(), "GARRISON_AGENT_MEMPALACE_PASSWORD") {
+		t.Errorf("error should name the env var: %v", err)
+	}
+}
+
+func TestM22AgentMempalaceDSNComposition(t *testing.T) {
+	t.Setenv("GARRISON_DATABASE_URL", "postgres://orig:origpw@pg.example:5432/garrison")
+	t.Setenv("GARRISON_FAKE_AGENT_CMD", "")
+	t.Setenv("GARRISON_AGENT_RO_PASSWORD", "ro-pw")
+	t.Setenv("GARRISON_AGENT_MEMPALACE_PASSWORD", "mp-pw")
+	t.Setenv("GARRISON_MCP_CONFIG_DIR", t.TempDir())
+	t.Setenv("GARRISON_CLAUDE_BIN", "/bin/true")
+	t.Setenv("GARRISON_DOCKER_BIN", "/bin/true")
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load returned err: %v", err)
+	}
+	dsn := cfg.AgentMempalaceDSN()
+	// Expect userinfo replaced with garrison_agent_mempalace:mp-pw
+	if !strings.Contains(dsn, "garrison_agent_mempalace") {
+		t.Errorf("DSN missing mempalace role: %q", dsn)
+	}
+	if !strings.Contains(dsn, "mp-pw") {
+		t.Errorf("DSN missing mempalace password: %q", dsn)
+	}
+	if strings.Contains(dsn, "origpw") {
+		t.Errorf("DSN still carries original password: %q", dsn)
+	}
+	if !strings.Contains(dsn, "pg.example:5432/garrison") {
+		t.Errorf("DSN missing host/db: %q", dsn)
 	}
 }

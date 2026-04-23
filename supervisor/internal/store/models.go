@@ -32,6 +32,8 @@ type AgentInstance struct {
 	Status       string
 	ExitReason   *string
 	TotalCostUsd pgtype.Numeric
+	WakeUpStatus *string
+	RoleSlug     string
 }
 
 type Company struct {

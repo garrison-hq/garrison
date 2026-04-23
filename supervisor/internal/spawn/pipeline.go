@@ -83,10 +83,34 @@ type WaitDetail struct {
 // into a captured Result. It performs no I/O of its own beyond slog lines;
 // the bail side effect (killProcessGroup) is delegated to the caller via
 // the onBail callback that Run owns.
+//
+// M2.2 extension: pipelineRouter maintains an in-flight map of
+// tool_use_id → tool_name for mempalace_* tool calls so the subsequent
+// tool_result event can be logged as a follow-up pair. Observational only
+// (FR-218a); no dispatch consequence.
 type pipelineRouter struct {
 	logger     *slog.Logger
 	instanceID pgtype.UUID
+	ticketID   pgtype.UUID
 	result     *Result
+
+	// mempalaceToolUse tracks outstanding mempalace_* tool_use_ids so
+	// OnUser can emit a follow-up "outcome" slog line. Keyed by
+	// tool_use_id. Cleared on observed tool_result; any entries still
+	// in the map at EOF stay at outcome="pending" per FR-218 edge-case.
+	mempalaceToolUse map[string]string
+}
+
+// isMempalaceToolName returns true if the tool name belongs to the
+// MemPalace MCP surface (either direct mempalace_* or the
+// mcp__mempalace__mempalace_* prefix Claude prepends to MCP tools).
+func isMempalaceToolName(name string) bool {
+	const prefix = "mcp__mempalace__"
+	if len(name) >= len(prefix) && name[:len(prefix)] == prefix {
+		return true
+	}
+	const bare = "mempalace_"
+	return len(name) >= len(bare) && name[:len(bare)] == bare
 }
 
 func (p *pipelineRouter) OnInit(_ context.Context, e claudeproto.InitEvent) claudeproto.RouterAction {
@@ -120,10 +144,48 @@ func (p *pipelineRouter) OnAssistant(_ context.Context, e claudeproto.AssistantE
 		"content_block_count", e.ContentBlockCount,
 		"content_types", e.ContentTypes,
 		"model", e.Model)
+
+	// FR-218 / NFR-210: structured log line for each mempalace_* tool_use.
+	// Observational only (FR-218a); no dispatch consequence. Paired with
+	// a follow-up "outcome" line in OnUser when the tool_result arrives.
+	for _, tu := range e.ToolUses {
+		if !isMempalaceToolName(tu.Name) {
+			continue
+		}
+		if p.mempalaceToolUse == nil {
+			p.mempalaceToolUse = make(map[string]string, 4)
+		}
+		p.mempalaceToolUse[tu.ToolUseID] = tu.Name
+		p.logger.Info("mempalace tool_use",
+			"instance_id", uuidString(p.instanceID),
+			"ticket_id", uuidString(p.ticketID),
+			"tool_name", tu.Name,
+			"tool_use_id", tu.ToolUseID,
+			"outcome", "pending",
+		)
+	}
 }
 
 func (p *pipelineRouter) OnUser(_ context.Context, e claudeproto.UserEvent) {
 	for _, tr := range e.ToolResults {
+		// FR-218 follow-up: resolve outcome for any pending mempalace_*
+		// tool_use in the in-flight map. Observational; log then clear.
+		if name, ok := p.mempalaceToolUse[tr.ToolUseID]; ok {
+			outcome := "ok"
+			if tr.IsError {
+				outcome = "error"
+			}
+			p.logger.Info("mempalace tool_result",
+				"instance_id", uuidString(p.instanceID),
+				"ticket_id", uuidString(p.ticketID),
+				"tool_name", name,
+				"tool_use_id", tr.ToolUseID,
+				"outcome", outcome,
+				"detail", tr.Detail,
+			)
+			delete(p.mempalaceToolUse, tr.ToolUseID)
+		}
+
 		if tr.IsError {
 			p.logger.Warn("claude tool_result reported error",
 				"instance_id", uuidString(p.instanceID),
@@ -189,6 +251,7 @@ func Run(
 	ctx context.Context,
 	stdout io.Reader,
 	instanceID pgtype.UUID,
+	ticketID pgtype.UUID,
 	logger *slog.Logger,
 	onBail func(reason string),
 ) (Result, error) {
@@ -199,6 +262,7 @@ func Run(
 	r := &pipelineRouter{
 		logger:     logger,
 		instanceID: instanceID,
+		ticketID:   ticketID,
 		result:     &result,
 	}
 
@@ -276,11 +340,51 @@ func Adjudicate(result Result, wait WaitDetail, helloTxtOK bool) (status, exitRe
 		return "failed", ExitNoResult
 	case result.IsError:
 		return "failed", ExitClaudeError
+	case result.ResultSeen && isBudgetTerminalReason(result.TerminalReason):
+		// M2.2 / FR-220: terminal result reports the --max-budget-usd
+		// was exceeded. Happens with is_error=false when Claude wraps
+		// up mid-turn under a budget ceiling; kept ABOVE the hello.txt
+		// check because a truncated run shouldn't be re-classified as
+		// acceptance_failed on a missing artefact — it's a cost issue.
+		// The exact TerminalReason string on 2.1.117 is not spike-pinned;
+		// case-insensitive substring match on "budget" is the defensive
+		// shim per plan §"Error vocabulary". Real-Claude observations
+		// feed back into a tighter enum post-M2.2.
+		return "failed", ExitBudgetExceeded
 	case !helloTxtOK:
 		return "failed", ExitAcceptanceFailed
 	default:
 		return "succeeded", ExitCompleted
 	}
+}
+
+// isBudgetTerminalReason returns true if the string looks like a
+// budget-overrun signal from Claude 2.1.117. Case-insensitive substring
+// match on "budget" — narrow enough to avoid false positives on
+// "completed"/"end_turn" but permissive to catch variants until the
+// exact enum value is pinned through observation.
+func isBudgetTerminalReason(s string) bool {
+	for i := 0; i+6 <= len(s); i++ {
+		c0 := toLowerASCII(s[i])
+		if c0 != 'b' {
+			continue
+		}
+		if toLowerASCII(s[i+1]) == 'u' &&
+			toLowerASCII(s[i+2]) == 'd' &&
+			toLowerASCII(s[i+3]) == 'g' &&
+			toLowerASCII(s[i+4]) == 'e' &&
+			toLowerASCII(s[i+5]) == 't' {
+			return true
+		}
+	}
+	return false
+}
+
+func toLowerASCII(b byte) byte {
+	if b >= 'A' && b <= 'Z' {
+		return b + 32
+	}
+	return b
 }
 
 // uuidString formats a pgtype.UUID for structured log context. Kept local

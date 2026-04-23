@@ -53,16 +53,34 @@ type TaskStartedEvent struct {
 	Raw []byte `json:"-"`
 }
 
+// ToolUseBlock is one tool_use item extracted from an assistant event's
+// content array. M2.2 uses this for FR-218 mempalace_* tool-call logging
+// (see internal/spawn/pipeline.go). Name is the tool's id ("mempalace_
+// add_drawer", "mcp__mempalace__mempalace_add_drawer", etc.); ToolUseID
+// is the correlation handle the subsequent user/tool_result event
+// carries; InputRaw is the caller-provided arguments as received (kept
+// as json.RawMessage so assistants' free-form input doesn't require
+// pre-commit to a schema).
+type ToolUseBlock struct {
+	Name      string          `json:"name"`
+	ToolUseID string          `json:"id"`
+	InputRaw  json.RawMessage `json:"input"`
+}
+
 // AssistantEvent corresponds to the `assistant` line. The `message` sub-
 // object carries content blocks (thinking / text / tool_use). The
 // supervisor logs observationally (plan §OnAssistant); no dispatch change.
 // ContentTypes is the deduplicated list of content-block types in this
-// message — useful structured context for the slog line.
+// message — useful structured context for the slog line. ToolUses is
+// populated with any tool_use blocks found in content (M2.2 / FR-218):
+// best-effort parsing; nil if the shape drifts, which the caller treats
+// as "no mempalace tool_use observed in this line" rather than an error.
 type AssistantEvent struct {
-	Model             string   `json:"-"`
-	ContentBlockCount int      `json:"-"`
-	ContentTypes      []string `json:"-"`
-	Raw               []byte   `json:"-"`
+	Model             string         `json:"-"`
+	ContentBlockCount int            `json:"-"`
+	ContentTypes      []string       `json:"-"`
+	ToolUses          []ToolUseBlock `json:"-"`
+	Raw               []byte         `json:"-"`
 }
 
 // ToolResultSummary is one tool_result item from the user event's

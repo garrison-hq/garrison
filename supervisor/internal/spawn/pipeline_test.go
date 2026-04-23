@@ -177,7 +177,7 @@ func TestPipelineRunRoutesAllEvents(t *testing.T) {
 		fixtureResult,
 	}, "\n") + "\n"
 
-	r, err := Run(context.Background(), bytes.NewBufferString(stream), pgtype.UUID{}, discardLogger(), nil)
+	r, err := Run(context.Background(), bytes.NewBufferString(stream), pgtype.UUID{}, pgtype.UUID{}, discardLogger(), nil)
 	if err != nil {
 		t.Fatalf("Run: unexpected error %v", err)
 	}
@@ -207,7 +207,7 @@ func TestPipelineRunRoutesAllEvents(t *testing.T) {
 func TestPipelineRunMCPBailInvokesCallback(t *testing.T) {
 	stream := fixtureInitBadMCP + "\n"
 	var bailReason string
-	r, err := Run(context.Background(), bytes.NewBufferString(stream), pgtype.UUID{}, discardLogger(),
+	r, err := Run(context.Background(), bytes.NewBufferString(stream), pgtype.UUID{}, pgtype.UUID{}, discardLogger(),
 		func(reason string) { bailReason = reason })
 	if err != nil {
 		t.Fatalf("Run: unexpected error %v", err)
@@ -227,7 +227,7 @@ func TestPipelineRunMCPBailInvokesCallback(t *testing.T) {
 func TestPipelineRunParseErrorBails(t *testing.T) {
 	stream := fixtureInit + "\n" + fixtureMalformed + "\n"
 	var bailReason string
-	r, err := Run(context.Background(), bytes.NewBufferString(stream), pgtype.UUID{}, discardLogger(),
+	r, err := Run(context.Background(), bytes.NewBufferString(stream), pgtype.UUID{}, pgtype.UUID{}, discardLogger(),
 		func(reason string) { bailReason = reason })
 	if err == nil {
 		t.Fatal("Run: want parse error, got nil")
@@ -242,7 +242,7 @@ func TestPipelineRunParseErrorBails(t *testing.T) {
 
 func TestPipelineRunTreatsUnknownEventAsContinue(t *testing.T) {
 	stream := fixtureInit + "\n" + fixtureUnknown + "\n" + fixtureResult + "\n"
-	r, err := Run(context.Background(), bytes.NewBufferString(stream), pgtype.UUID{}, discardLogger(), nil)
+	r, err := Run(context.Background(), bytes.NewBufferString(stream), pgtype.UUID{}, pgtype.UUID{}, discardLogger(), nil)
 	if err != nil {
 		t.Fatalf("Run: unexpected error %v", err)
 	}
@@ -256,7 +256,7 @@ func TestPipelineRunTreatsUnknownEventAsContinue(t *testing.T) {
 
 func TestPipelineRunSkipsBlankLines(t *testing.T) {
 	stream := "\n\n" + fixtureInit + "\n\n" + fixtureResult + "\n\n"
-	r, err := Run(context.Background(), bytes.NewBufferString(stream), pgtype.UUID{}, discardLogger(), nil)
+	r, err := Run(context.Background(), bytes.NewBufferString(stream), pgtype.UUID{}, pgtype.UUID{}, discardLogger(), nil)
 	if err != nil {
 		t.Fatalf("Run: unexpected error %v", err)
 	}
@@ -284,14 +284,14 @@ func (e *erroringReader) Read(p []byte) (int, error) {
 func TestPipelineRunSurfacesReadError(t *testing.T) {
 	want := errors.New("synthetic io failure")
 	reader := &erroringReader{remaining: []byte(fixtureInit + "\n"), err: want}
-	_, err := Run(context.Background(), reader, pgtype.UUID{}, discardLogger(), nil)
+	_, err := Run(context.Background(), reader, pgtype.UUID{}, pgtype.UUID{}, discardLogger(), nil)
 	if err == nil {
 		t.Fatal("Run: want error from reader, got nil")
 	}
 }
 
 func TestPipelineRunRequiresLogger(t *testing.T) {
-	_, err := Run(context.Background(), bytes.NewBufferString(""), pgtype.UUID{}, nil, nil)
+	_, err := Run(context.Background(), bytes.NewBufferString(""), pgtype.UUID{}, pgtype.UUID{}, nil, nil)
 	if err == nil {
 		t.Error("Run(nil logger): want error, got nil")
 	}
@@ -317,5 +317,143 @@ func TestUUIDStringEmptyForInvalid(t *testing.T) {
 	var u pgtype.UUID
 	if got := uuidString(u); got != "" {
 		t.Errorf("uuidString(invalid) = %q; want empty", got)
+	}
+}
+
+// recordingHandler captures every slog record into an in-memory slice so
+// tests can assert on specific log-line field shapes. Not concurrency-
+// safe (tests call it serially).
+type recordingHandler struct {
+	records []slog.Record
+}
+
+func (h *recordingHandler) Enabled(_ context.Context, _ slog.Level) bool { return true }
+func (h *recordingHandler) Handle(_ context.Context, r slog.Record) error {
+	h.records = append(h.records, r.Clone())
+	return nil
+}
+func (h *recordingHandler) WithAttrs(_ []slog.Attr) slog.Handler { return h }
+func (h *recordingHandler) WithGroup(_ string) slog.Handler      { return h }
+
+// recordAttrs extracts all {key → value} pairs from a slog.Record for
+// straightforward assertion.
+func recordAttrs(r slog.Record) map[string]any {
+	out := map[string]any{}
+	r.Attrs(func(a slog.Attr) bool {
+		out[a.Key] = a.Value.Any()
+		return true
+	})
+	return out
+}
+
+// TestPipelineLogsMempalaceToolUsePairs verifies FR-218: for every
+// mempalace_* tool_use the pipeline emits a pending info-level log, and
+// for every matching tool_result it emits a follow-up info-level log
+// with outcome ∈ {"ok", "error"}.
+func TestPipelineLogsMempalaceToolUsePairs(t *testing.T) {
+	// NDJSON: init → assistant(tool_use mempalace_add_drawer) → user(ok)
+	//         → assistant(tool_use mempalace_kg_add)           → user(error)
+	//         → result success.
+	stream := strings.Join([]string{
+		`{"type":"system","subtype":"init","cwd":"/","session_id":"s","model":"m","tools":[],"mcp_servers":[{"name":"postgres","status":"connected"},{"name":"mempalace","status":"connected"}]}`,
+		`{"type":"assistant","message":{"model":"m","content":[{"type":"tool_use","id":"toolu_1","name":"mempalace_add_drawer","input":{"wing":"w","room":"hall_events","content":"..."}}]}}`,
+		`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_1","is_error":false,"content":[{"type":"text","text":"ok"}]}]}}`,
+		`{"type":"assistant","message":{"model":"m","content":[{"type":"tool_use","id":"toolu_2","name":"mempalace_kg_add","input":{"subject":"a","predicate":"p","object":"b"}}]}}`,
+		`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_2","is_error":true,"content":[{"type":"text","text":"kg write failed"}]}]}}`,
+		`{"type":"result","subtype":"success","is_error":false,"duration_ms":100,"total_cost_usd":0.05,"stop_reason":"end_turn"}`,
+	}, "\n")
+
+	rec := &recordingHandler{}
+	logger := slog.New(rec)
+
+	_, err := Run(context.Background(), strings.NewReader(stream), pgtype.UUID{}, pgtype.UUID{}, logger, nil)
+	if err != nil {
+		t.Fatalf("Run err: %v", err)
+	}
+
+	// Count mempalace tool_use + tool_result lines.
+	var toolUses, toolResults []slog.Record
+	for _, r := range rec.records {
+		switch r.Message {
+		case "mempalace tool_use":
+			toolUses = append(toolUses, r)
+		case "mempalace tool_result":
+			toolResults = append(toolResults, r)
+		}
+	}
+	if len(toolUses) != 2 {
+		t.Errorf("mempalace tool_use lines=%d; want 2", len(toolUses))
+	}
+	if len(toolResults) != 2 {
+		t.Errorf("mempalace tool_result lines=%d; want 2", len(toolResults))
+	}
+
+	// Outcome on tool_uses must be 'pending'.
+	for _, tu := range toolUses {
+		if recordAttrs(tu)["outcome"] != "pending" {
+			t.Errorf("tool_use outcome=%v; want pending", recordAttrs(tu)["outcome"])
+		}
+	}
+	// Outcome on the two tool_results: ok, then error.
+	outcomes := []any{recordAttrs(toolResults[0])["outcome"], recordAttrs(toolResults[1])["outcome"]}
+	if outcomes[0] != "ok" || outcomes[1] != "error" {
+		t.Errorf("tool_result outcomes=%v; want [ok error]", outcomes)
+	}
+
+	// All four lines must carry tool_name + tool_use_id.
+	for i, r := range append(append([]slog.Record{}, toolUses...), toolResults...) {
+		attrs := recordAttrs(r)
+		if attrs["tool_name"] == nil || attrs["tool_use_id"] == nil {
+			t.Errorf("line %d missing tool_name/tool_use_id: %v", i, attrs)
+		}
+	}
+}
+
+// TestAdjudicateBudgetExceeded — M2.2 / FR-220: result with TerminalReason
+// containing "budget" → (failed, budget_exceeded).
+func TestAdjudicateBudgetExceeded(t *testing.T) {
+	got, reason := Adjudicate(
+		Result{ResultSeen: true, IsError: false, TerminalReason: "budget_exceeded", TotalCostUSD: "0.11"},
+		WaitDetail{ExitCode: 0},
+		false, // helloTxtOK — irrelevant; budget path outranks
+	)
+	if got != "failed" || reason != ExitBudgetExceeded {
+		t.Errorf("got (%s, %s); want (failed, %s)", got, reason, ExitBudgetExceeded)
+	}
+}
+
+// TestAdjudicateBudgetCaseInsensitive — Max_Budget_USD_Exceeded / other
+// capitalizations should also match.
+func TestAdjudicateBudgetCaseInsensitive(t *testing.T) {
+	cases := []string{"budget_exceeded", "Budget_Exceeded", "MAX_BUDGET_USD_EXCEEDED", "stopped_due_to_budget"}
+	for _, tr := range cases {
+		t.Run(tr, func(t *testing.T) {
+			got, reason := Adjudicate(
+				Result{ResultSeen: true, TerminalReason: tr, TotalCostUSD: "0.11"},
+				WaitDetail{ExitCode: 0},
+				false,
+			)
+			if got != "failed" || reason != ExitBudgetExceeded {
+				t.Errorf("terminal_reason=%q → (%s, %s); want (failed, %s)", tr, got, reason, ExitBudgetExceeded)
+			}
+		})
+	}
+}
+
+// TestAdjudicateBudgetDoesNotOverrideMCPBail — MCPBail precedence wins.
+func TestAdjudicateBudgetDoesNotOverrideMCPBail(t *testing.T) {
+	got, reason := Adjudicate(
+		Result{
+			MCPBailed:         true,
+			MCPOffenderName:   "mempalace",
+			MCPOffenderStatus: "failed",
+			ResultSeen:        true,
+			TerminalReason:    "budget_exceeded",
+		},
+		WaitDetail{ExitCode: 0},
+		false,
+	)
+	if got != "failed" || reason != "mcp_mempalace_failed" {
+		t.Errorf("got (%s, %s); want (failed, mcp_mempalace_failed) — MCP bail must outrank budget", got, reason)
 	}
 }

@@ -214,3 +214,21 @@ When M2.3 ships, the retro documents:
 4. **Rotation discipline**: did the operator actually rotate secrets on the surfaced schedule, or did rotation warnings accumulate? If ignored, the rotation UX needs redesign.
 5. **Audit log usefulness**: did the Garrison-side audit log (with ticket context) prove more useful than Infisical's native log, or was the dual-log overhead not worth it?
 6. **Any unauthorized-access attempts**: if the supervisor's per-role grant enforcement ever denied a secret request (which should theoretically never happen if the system is configured correctly), document why and whether it indicates a bug.
+---
+
+## M2.2 deployment assumptions (socket-proxy)
+
+Added during M2.2's T002 per T001 finding F5 and plan §"Deployment topology". This section governs only the M2.2 supervisor ↔ MemPalace path; the M2.3 vault design incorporates these assumptions but does not supersede them.
+
+**Topology.** Four containers on a single Coolify-project Docker network: `garrison-supervisor`, `garrison-mempalace`, `garrison-docker-proxy` (`ghcr.io/linuxserver/socket-proxy`, pinned by digest in production), and `garrison-postgres`. The supervisor's Claude-subprocess MCP calls into MemPalace all flow through `docker exec` against the sidecar, with the docker client pointed at `tcp://garrison-docker-proxy:2375` via `DOCKER_HOST`. The proxy is an HAProxy listening on TCP :2375 inside its container and is **not published to the host** — only reachable over the compose network.
+
+**Filter.** Proxy env: `POST=1 EXEC=1 CONTAINERS=1`; every other linuxserver/socket-proxy flag defaults to 0 (deny). Explicitly denied endpoints: IMAGES (no pull/tag), VOLUMES (no create/remove/mount manipulation), NETWORKS (no network attach/detach), BUILD (no image builds), SWARM (no swarm ops), CONFIGS (no swarm config access), CREATE (no new containers), DELETE (no container removal), RESTART/START/STOP (no lifecycle control on containers the supervisor didn't exec into), COMMIT (no container-to-image snapshots), IMAGES DISTRIBUTION (no registry interaction), DATABASE AUTH (no plugin auth), EVENTS (no event firehose), and everything else. Verified end-to-end in T001 — EXEC allowed against `garrison-mempalace`; VOLUMES and IMAGES both return HTTP 403.
+
+**Residual risk the proxy does NOT eliminate.** A compromised supervisor process (RCE, credential theft, whatever) can `docker exec` into **any container on the same Docker engine that it can name**. For single-project Coolify deployment (Garrison's primary model), that's garrison-mempalace, garrison-docker-proxy, and garrison-postgres. Worst case: exec into garrison-postgres and dump the DB — but a compromised supervisor already has `GARRISON_DATABASE_URL` in env and can achieve the same damage via SQL directly; the proxy does not widen the existing blast radius for the single-project model. **For shared-engine deployment** (multiple Coolify projects sharing one Docker engine), the envelope widens to every other project's containers — operator concern, not solvable at the proxy layer. Mitigation: Garrison deploys one-project-per-engine, or the operator accepts the wider envelope.
+
+**Explicitly out of scope for M2.2:** preventing supervisor compromise (M2.3 vault's job), per-container exec allowlisting (requires a different proxy; tecnativa/docker-socket-proxy's filters are similarly endpoint-level, not container-level; a label-filtering fork would be needed for true per-target isolation), preventing the supervisor from enumerating containers via `CONTAINERS=1` for the inspect preflight (required for `docker exec` to resolve names). These constraints inform the M2.3 threat model but are not M2.2 changes.
+
+**Pointers:**
+- Plan: [`specs/004-m2-2-mempalace/plan.md`](../../specs/004-m2-2-mempalace/plan.md) §"Deployment topology"
+- Spike-verified claims: [`specs/004-m2-2-mempalace/research.md`](../../specs/004-m2-2-mempalace/research.md) §"Proxy filter — verified end-to-end"
+- Task: [`specs/004-m2-2-mempalace/tasks.md`](../../specs/004-m2-2-mempalace/tasks.md) T002 (this section's origin)

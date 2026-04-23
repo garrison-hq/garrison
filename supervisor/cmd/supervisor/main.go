@@ -8,11 +8,14 @@ import (
 	"log/slog"
 	"os"
 	"sync/atomic"
+	"time"
 
 	"github.com/garrison-hq/garrison/supervisor/internal/agents"
 	"github.com/garrison-hq/garrison/supervisor/internal/config"
 	"github.com/garrison-hq/garrison/supervisor/internal/events"
 	"github.com/garrison-hq/garrison/supervisor/internal/health"
+	"github.com/garrison-hq/garrison/supervisor/internal/hygiene"
+	"github.com/garrison-hq/garrison/supervisor/internal/mempalace"
 	"github.com/garrison-hq/garrison/supervisor/internal/pgdb"
 	"github.com/garrison-hq/garrison/supervisor/internal/spawn"
 	"github.com/garrison-hq/garrison/supervisor/internal/store"
@@ -35,7 +38,19 @@ const (
 // dispatcher registers against. After M2.1 ships, introducing a second
 // department is purely additive (register the additional channel) per
 // plan.md §internal/events.
+// EngineeringTicketChannel was M2.1's sole engineering handler channel
+// (work.ticket.created.engineering.todo). M2.2 shifts to the in_dev
+// column for the engineer spawn trigger per Session 2026-04-23 and
+// registers a second channel for the qa-engineer. Kept here as a const
+// for any test harness that still references it.
 const EngineeringTicketChannel = "work.ticket.created.engineering.todo"
+
+// M2.2 channel constants — the supervisor registers these two handlers
+// per Session 2026-04-23 and FR-227/FR-228.
+const (
+	EngineeringInDevChannel    = "work.ticket.created.engineering.in_dev"
+	EngineeringQAReviewChannel = "work.ticket.transitioned.engineering.in_dev.qa_review"
+)
 
 const usage = `Usage: supervisor [FLAGS] | mcp-postgres
 
@@ -178,6 +193,26 @@ func runDaemon() int {
 	state := health.NewState()
 	var sigkillCounter atomic.Int64
 
+	// M2.2 — palace bootstrap runs unconditionally (T001 finding F1:
+	// mempalace init --yes is idempotent in 3.3.2) BEFORE the agents
+	// cache loads so a broken palace surface halts startup cleanly.
+	// Fake-agent mode and the GARRISON_DISABLE_PALACE_BOOTSTRAP test-hook
+	// skip this — tests that don't exercise the real spawn path or don't
+	// stand up the mempalace sidecar can't reach it either.
+	if !cfg.UseFakeAgent && !cfg.DisablePalaceBootstrap {
+		if err := mempalace.Bootstrap(ctx, mempalace.BootstrapConfig{
+			DockerBin:          cfg.DockerBin,
+			MempalaceContainer: cfg.MempalaceContainer,
+			PalacePath:         cfg.PalacePath,
+			Logger:             logger,
+			InitTimeout:        30 * time.Second,
+		}); err != nil {
+			logger.Error("palace bootstrap failed", "error", err,
+				"container", cfg.MempalaceContainer, "path", cfg.PalacePath)
+			return ExitFailure
+		}
+	}
+
 	// Agents cache is populated at startup; hot-reload is deferred per
 	// plan §internal/agents. In fake-agent mode the cache is still built
 	// (it's cheap and harmless) so tests can exercise it incidentally.
@@ -228,13 +263,32 @@ func runDaemon() int {
 		MCPConfigDir:       cfg.MCPConfigDir,
 		SupervisorBin:      supervisorBin,
 		AgentRODSN:         cfg.AgentRODSN(),
+		// M2.2 — docker/mempalace fields for MCP-config building + wake-up.
+		DockerBin:          cfg.DockerBin,
+		MempalaceContainer: cfg.MempalaceContainer,
+		PalacePath:         cfg.PalacePath,
+		DockerHost:         cfg.DockerHost,
 	}
 
-	ticketCreatedHandler := func(ctx context.Context, eventID pgtype.UUID) error {
-		return spawn.Spawn(ctx, spawnDeps, eventID)
+	engineerHandler := func(ctx context.Context, eventID pgtype.UUID) error {
+		return spawn.Spawn(ctx, spawnDeps, eventID, "engineer")
+	}
+	qaEngineerHandler := func(ctx context.Context, eventID pgtype.UUID) error {
+		return spawn.Spawn(ctx, spawnDeps, eventID, "qa-engineer")
 	}
 	dispatcher := events.NewDispatcher(map[string]events.Handler{
-		EngineeringTicketChannel: ticketCreatedHandler,
+		// M2.2 canonical channels: engineer listens_for was shifted from
+		// `todo` to `in_dev` per Session 2026-04-23. The engineer agent
+		// row's listens_for data carries in_dev only. The dispatcher also
+		// routes the legacy `created.engineering.todo` channel to the same
+		// engineer handler so M1/M2.1 chaos tests + any operator workflow
+		// that inserts tickets at the default `todo` column continues to
+		// work. The clarification forbids registering a *separate agent*
+		// against todo; it doesn't constrain which channels the *dispatcher*
+		// maps to the existing engineer.
+		EngineeringTicketChannel:   engineerHandler, // "created.engineering.todo" (M1/M2.1 back-compat)
+		EngineeringInDevChannel:    engineerHandler, // M2.2 canonical
+		EngineeringQAReviewChannel: qaEngineerHandler,
 	})
 
 	healthServer := health.NewServer(cfg, state, pool)
@@ -259,6 +313,39 @@ func runDaemon() int {
 		logger.Info("health server listening", "addr", fmt.Sprintf("0.0.0.0:%d", cfg.HealthPort))
 		return healthServer.Serve(gctx)
 	})
+
+	// M2.2 — hygiene listener + sweep. Both goroutines join the errgroup
+	// so a SIGTERM cascades to them via root-ctx cancellation; each one
+	// finishes its in-flight UPDATE through context.WithoutCancel +
+	// TerminalWriteGrace per FR-217. GARRISON_DISABLE_PALACE_BOOTSTRAP
+	// gates these off alongside the bootstrap itself (same test-hook).
+	if !cfg.UseFakeAgent && !cfg.DisablePalaceBootstrap {
+		palaceClient := &hygiene.Client{
+			DockerBin:          cfg.DockerBin,
+			MempalaceContainer: cfg.MempalaceContainer,
+			PalacePath:         cfg.PalacePath,
+			DockerHost:         cfg.DockerHost,
+			Timeout:            10 * time.Second,
+			Exec:               mempalace.RealDockerExec{DockerBin: cfg.DockerBin},
+		}
+		hygieneDeps := hygiene.Deps{
+			DSN:                cfg.AgentMempalaceDSN(),
+			Dialer:             pgdb.NewRealDialer(),
+			Queries:            queries,
+			Palace:             palaceClient,
+			Logger:             logger,
+			Delay:              cfg.HygieneDelay,
+			SweepInterval:      cfg.HygieneSweepInterval,
+			TerminalWriteGrace: spawn.TerminalWriteGrace,
+			Channels:           []string{EngineeringQAReviewChannel, "work.ticket.transitioned.engineering.qa_review.done"},
+		}
+		g.Go(func() error {
+			return hygiene.RunListener(gctx, hygieneDeps)
+		})
+		g.Go(func() error {
+			return hygiene.RunSweep(gctx, hygieneDeps)
+		})
+	}
 
 	if err := g.Wait(); err != nil && !errors.Is(err, context.Canceled) {
 		logger.Error("subsystem exited with error", "error", err)
