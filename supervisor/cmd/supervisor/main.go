@@ -231,7 +231,7 @@ func runDaemon() int {
 	}
 
 	ticketCreatedHandler := func(ctx context.Context, eventID pgtype.UUID) error {
-		return spawn.Spawn(ctx, spawnDeps, eventID)
+		return spawn.Spawn(ctx, spawnDeps, eventID, "engineer") // T015 replaces with proper role dispatch
 	}
 	dispatcher := events.NewDispatcher(map[string]events.Handler{
 		EngineeringTicketChannel: ticketCreatedHandler,
