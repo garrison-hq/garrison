@@ -506,7 +506,10 @@ func runRealClaude(
 	stderrDone := make(chan struct{})
 	go func() {
 		defer close(pipelineDone)
-		result, pipelineErr = Run(execCtx, stdout, instanceID, ticketUUID, logger, onBail)
+		// M2.2.1 T006: FinalizeDeps is zero-valued here; T011 populates
+		// Expected + State + OnCommit from spawn deps. Keeping it zero
+		// preserves M2.2 behaviour (Run's finalize branches short-circuit).
+		result, pipelineErr = Run(execCtx, stdout, instanceID, ticketUUID, logger, onBail, FinalizeDeps{})
 	}()
 	go func() {
 		defer close(stderrDone)
