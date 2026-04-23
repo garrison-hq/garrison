@@ -1,0 +1,7 @@
+# M2.2 chaos fixture — mempalace MCP server failed to start at init.
+# Supervisor's CheckMCPHealth sees status != "connected" and bails the
+# process group. No further events emitted; mockclaude exits 0 (the
+# status parse happens in the supervisor; mockclaude doesn't need to
+# exit non-zero).
+#init-mcp-servers [{"name":"postgres","status":"connected"},{"name":"mempalace","status":"failed"}]
+#sleep 100ms

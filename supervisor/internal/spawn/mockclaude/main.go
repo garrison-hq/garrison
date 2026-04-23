@@ -171,6 +171,83 @@ func runDirective(line, ticketID string, exitCode *int) error {
 	case "#":
 		// Pure comment.
 		return nil
+
+	// M2.2 additions (T016). These directives emit synthetic NDJSON
+	// events in the shape the supervisor's pipeline + hygiene logging
+	// expect, so integration tests can exercise the mempalace tool-use
+	// path, the init-event failure path, and the budget-exceeded path
+	// without requiring a real mempalace sidecar.
+
+	case "#init-mcp-servers":
+		// Emit a system/init event whose mcp_servers[] array is the
+		// JSON payload following the directive. Used by T017/T019 to
+		// simulate both-servers-connected and mempalace-failed paths.
+		// Format: #init-mcp-servers [{"name":"postgres","status":"connected"},...]
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "#init-mcp-servers"))
+		if payload == "" {
+			return fmt.Errorf("#init-mcp-servers requires a JSON array payload")
+		}
+		line := `{"type":"system","subtype":"init","cwd":"/workspaces/engineering","session_id":"mock-session-m22","model":"claude-haiku-4-5-20251001","tools":["Read","Write","Bash"],"mcp_servers":` + payload + "}"
+		fmt.Println(line)
+		return nil
+
+	case "#mempalace-tool-use":
+		// Emit a paired assistant/user event: assistant with a tool_use
+		// block, followed by a user with a matching tool_result is_error=
+		// false. T017/T018 use this to exercise FR-218 logging + hygiene
+		// evaluation against a mock-populated palace.
+		// Format: #mempalace-tool-use <tool_name> <input-json>
+		parts := strings.SplitN(strings.TrimPrefix(line, "#mempalace-tool-use"), " ", 3)
+		if len(parts) < 3 {
+			return fmt.Errorf("#mempalace-tool-use needs <tool_name> <input-json>")
+		}
+		toolName := parts[1]
+		inputJSON := parts[2]
+		toolUseID := fmt.Sprintf("toolu_%d", time.Now().UnixNano()%1_000_000)
+		assistant := fmt.Sprintf(
+			`{"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","content":[{"type":"tool_use","id":"%s","name":"%s","input":%s}]}}`,
+			toolUseID, toolName, inputJSON,
+		)
+		user := fmt.Sprintf(
+			`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"%s","is_error":false,"content":[{"type":"text","text":"ok"}]}]}}`,
+			toolUseID,
+		)
+		fmt.Println(assistant)
+		fmt.Println(user)
+		return nil
+
+	case "#mempalace-tool-use-error":
+		// Same shape as #mempalace-tool-use but emits is_error=true on
+		// the tool_result. Error detail comes from the remaining args.
+		parts := strings.SplitN(strings.TrimPrefix(line, "#mempalace-tool-use-error"), " ", 3)
+		if len(parts) < 3 {
+			return fmt.Errorf("#mempalace-tool-use-error needs <tool_name> <detail>")
+		}
+		toolName := parts[1]
+		detail := parts[2]
+		toolUseID := fmt.Sprintf("toolu_%d", time.Now().UnixNano()%1_000_000)
+		assistant := fmt.Sprintf(
+			`{"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","content":[{"type":"tool_use","id":"%s","name":"%s","input":{}}]}}`,
+			toolUseID, toolName,
+		)
+		user := fmt.Sprintf(
+			`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"%s","is_error":true,"content":[{"type":"text","text":"%s"}]}]}}`,
+			toolUseID, detail,
+		)
+		fmt.Println(assistant)
+		fmt.Println(user)
+		return nil
+
+	case "#budget-exceeded":
+		// Emit a terminal result event with terminal_reason="budget_
+		// exceeded". is_error=true so the ClaudeError path doesn't
+		// outrank it; the Adjudicate helper's case for budget-keyword-
+		// match should route to ExitBudgetExceeded. total_cost_usd is
+		// populated so cost-capture paths exercise correctly.
+		line := `{"type":"result","subtype":"error","is_error":false,"duration_ms":1200,"duration_api_ms":800,"total_cost_usd":0.11,"stop_reason":"max_budget","terminal_reason":"budget_exceeded","result":"Maximum budget exceeded; aborted","session_id":"mock-session-m22","permission_denials":[]}`
+		fmt.Println(line)
+		return nil
+
 	default:
 		fmt.Fprintf(os.Stderr, "mockclaude: unknown directive %q; ignoring\n", fields[0])
 		return nil
