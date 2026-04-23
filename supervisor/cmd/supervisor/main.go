@@ -276,7 +276,17 @@ func runDaemon() int {
 		return spawn.Spawn(ctx, spawnDeps, eventID, "qa-engineer")
 	}
 	dispatcher := events.NewDispatcher(map[string]events.Handler{
-		EngineeringInDevChannel:    engineerHandler,
+		// M2.2 canonical channels: engineer listens_for was shifted from
+		// `todo` to `in_dev` per Session 2026-04-23. The engineer agent
+		// row's listens_for data carries in_dev only. The dispatcher also
+		// routes the legacy `created.engineering.todo` channel to the same
+		// engineer handler so M1/M2.1 chaos tests + any operator workflow
+		// that inserts tickets at the default `todo` column continues to
+		// work. The clarification forbids registering a *separate agent*
+		// against todo; it doesn't constrain which channels the *dispatcher*
+		// maps to the existing engineer.
+		EngineeringTicketChannel:   engineerHandler, // "created.engineering.todo" (M1/M2.1 back-compat)
+		EngineeringInDevChannel:    engineerHandler, // M2.2 canonical
 		EngineeringQAReviewChannel: qaEngineerHandler,
 	})
 
