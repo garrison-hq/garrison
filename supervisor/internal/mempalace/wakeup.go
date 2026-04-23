@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"os"
 	"time"
 )
 
@@ -57,6 +58,19 @@ func Wakeup(ctx context.Context, cfg WakeupConfig, wing string) (stdout string, 
 	}
 	if wing == "" {
 		return "", StatusFailed, 0, errors.New("mempalace.Wakeup: wing is empty")
+	}
+
+	// Test-only kill switch. GARRISON_MEMPALACE_WAKEUP_FORCE_FAIL = "1"
+	// makes Wakeup return StatusFailed immediately without attempting any
+	// docker exec. Used by T018's SC-207 test to isolate the wake-up-
+	// failure branch from MCP + container-availability concerns.
+	// Production never sets this.
+	if os.Getenv("GARRISON_MEMPALACE_WAKEUP_FORCE_FAIL") == "1" {
+		if cfg.Logger != nil {
+			cfg.Logger.Warn("wake_up_force_fail (test hook)",
+				"palace_wing", wing, "via", "GARRISON_MEMPALACE_WAKEUP_FORCE_FAIL")
+		}
+		return "", StatusFailed, 0, nil
 	}
 
 	timeout := cfg.Timeout
