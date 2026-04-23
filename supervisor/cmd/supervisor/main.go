@@ -52,7 +52,7 @@ const (
 	EngineeringQAReviewChannel = "work.ticket.transitioned.engineering.in_dev.qa_review"
 )
 
-const usage = `Usage: supervisor [FLAGS] | mcp-postgres
+const usage = `Usage: supervisor [FLAGS] | mcp-postgres | mcp finalize
 
 Garrison supervisor daemon. Listens on Postgres pg_notify and spawns
 Claude Code subprocesses on work.ticket.created.<dept>.<column> events.
@@ -61,6 +61,10 @@ Subcommands:
   mcp-postgres          Run the in-tree Postgres MCP server on stdio.
                         Used by Claude Code via --mcp-config. Reads
                         GARRISON_PGMCP_DSN from env.
+  mcp finalize          Run the in-tree finalize_ticket MCP server on
+                        stdio (M2.2.1). Used by Claude Code via
+                        --mcp-config. Reads GARRISON_AGENT_INSTANCE_ID
+                        and GARRISON_DATABASE_URL from env.
 
 Flags:
   --version             Print version and exit.
@@ -96,6 +100,14 @@ func run(args []string) int {
 	// GARRISON_PGMCP_DSN error.
 	if len(args) > 0 && args[0] == "mcp-postgres" {
 		return runMCPPostgres()
+	}
+	// M2.2.1 T005: `supervisor mcp finalize` — the in-tree finalize_ticket
+	// MCP server. Invoked per-spawn by Claude via the per-invocation MCP
+	// config (see internal/mcpconfig). Shape mirrors mcp-postgres: early
+	// dispatch before flag parsing so env-only deps don't trip daemon
+	// config validation.
+	if len(args) >= 2 && args[0] == "mcp" && args[1] == "finalize" {
+		return runMCPFinalize()
 	}
 
 	fs := flag.NewFlagSet("supervisor", flag.ContinueOnError)
