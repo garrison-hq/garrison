@@ -1,4 +1,4 @@
-//go:build integration || chaos
+//go:build integration || chaos || live_acceptance
 
 // Package testdb provides a shared Postgres harness for integration tests
 // (T013). A single testcontainers-go postgres:17 container is booted lazily

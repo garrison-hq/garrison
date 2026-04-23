@@ -1,4 +1,4 @@
-//go:build integration || chaos
+//go:build integration || chaos || live_acceptance
 
 package supervisor_test
 

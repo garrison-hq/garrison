@@ -82,3 +82,20 @@ func TestSpawnDefaultRoleSlug(t *testing.T) {
 	// transitionColumns's engineer branch moved — in which case the
 	// M2.2 fake-agent path will land rows on an unexpected column.
 }
+
+// TestAcceptanceGateSatisfied — M2.2 roles skip the M1 hello.txt check;
+// unknown roles fall through to the check (M1 safety-net preserved).
+func TestAcceptanceGateSatisfied(t *testing.T) {
+	cases := map[string]bool{
+		"engineer":    true,
+		"qa-engineer": true,
+		"":            false, // empty would be coerced to engineer upstream, but this is the raw helper
+		"cto":         false, // future role
+		"unknown":     false,
+	}
+	for role, want := range cases {
+		if got := acceptanceGateSatisfied(role); got != want {
+			t.Errorf("acceptanceGateSatisfied(%q)=%v; want %v", role, got, want)
+		}
+	}
+}

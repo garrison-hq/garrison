@@ -1,4 +1,4 @@
-//go:build integration || chaos
+//go:build integration || chaos || live_acceptance
 
 // Shared helpers for the M2.2 integration and chaos test files.
 // Split from the integration-tagged files so the chaos suite (which

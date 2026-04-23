@@ -239,11 +239,21 @@ func searchToDrawers(items []searchItem) []PalaceDrawer {
 }
 
 func parseKGQueryPayload(text string) ([]PalaceTriple, error) {
+	// Live-acceptance finding 2026-04-23: MemPalace 3.3.2's
+	// mempalace_kg_query returns {"entity": ..., "facts": [...], "count": N}
+	// — the array is keyed "facts" not "triples". Try both field names +
+	// flat-array form so the client is robust across MemPalace versions.
 	var wrapper struct {
+		Facts   []kgTriple `json:"facts"`
 		Triples []kgTriple `json:"triples"`
 	}
-	if err := json.Unmarshal([]byte(text), &wrapper); err == nil && wrapper.Triples != nil {
-		return kgToTriples(wrapper.Triples), nil
+	if err := json.Unmarshal([]byte(text), &wrapper); err == nil {
+		if wrapper.Facts != nil {
+			return kgToTriples(wrapper.Facts), nil
+		}
+		if wrapper.Triples != nil {
+			return kgToTriples(wrapper.Triples), nil
+		}
 	}
 	var flat []kgTriple
 	if err := json.Unmarshal([]byte(text), &flat); err != nil {

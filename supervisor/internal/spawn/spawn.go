@@ -570,10 +570,19 @@ func runRealClaude(
 		wait.Signal = signalFromName(sigName)
 	}
 
-	// Step 11: post-run hello.txt check (deferred per plan §pipeline.
-	// Adjudicate — only considered if nothing more urgent already matched).
-	helloTxtOK := false
-	if dept.WorkspacePath != nil && *dept.WorkspacePath != "" {
+	// Step 11: post-run acceptance gate.
+	//
+	// M2.1 used hello.txt + contents==ticket_id as the fake-agent and
+	// real-claude engineer acceptance check. M2.2's engineer writes
+	// changes/hello-<ticket>.md per the seed agent.md, and qa-engineer
+	// writes no artefact file at all — so the M1 check returns false
+	// and Adjudicate would misclassify a successful run as
+	// acceptance_failed. For M2.2 roles the supervisor trusts the
+	// terminal `result` event + the mempalace writes (hygiene checker's
+	// concern); no supervisor-side file check runs. acceptanceGateSatisfied
+	// treats M2.2 roles as pre-passing so the M1 fallback doesn't trip.
+	helloTxtOK := acceptanceGateSatisfied(roleSlug)
+	if !helloTxtOK && dept.WorkspacePath != nil && *dept.WorkspacePath != "" {
 		helloTxtOK = checkHelloTxt(*dept.WorkspacePath, payload.TicketID)
 	}
 
@@ -605,6 +614,21 @@ func runRealClaude(
 	fromCol, toCol := transitionColumns(roleSlug)
 	return writeTerminalCostAndWakeup(termCtx, deps, instanceID, eventID, ticketUUID,
 		status, exitReason, cost, string(wakeUpStatus), insertTransition, fromCol, toCol)
+}
+
+// acceptanceGateSatisfied returns true for roles that have no
+// supervisor-side file-check acceptance gate. M2.2 roles (engineer,
+// qa-engineer) trust the terminal result event; M1/M2.1 roles still
+// exercise the hello.txt gate. Unknown/future roles default to
+// false — falling through to checkHelloTxt preserves the M1 safety
+// net until a role's own gate semantics are set.
+func acceptanceGateSatisfied(roleSlug string) bool {
+	switch roleSlug {
+	case "engineer", "qa-engineer":
+		return true
+	default:
+		return false
+	}
 }
 
 // transitionColumns maps role_slug to the (from, to) column pair the
