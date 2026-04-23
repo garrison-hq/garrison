@@ -78,6 +78,12 @@ BEGIN
   payload := jsonb_build_object(
     'transition_id', NEW.id,
     'ticket_id', NEW.ticket_id,
+    -- department_id is included so spawn.Spawn can decode this payload
+    -- with the same struct it uses for work.ticket.created events (the
+    -- M1 decoder expects both ticket_id and department_id). Resolved via
+    -- the tickets table since ticket_transitions doesn't carry the
+    -- department directly.
+    'department_id', (SELECT department_id FROM tickets WHERE id = NEW.ticket_id),
     'agent_instance_id', NEW.triggered_by_agent_instance_id,
     'from_column', NEW.from_column,
     'to_column', NEW.to_column,

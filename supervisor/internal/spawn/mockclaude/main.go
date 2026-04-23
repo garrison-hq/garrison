@@ -86,9 +86,21 @@ func main() {
 
 	ticketID := extractTicketID(*taskDesc)
 
-	scriptPath := os.Getenv("GARRISON_MOCK_CLAUDE_SCRIPT")
+	// M2.2: per-role script dispatch. The supervisor's task description
+	// now embeds the role slug ("You are the engineer on ticket..." /
+	// "You are the qa-engineer on ticket..."). Mockclaude picks the
+	// role-specific script if GARRISON_MOCK_CLAUDE_SCRIPT_{ROLE} is set,
+	// otherwise falls back to GARRISON_MOCK_CLAUDE_SCRIPT for M2.1
+	// compatibility.
+	scriptPath := roleScoped(*taskDesc, "engineer", "GARRISON_MOCK_CLAUDE_SCRIPT_ENGINEER")
 	if scriptPath == "" {
-		fmt.Fprintln(os.Stderr, "mockclaude: GARRISON_MOCK_CLAUDE_SCRIPT is required")
+		scriptPath = roleScoped(*taskDesc, "qa-engineer", "GARRISON_MOCK_CLAUDE_SCRIPT_QA_ENGINEER")
+	}
+	if scriptPath == "" {
+		scriptPath = os.Getenv("GARRISON_MOCK_CLAUDE_SCRIPT")
+	}
+	if scriptPath == "" {
+		fmt.Fprintln(os.Stderr, "mockclaude: GARRISON_MOCK_CLAUDE_SCRIPT (or a per-role variant) is required")
 		os.Exit(2)
 	}
 	f, err := os.Open(scriptPath)
@@ -264,8 +276,21 @@ func writeHelloTxt(ticketID string) error {
 
 // extractTicketID pulls the first canonical-form UUID out of the -p
 // task description. The supervisor's argv format embeds the ticket ID
-// in the sentence "You are the engineer on ticket <UUID>." — the
+// in the sentence "You are the <role> on ticket <UUID>." — the
 // pattern is specific enough that a bare regex suffices.
 func extractTicketID(taskDescription string) string {
 	return ticketIDPattern.FindString(taskDescription)
+}
+
+// roleScoped returns the value of envVar iff the task description
+// contains the phrase "the <role>" (e.g. "the engineer", "the qa-engineer").
+// Returns "" when the role doesn't match or the env var is unset, which
+// signals the caller to try the next role or fall back to the global
+// GARRISON_MOCK_CLAUDE_SCRIPT.
+func roleScoped(taskDesc, role, envVar string) string {
+	needle := "the " + role + " "
+	if !strings.Contains(taskDesc, needle) {
+		return ""
+	}
+	return os.Getenv(envVar)
 }
