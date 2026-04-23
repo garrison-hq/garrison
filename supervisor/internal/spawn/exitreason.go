@@ -31,6 +31,17 @@ const (
 	ExitAgentMissing       = "agent_missing"       // no agents row for the department+role.
 	ExitBudgetExceeded     = "budget_exceeded"     // terminal result reports --max-budget-usd overrun (M2.2 NFR-201 / FR-220).
 
+	// M2.2.1 additions (FR-266). The finalize_ticket completion flow
+	// introduces a new family of terminal dispositions; each is set on
+	// a specific branch of the atomic-write or retry-counter state
+	// machine. Comments cite the spec clause that mandates each value.
+	ExitFinalizeInvalid            = "finalize_invalid"             // supervisor retry counter hit 3 failed attempts (FR-257, US3).
+	ExitFinalizePalaceWriteFailed  = "finalize_palace_write_failed" // MemPalace AddDrawer/AddTriples errored inside the atomic tx (FR-264).
+	ExitFinalizeCommitFailed       = "finalize_commit_failed"       // Postgres commit failed after palace writes succeeded (FR-265, orphan case).
+	ExitFinalizeWriteTimeout       = "finalize_write_timeout"       // 30s atomic-write ceiling fired (FR-265a).
+	ExitFinalizeNeverCalled        = "finalize_never_called"        // subprocess exited without issuing a single finalize_ticket call (US5).
+	ExitFinalizeTransitionConflict = "finalize_transition_conflict" // transition row already exists for the ticket (edge case).
+
 	// M1-inherited values; preserved for the fake-agent path and recovery.
 	ExitSupervisorRestart = "supervisor_restarted" // M1 recovery query.
 	ExitDepartmentMissing = "department_missing"   // M1 edge case.

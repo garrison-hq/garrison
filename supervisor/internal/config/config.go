@@ -69,6 +69,10 @@ const (
 	// DefaultHygieneSweepInterval is the cadence of the periodic sweep
 	// (FR-216, NFR-204). Tunable via GARRISON_HYGIENE_SWEEP_INTERVAL.
 	DefaultHygieneSweepInterval = 60 * time.Second
+	// DefaultFinalizeWriteTimeout bounds the supervisor's atomic finalize
+	// write (M2.2.1 Clarification 2026-04-23 Q5). Tunable via
+	// GARRISON_FINALIZE_WRITE_TIMEOUT.
+	DefaultFinalizeWriteTimeout = 30 * time.Second
 )
 
 // Config mirrors the env vars in plan.md §"Config" one-to-one using
@@ -97,6 +101,12 @@ type Config struct {
 	DockerHost           string
 	HygieneDelay         time.Duration
 	HygieneSweepInterval time.Duration
+
+	// M2.2.1: wall-clock ceiling for the supervisor's atomic finalize
+	// write (palace AddDrawer + N× AddTriples + Postgres tx commit).
+	// Parsed from GARRISON_FINALIZE_WRITE_TIMEOUT; default 30s per spec
+	// Clarification 2026-04-23 Q5. Non-positive values reject at startup.
+	FinalizeWriteTimeout time.Duration
 
 	// DisablePalaceBootstrap is a test-only hook (GARRISON_DISABLE_PALACE_BOOTSTRAP=1)
 	// used by M2.1 integration tests that exercise the mock-claude path
@@ -158,6 +168,7 @@ func Load() (*Config, error) {
 		DockerHost:           DefaultDockerHost,
 		HygieneDelay:         DefaultHygieneDelay,
 		HygieneSweepInterval: DefaultHygieneSweepInterval,
+		FinalizeWriteTimeout: DefaultFinalizeWriteTimeout,
 	}
 
 	dbURL := os.Getenv("GARRISON_DATABASE_URL")
@@ -285,6 +296,16 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("config: GARRISON_HYGIENE_SWEEP_INTERVAL must be positive (got %s)", d)
 		}
 		cfg.HygieneSweepInterval = d
+	}
+	if v := os.Getenv("GARRISON_FINALIZE_WRITE_TIMEOUT"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return nil, fmt.Errorf("config: GARRISON_FINALIZE_WRITE_TIMEOUT %q is not a valid duration: %w", v, err)
+		}
+		if d <= 0 {
+			return nil, fmt.Errorf("config: GARRISON_FINALIZE_WRITE_TIMEOUT must be positive (got %s)", d)
+		}
+		cfg.FinalizeWriteTimeout = d
 	}
 
 	if v := os.Getenv("GARRISON_DISABLE_PALACE_BOOTSTRAP"); v == "1" || strings.EqualFold(v, "true") {

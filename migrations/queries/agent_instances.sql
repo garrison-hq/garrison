@@ -58,3 +58,19 @@ SET status = 'failed',
     finished_at = NOW()
 WHERE status = 'running'
   AND started_at < NOW() - INTERVAL '5 minutes';
+
+-- name: SelectAgentInstanceFinalizedState :one
+-- M2.2.1 FR-260 + T008: the finalize MCP server calls this on every
+-- tool call to detect the already-committed state (Clarification
+-- 2026-04-23 Q2). The hygiene listener/sweep also uses exit_reason to
+-- route between the finalize path (EvaluateFinalizeOutcome) and the
+-- legacy M2.2 palace-query path (Evaluate).
+SELECT
+    ai.status,
+    ai.exit_reason,
+    EXISTS(
+        SELECT 1 FROM ticket_transitions tt
+        WHERE tt.triggered_by_agent_instance_id = ai.id
+    ) AS has_transition
+FROM agent_instances ai
+WHERE ai.id = $1;

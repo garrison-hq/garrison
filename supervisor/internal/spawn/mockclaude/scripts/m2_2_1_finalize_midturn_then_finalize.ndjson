@@ -1,0 +1,11 @@
+# M2.2.1 mid-turn-then-finalize fixture — SC-256.
+# Agent performs a mid-turn mempalace_add_drawer to hall_discoveries,
+# then successfully finalizes. Post-run: the palace has BOTH the mid-
+# turn drawer AND the supervisor-written finalize diary (different
+# rooms: hall_discoveries vs hall_events).
+#init-mcp-servers [{"name":"postgres","status":"connected"},{"name":"mempalace","status":"connected"},{"name":"finalize","status":"connected"}]
+{"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","content":[{"type":"text","text":"Mid-flight: noting a reusable pattern in hall_discoveries before finalizing."}]}}
+#mempalace-tool-use mempalace_add_drawer {"wing":"wing_frontend_engineer","room":"hall_discoveries","content":"Pattern observed while doing ticket {{TICKET_ID}}: worth remembering for later engineers."}
+{"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","content":[{"type":"text","text":"Pattern recorded. Now finalizing the ticket."}]}}
+#finalize-tool-use-ok 1 {"ticket_id":"{{TICKET_ID}}","outcome":"Completed with mid-turn hall_discoveries note","diary_entry":{"rationale":"Wrote the deliverable and also recorded a reusable pattern in hall_discoveries mid-flight. Both writes should be visible in the palace post-run: the hall_discoveries drawer is agent-issued (via mempalace_add_drawer); the hall_events diary is supervisor-issued (from this finalize payload).","artifacts":["changes/hello-{{TICKET_ID}}.md"],"blockers":[],"discoveries":["Reusable pattern recorded in hall_discoveries mid-turn"]},"kg_triples":[{"subject":"agent_instance_mock","predicate":"completed","object":"ticket_{{TICKET_ID}}","valid_from":"now"}]}
+{"type":"result","subtype":"success","is_error":false,"duration_ms":1100,"duration_api_ms":800,"total_cost_usd":0.038,"stop_reason":"end_turn","terminal_reason":"completed","result":"finalized with mid-turn note","session_id":"mock-session-m221-midturn","permission_denials":[]}

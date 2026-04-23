@@ -10,11 +10,19 @@
 // exhaustively unit-testable without docker, postgres, or MemPalace.
 package hygiene
 
-import "time"
+import (
+	"time"
+
+	"github.com/garrison-hq/garrison/supervisor/internal/mempalace"
+)
 
 // Status is the value written to ticket_transitions.hygiene_status per
 // FR-214. Terminal values: Clean, MissingDiary, MissingKG, Thin. Non-
 // terminal: Pending (palace query failed; sweep re-evaluates).
+//
+// M2.2.1 adds the FinalizeFailed / FinalizePartial / Stuck vocabulary
+// (per FR-267); those live alongside and are set by EvaluateFinalizeOutcome
+// (T008), not by Evaluate.
 type Status string
 
 const (
@@ -24,34 +32,103 @@ const (
 	StatusThin         Status = "thin"
 	StatusPending      Status = "pending"
 
+	// M2.2.1 additions per FR-267. Written for rows whose exit_reason is
+	// one of the finalize_* values (or the related completed / timeout
+	// values). Legacy M2.2 values above remain valid on historical rows.
+	StatusFinalizeFailed  Status = "finalize_failed"
+	StatusFinalizePartial Status = "finalize_partial"
+	StatusStuck           Status = "stuck"
+
 	// ThinBodyThreshold is the per-FR-214 boundary: diary body < 100
 	// chars is flagged as 'thin' regardless of KG-triple presence. The
 	// rule applies only when a matching diary exists in the first place.
 	ThinBodyThreshold = 100
 )
 
-// PalaceDrawer is the shape palace.Client.Query returns per drawer. Body
-// is the drawer's textual content (the hygiene checker searches for the
-// ticket id substring here). Wing matches the drawer's wing (used to
-// filter to the agent's own palace_wing). CreatedAt is when MemPalace
-// filed the drawer; the evaluator uses it to restrict to the agent
-// instance's run window.
-type PalaceDrawer struct {
-	Body      string
-	Wing      string
-	CreatedAt time.Time
+// AgentInstanceFinalizeSignal carries the exit_reason-derived input
+// EvaluateFinalizeOutcome needs. ExitReason is the canonical string
+// from internal/spawn/exitreason.go (finalize_invalid,
+// finalize_palace_write_failed, etc.); HasTransition is the
+// EXISTS(ticket_transitions ...) result from the
+// SelectAgentInstanceFinalizedState query added in T001. The
+// listener/sweep populate these from the store.SelectAgentInstance
+// FinalizedStateRow returned by that query.
+type AgentInstanceFinalizeSignal struct {
+	ExitReason    string
+	HasTransition bool
 }
 
-// PalaceTriple is the shape palace.Client.Query returns per KG triple.
-// Subject/Predicate/Object are the triple's parts. ValidFrom is when
-// MemPalace recorded the triple; the evaluator uses it to restrict to
-// the agent instance's run window.
-type PalaceTriple struct {
-	Subject   string
-	Predicate string
-	Object    string
-	ValidFrom time.Time
+// EvaluateFinalizeOutcome maps an agent_instances row's (exit_reason,
+// has_transition) tuple to the M2.2.1 hygiene_status vocabulary per
+// FR-269. Called by the listener/sweep for rows whose exit_reason
+// starts with "finalize_" or equals one of the related reasons that
+// signal "this spawn was in the finalize-expected flow."
+//
+// Rules:
+//   - exit_reason="completed" AND has_transition → StatusClean
+//   - exit_reason="finalize_invalid" → StatusFinalizeFailed
+//   - exit_reason ∈ {finalize_palace_write_failed,
+//     finalize_commit_failed, finalize_write_timeout} → StatusFinalizePartial
+//   - !has_transition AND exit_reason ∈ {finalize_never_called, timeout} → StatusStuck
+//   - otherwise → StatusPending (transient; sweep re-evaluates)
+func EvaluateFinalizeOutcome(sig AgentInstanceFinalizeSignal) Status {
+	switch sig.ExitReason {
+	case "completed":
+		if sig.HasTransition {
+			return StatusClean
+		}
+		return StatusPending
+	case "finalize_invalid":
+		return StatusFinalizeFailed
+	case "finalize_palace_write_failed",
+		"finalize_commit_failed",
+		"finalize_write_timeout":
+		return StatusFinalizePartial
+	case "finalize_never_called":
+		if !sig.HasTransition {
+			return StatusStuck
+		}
+		return StatusPending
+	case "timeout":
+		if !sig.HasTransition {
+			return StatusStuck
+		}
+		return StatusPending
+	default:
+		return StatusPending
+	}
 }
+
+// IsFinalizeExitReason returns true when the exit_reason belongs to
+// the M2.2.1 finalize-shaped family. Listener/sweep use this to
+// dispatch to EvaluateFinalizeOutcome rather than the M2.2 Evaluate
+// path. `completed` and `timeout` are included because they can land
+// on finalize-expected rows (completed via the happy path, timeout
+// via a subprocess timeout before finalize).
+func IsFinalizeExitReason(exitReason string) bool {
+	switch exitReason {
+	case "completed", "timeout",
+		"finalize_invalid",
+		"finalize_palace_write_failed",
+		"finalize_commit_failed",
+		"finalize_write_timeout",
+		"finalize_never_called",
+		"finalize_transition_conflict":
+		return true
+	}
+	return false
+}
+
+// PalaceDrawer is a type alias for mempalace.Drawer (M2.2.1 T003).
+// Preserved so evaluator_test.go literals like PalaceDrawer{...} keep
+// compiling; new code should prefer mempalace.Drawer directly.
+type PalaceDrawer = mempalace.Drawer
+
+// PalaceTriple is a type alias for mempalace.Triple (M2.2.1 T003).
+type PalaceTriple = mempalace.Triple
+
+// unused import guard so goimports/gopls doesn't strip "time".
+var _ = time.Time{}
 
 // EvaluationInput is the pure-logic input to Evaluate. TicketIDText is
 // the "ticket_<uuid>" form — the evaluator uses substring matching

@@ -1,0 +1,10 @@
+# M2.2.1 retry-then-success fixture. Two failed attempts (schema errors
+# on different fields), then a third valid call → commit.
+#init-mcp-servers [{"name":"postgres","status":"connected"},{"name":"mempalace","status":"connected"},{"name":"finalize","status":"connected"}]
+{"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","content":[{"type":"text","text":"First attempt — thin rationale."}]}}
+#finalize-tool-use-fail 1 schema diary_entry.rationale
+{"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","content":[{"type":"text","text":"Second attempt — empty kg_triples."}]}}
+#finalize-tool-use-fail 2 schema kg_triples
+{"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","content":[{"type":"text","text":"Third attempt — valid payload."}]}}
+#finalize-tool-use-ok 3 {"ticket_id":"{{TICKET_ID}}","outcome":"Mock retry-then-success — third attempt validated","diary_entry":{"rationale":"Third time's the charm: the mock corrected its rationale length and its kg_triples array from empty to populated before finalizing.","artifacts":["changes/hello-{{TICKET_ID}}.md"],"blockers":["First attempt had too-short rationale","Second attempt had empty kg_triples"],"discoveries":[]},"kg_triples":[{"subject":"agent_instance_mock","predicate":"completed","object":"ticket_{{TICKET_ID}}","valid_from":"now"}]}
+{"type":"result","subtype":"success","is_error":false,"duration_ms":1200,"duration_api_ms":900,"total_cost_usd":0.045,"stop_reason":"end_turn","terminal_reason":"completed","result":"Finalized on 3rd attempt","session_id":"mock-session-m221-retry","permission_denials":[]}

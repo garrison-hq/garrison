@@ -287,13 +287,20 @@ func TestM21BrokenMCPConfigBailsWithin2Seconds(t *testing.T) {
 	// (M2.2 equivalent). The load-bearing assertion is that SOME MCP
 	// bail happened within NFR-106's window, not which server lost
 	// first.
+	// M2.2.1 widened the MCP set further: postgres + mempalace + finalize
+	// now all share the broken supervisor-bin-override. Claude's init
+	// event reports whichever fails first as connected-status!=ok —
+	// any of the three is acceptable; the load-bearing assertion is
+	// that SOME MCP bail happened within NFR-106's 2s ceiling.
 	validBails := map[string]bool{
 		"mcp_postgres_failed":   true,
 		"mcp_mempalace_failed":  true,
 		"mcp_mempalace_pending": true,
+		"mcp_finalize_failed":   true,
+		"mcp_finalize_pending":  true,
 	}
 	if row.ExitReason == nil || !validBails[*row.ExitReason] {
-		t.Errorf("exit_reason = %v; want one of {mcp_postgres_failed, mcp_mempalace_*}", row.ExitReason)
+		t.Errorf("exit_reason = %v; want one of {mcp_postgres_failed, mcp_mempalace_*, mcp_finalize_*}", row.ExitReason)
 	}
 
 	// finished_at - started_at should comfortably fit the NFR-106

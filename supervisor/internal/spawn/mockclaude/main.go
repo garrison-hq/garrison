@@ -250,6 +250,67 @@ func runDirective(line, ticketID string, exitCode *int) error {
 		fmt.Println(user)
 		return nil
 
+	case "#finalize-tool-use-ok":
+		// M2.2.1 T012: emit a successful finalize_ticket tool_use +
+		// matching tool_result whose Detail is {"ok":true,"attempt":N}.
+		// Supervisor's pipeline observer treats this as a commit trigger
+		// and fires OnCommit (T007's WriteFinalize). Payload JSON is
+		// passed through verbatim as the tool_use input so the atomic
+		// writer receives a real FinalizePayload. {{TICKET_ID}} is
+		// substituted in the input JSON.
+		//
+		// Format: #finalize-tool-use-ok <attempt> <input-json>
+		parts := strings.SplitN(strings.TrimPrefix(line, "#finalize-tool-use-ok"), " ", 3)
+		if len(parts) < 3 {
+			return fmt.Errorf("#finalize-tool-use-ok needs <attempt> <input-json>")
+		}
+		attempt := parts[1]
+		inputJSON := strings.ReplaceAll(parts[2], "{{TICKET_ID}}", ticketID)
+		toolUseID := fmt.Sprintf("toolu_%d", time.Now().UnixNano()%1_000_000)
+		assistant := fmt.Sprintf(
+			`{"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","content":[{"type":"tool_use","id":"%s","name":"finalize_ticket","input":%s}]}}`,
+			toolUseID, inputJSON,
+		)
+		// Detail is the stringified body — the pipeline parses it as JSON.
+		detail := fmt.Sprintf(`{\"ok\":true,\"attempt\":%s}`, attempt)
+		user := fmt.Sprintf(
+			`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"%s","is_error":false,"content":[{"type":"text","text":"%s"}]}]}}`,
+			toolUseID, detail,
+		)
+		fmt.Println(assistant)
+		fmt.Println(user)
+		return nil
+
+	case "#finalize-tool-use-fail":
+		// M2.2.1 T012: emit a failed finalize_ticket tool_use +
+		// matching tool_result whose Detail is {"ok":false,"error_type":...}.
+		// Used by retry / exhaustion / never-committed fixtures.
+		//
+		// Format: #finalize-tool-use-fail <attempt> <error_type> <field>
+		parts := strings.SplitN(strings.TrimPrefix(line, "#finalize-tool-use-fail"), " ", 4)
+		if len(parts) < 4 {
+			return fmt.Errorf("#finalize-tool-use-fail needs <attempt> <error_type> <field>")
+		}
+		attempt := parts[1]
+		errorType := parts[2]
+		field := parts[3]
+		toolUseID := fmt.Sprintf("toolu_%d", time.Now().UnixNano()%1_000_000)
+		assistant := fmt.Sprintf(
+			`{"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","content":[{"type":"tool_use","id":"%s","name":"finalize_ticket","input":{"ticket_id":"bad"}}]}}`,
+			toolUseID,
+		)
+		detail := fmt.Sprintf(
+			`{\"ok\":false,\"attempt\":%s,\"error_type\":\"%s\",\"field\":\"%s\",\"message\":\"mock error\"}`,
+			attempt, errorType, field,
+		)
+		user := fmt.Sprintf(
+			`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"%s","is_error":false,"content":[{"type":"text","text":"%s"}]}]}}`,
+			toolUseID, detail,
+		)
+		fmt.Println(assistant)
+		fmt.Println(user)
+		return nil
+
 	case "#budget-exceeded":
 		// Emit a terminal result event with terminal_reason="budget_
 		// exceeded". is_error=true so the ClaudeError path doesn't

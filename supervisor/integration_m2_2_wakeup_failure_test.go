@@ -40,8 +40,8 @@ func TestM22WakeUpFailureIsNonBlocking(t *testing.T) {
 	bin := buildSupervisorBinary(t)
 	mockBin := buildMockClaudeBinary(t)
 
-	engineerScript := repoFile(t, "internal/spawn/mockclaude/scripts/m2_2_happy_path.ndjson")
-	qaScript := repoFile(t, "internal/spawn/mockclaude/scripts/m2_2_qa_happy_path.ndjson")
+	engineerScript := repoFile(t, "internal/spawn/mockclaude/scripts/m2_2_1_finalize_happy_path.ndjson")
+	qaScript := repoFile(t, "internal/spawn/mockclaude/scripts/m2_2_1_finalize_happy_path.ndjson")
 
 	mcpDir := t.TempDir()
 	_ = os.Chmod(mcpDir, 0o750)

@@ -1,0 +1,11 @@
+# M2.2.1 T012 / SC-258: retry-budget-exhaustion fixture.
+# Two failed attempts, then a terminal result carrying a budget-shaped
+# terminal_reason before the agent can attempt a 3rd finalize. The
+# budget-exceeded path wins in Adjudicate over finalize_invalid per
+# T002 precedence rules.
+#init-mcp-servers [{"name":"postgres","status":"connected"},{"name":"mempalace","status":"connected"},{"name":"finalize","status":"connected"}]
+{"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","content":[{"type":"text","text":"Attempt 1 — malformed."}]}}
+#finalize-tool-use-fail 1 schema kg_triples
+{"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","content":[{"type":"text","text":"Attempt 2 — still malformed. Budget exhausting."}]}}
+#finalize-tool-use-fail 2 schema diary_entry.rationale
+{"type":"result","subtype":"budget_exceeded","is_error":false,"duration_ms":1400,"duration_api_ms":1000,"total_cost_usd":0.10,"stop_reason":"max_budget","result":"Maximum budget exceeded during retries","session_id":"mock-session-m221-budget","permission_denials":[]}

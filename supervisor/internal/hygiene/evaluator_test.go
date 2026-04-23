@@ -162,3 +162,78 @@ func TestLongBodyMentionsTicket(t *testing.T) {
 		t.Fatalf("fixture error: longBody is thin (%d chars)", len(longBody))
 	}
 }
+
+// -------- M2.2.1 EvaluateFinalizeOutcome ---------------------------------
+
+func TestEvaluateFinalizeOutcomeClean(t *testing.T) {
+	s := EvaluateFinalizeOutcome(AgentInstanceFinalizeSignal{
+		ExitReason: "completed", HasTransition: true,
+	})
+	if s != StatusClean {
+		t.Errorf("got %q; want clean", s)
+	}
+}
+
+func TestEvaluateFinalizeOutcomeFinalizeFailed(t *testing.T) {
+	s := EvaluateFinalizeOutcome(AgentInstanceFinalizeSignal{
+		ExitReason: "finalize_invalid", HasTransition: false,
+	})
+	if s != StatusFinalizeFailed {
+		t.Errorf("got %q; want finalize_failed", s)
+	}
+}
+
+// TestEvaluateFinalizeOutcomeFinalizePartial covers all three
+// triggering exit_reasons as sub-cases.
+func TestEvaluateFinalizeOutcomeFinalizePartial(t *testing.T) {
+	cases := []string{
+		"finalize_palace_write_failed",
+		"finalize_commit_failed",
+		"finalize_write_timeout",
+	}
+	for _, er := range cases {
+		t.Run(er, func(t *testing.T) {
+			s := EvaluateFinalizeOutcome(AgentInstanceFinalizeSignal{
+				ExitReason: er, HasTransition: false,
+			})
+			if s != StatusFinalizePartial {
+				t.Errorf("exit_reason=%q → %q; want finalize_partial", er, s)
+			}
+		})
+	}
+}
+
+// TestEvaluateFinalizeOutcomeStuck covers both trigger conditions
+// (finalize_never_called and timeout) with has_transition=false.
+func TestEvaluateFinalizeOutcomeStuck(t *testing.T) {
+	cases := []string{"finalize_never_called", "timeout"}
+	for _, er := range cases {
+		t.Run(er, func(t *testing.T) {
+			s := EvaluateFinalizeOutcome(AgentInstanceFinalizeSignal{
+				ExitReason: er, HasTransition: false,
+			})
+			if s != StatusStuck {
+				t.Errorf("exit_reason=%q no-transition → %q; want stuck", er, s)
+			}
+		})
+	}
+}
+
+// TestEvaluateFinalizeOutcomeLegacyPassthrough — the IsFinalizeExitReason
+// routing helper distinguishes finalize-shaped rows (→ EvaluateFinalize
+// Outcome) from legacy M2.2 rows (→ Evaluate). This test pins the
+// routing contract so the listener dispatches correctly.
+func TestEvaluateFinalizeOutcomeLegacyPassthrough(t *testing.T) {
+	if IsFinalizeExitReason("claude_error") {
+		t.Error("IsFinalizeExitReason(claude_error) = true; want false — non-finalize reasons must fall through to Evaluate")
+	}
+	if IsFinalizeExitReason("acceptance_failed") {
+		t.Error("IsFinalizeExitReason(acceptance_failed) = true; want false")
+	}
+	if !IsFinalizeExitReason("finalize_invalid") {
+		t.Error("IsFinalizeExitReason(finalize_invalid) = false; want true")
+	}
+	if !IsFinalizeExitReason("completed") {
+		t.Error("IsFinalizeExitReason(completed) = false; want true — happy path needs finalize routing")
+	}
+}

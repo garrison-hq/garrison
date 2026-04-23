@@ -1,0 +1,10 @@
+# M2.2.1 never-called fixture — US5.
+# Agent does plausible work (postgres read, mid-turn palace note) but
+# exits without ever calling finalize_ticket. Result event looks clean
+# at the stream vocab level; Adjudicate returns exit_reason=
+# finalize_never_called + hygiene_status=stuck.
+#init-mcp-servers [{"name":"postgres","status":"connected"},{"name":"mempalace","status":"connected"},{"name":"finalize","status":"connected"}]
+{"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","content":[{"type":"text","text":"Reading ticket."}]}}
+#mempalace-tool-use mempalace_add_drawer {"wing":"wing_frontend_engineer","room":"hall_discoveries","content":"Noted pattern for ticket {{TICKET_ID}}"}
+{"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","content":[{"type":"text","text":"Wrote a hall_discoveries note; now exiting without finalizing."}]}}
+{"type":"result","subtype":"success","is_error":false,"duration_ms":700,"duration_api_ms":500,"total_cost_usd":0.018,"stop_reason":"end_turn","terminal_reason":"completed","result":"exited without finalize","session_id":"mock-session-m221-never","permission_denials":[]}

@@ -3,6 +3,7 @@ package spawn
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -79,6 +80,24 @@ type WaitDetail struct {
 	Signaled bool
 }
 
+// FinalizeState captures the M2.2.1 finalize-flow observations Adjudicate
+// needs to classify a subprocess termination correctly. Populated by the
+// pipeline's stream-json parser (T006) as `tool_use` events for
+// `finalize_ticket` arrive. The zero value is "this role never interacts
+// with finalize" — Adjudicate then falls back to M1/M2.1/M2.2 precedence
+// unchanged.
+//
+// Expected is true only for roles that participate in the finalize flow
+// (engineer and qa-engineer in M2.2.1). A non-finalize role (the M1/M2.1
+// fake-agent path, the M2.2 engineer@todo back-compat path) leaves
+// Expected=false and this struct has no effect on classification.
+type FinalizeState struct {
+	Expected     bool // role is expected to call finalize_ticket
+	Attempted    bool // at least one finalize tool_use event observed
+	Committed    bool // WriteFinalize successfully committed the atomic tx
+	CapExhausted bool // 3rd failed attempt reached; SIGTERM queued by counter
+}
+
 // pipelineRouter implements claudeproto.Router and streams observations
 // into a captured Result. It performs no I/O of its own beyond slog lines;
 // the bail side effect (killProcessGroup) is delegated to the caller via
@@ -99,6 +118,59 @@ type pipelineRouter struct {
 	// tool_use_id. Cleared on observed tool_result; any entries still
 	// in the map at EOF stay at outcome="pending" per FR-218 edge-case.
 	mempalaceToolUse map[string]string
+
+	// M2.2.1 T006: finalize retry counter + commit observer. Nil-safe —
+	// when finalize is nil OR finalize.Expected is false, the router
+	// behaves identically to M2.2 (no finalize observation). Populated
+	// by Run from the FinalizeDeps argument.
+	finalize *finalizeHook
+	// finalizeToolUse tracks outstanding finalize_ticket tool_use_ids so
+	// OnUser can distinguish finalize tool_results from mempalace_* and
+	// other tool_results.
+	finalizeToolUse map[string]struct{}
+}
+
+// finalizeHook is the internal wiring for T006/T007. It bundles the
+// shared *FinalizeState (also visible to spawn.go's Adjudicate caller)
+// with the OnCommit callback invoked on the first successful
+// finalize_ticket tool_result (T007's WriteFinalize) and the onBail
+// hook invoked on the 3rd failed attempt (counter-driven SIGTERM).
+type finalizeHook struct {
+	state     *FinalizeState
+	attempts  int // per-spawn counter; feeds CapExhausted on hitting 3
+	onCommit  func(payload json.RawMessage) error
+	onBail    func(reason string)
+	onObserve func() // optional: per-tool_use tick for log-assertion tests
+
+	// toolUseInputs maps tool_use_id → raw input JSON so OnUser can
+	// forward the original payload to OnCommit without re-parsing.
+	toolUseInputs map[string][]byte
+}
+
+// FinalizeDeps is the public constructor argument Run accepts. Expected
+// is the role-level toggle: false means M2.2 behaviour unchanged. State
+// is a pointer because spawn.go reads the populated fields after Run
+// returns (Adjudicate takes the populated FinalizeState).
+type FinalizeDeps struct {
+	Expected bool
+	State    *FinalizeState
+	// OnCommit is invoked synchronously from the stream parser on the
+	// first successful finalize_ticket tool_result. Returning a non-nil
+	// error is logged at error level and translates to
+	// ExitFinalizeCommitFailed downstream; the stream parser continues
+	// reading either way. payload carries the raw input that validated.
+	OnCommit func(payload json.RawMessage) error
+}
+
+// isFinalizeToolName matches either the bare tool name or Claude's
+// mcp__finalize__finalize_ticket prefix form (parallel to
+// isMempalaceToolName).
+func isFinalizeToolName(name string) bool {
+	const prefix = "mcp__finalize__"
+	if len(name) >= len(prefix) && name[:len(prefix)] == prefix {
+		name = name[len(prefix):]
+	}
+	return name == "finalize_ticket"
 }
 
 // isMempalaceToolName returns true if the tool name belongs to the
@@ -149,20 +221,58 @@ func (p *pipelineRouter) OnAssistant(_ context.Context, e claudeproto.AssistantE
 	// Observational only (FR-218a); no dispatch consequence. Paired with
 	// a follow-up "outcome" line in OnUser when the tool_result arrives.
 	for _, tu := range e.ToolUses {
-		if !isMempalaceToolName(tu.Name) {
+		if isMempalaceToolName(tu.Name) {
+			if p.mempalaceToolUse == nil {
+				p.mempalaceToolUse = make(map[string]string, 4)
+			}
+			p.mempalaceToolUse[tu.ToolUseID] = tu.Name
+			p.logger.Info("mempalace tool_use",
+				"instance_id", uuidString(p.instanceID),
+				"ticket_id", uuidString(p.ticketID),
+				"tool_name", tu.Name,
+				"tool_use_id", tu.ToolUseID,
+				"outcome", "pending",
+			)
 			continue
 		}
-		if p.mempalaceToolUse == nil {
-			p.mempalaceToolUse = make(map[string]string, 4)
+		// M2.2.1 FR-276: info-level structured log for every
+		// finalize_ticket tool_use. Counter increments only while
+		// committed==false (post-commit tool_use events are logged but
+		// do not increment per FR-257). Track tool_use_id so OnUser
+		// can match the paired tool_result.
+		if isFinalizeToolName(tu.Name) && p.finalize != nil && p.finalize.state != nil {
+			if p.finalizeToolUse == nil {
+				p.finalizeToolUse = make(map[string]struct{}, 4)
+			}
+			p.finalizeToolUse[tu.ToolUseID] = struct{}{}
+			if p.finalize.toolUseInputs == nil {
+				p.finalize.toolUseInputs = make(map[string][]byte, 4)
+			}
+			// Copy the input raw bytes; claudeproto may reuse buffers.
+			if len(tu.InputRaw) > 0 {
+				buf := make([]byte, len(tu.InputRaw))
+				copy(buf, tu.InputRaw)
+				p.finalize.toolUseInputs[tu.ToolUseID] = buf
+			}
+			if !p.finalize.state.Committed {
+				p.finalize.state.Attempted = true
+				// Counter ticks on the matching tool_result (OnUser),
+				// not here — a tool_use without a tool_result is
+				// incomplete and should not consume an attempt per
+				// plan §"Subsystem state machines > Finalize attempt
+				// state machine".
+			}
+			p.logger.Info("finalize tool_use",
+				"instance_id", uuidString(p.instanceID),
+				"ticket_id", uuidString(p.ticketID),
+				"tool_use_id", tu.ToolUseID,
+				"attempt_pending", p.finalize.attempts+1,
+				"committed", p.finalize.state.Committed,
+			)
+			if p.finalize.onObserve != nil {
+				p.finalize.onObserve()
+			}
 		}
-		p.mempalaceToolUse[tu.ToolUseID] = tu.Name
-		p.logger.Info("mempalace tool_use",
-			"instance_id", uuidString(p.instanceID),
-			"ticket_id", uuidString(p.ticketID),
-			"tool_name", tu.Name,
-			"tool_use_id", tu.ToolUseID,
-			"outcome", "pending",
-		)
 	}
 }
 
@@ -186,11 +296,101 @@ func (p *pipelineRouter) OnUser(_ context.Context, e claudeproto.UserEvent) {
 			delete(p.mempalaceToolUse, tr.ToolUseID)
 		}
 
+		// M2.2.1 T006: finalize_ticket tool_result handling. The
+		// tool_result's Detail carries the server's envelope body,
+		// which is `{"ok":bool,"attempt":N,...}` stringified. Parse
+		// to decide whether to tick the counter (on ok=false) or fire
+		// the commit callback (on ok=true, first occurrence only).
+		if _, ok := p.finalizeToolUse[tr.ToolUseID]; ok {
+			p.handleFinalizeToolResult(tr)
+			delete(p.finalizeToolUse, tr.ToolUseID)
+			continue
+		}
+
 		if tr.IsError {
 			p.logger.Warn("claude tool_result reported error",
 				"instance_id", uuidString(p.instanceID),
 				"tool_use_id", tr.ToolUseID,
 				"detail", tr.Detail)
+		}
+	}
+}
+
+// handleFinalizeToolResult parses a finalize_ticket tool_result envelope
+// and enacts the state transitions:
+//   - ok=true, not yet committed: fire onCommit, mark Committed=true
+//   - ok=false, not yet committed: increment counter, if >= 3 mark
+//     CapExhausted=true and trigger onBail("finalize_invalid")
+//   - any ok value post-commit: log-only (no counter tick, no bail)
+//
+// Unparseable envelopes are logged and treated as failed attempts.
+func (p *pipelineRouter) handleFinalizeToolResult(tr claudeproto.ToolResultSummary) {
+	if p.finalize == nil || p.finalize.state == nil {
+		return
+	}
+	var body struct {
+		Ok        bool   `json:"ok"`
+		Attempt   int    `json:"attempt"`
+		ErrorType string `json:"error_type,omitempty"`
+		Field     string `json:"field,omitempty"`
+		Message   string `json:"message,omitempty"`
+	}
+	if tr.Detail != "" {
+		_ = json.Unmarshal([]byte(tr.Detail), &body)
+	}
+
+	// Post-commit: log-only, no counter tick.
+	if p.finalize.state.Committed {
+		p.logger.Info("finalize tool_result (post-commit)",
+			"instance_id", uuidString(p.instanceID),
+			"ticket_id", uuidString(p.ticketID),
+			"tool_use_id", tr.ToolUseID,
+			"ok", body.Ok,
+			"error_type", body.ErrorType,
+			"field", body.Field,
+		)
+		return
+	}
+
+	p.finalize.attempts++
+	p.logger.Info("finalize tool_result",
+		"instance_id", uuidString(p.instanceID),
+		"ticket_id", uuidString(p.ticketID),
+		"tool_use_id", tr.ToolUseID,
+		"attempt", p.finalize.attempts,
+		"ok", body.Ok,
+		"error_type", body.ErrorType,
+		"field", body.Field,
+	)
+
+	if body.Ok {
+		// Fire the commit callback with the original tool_use input.
+		payload := p.finalize.toolUseInputs[tr.ToolUseID]
+		p.finalize.state.Committed = true
+		if p.finalize.onCommit != nil {
+			if err := p.finalize.onCommit(payload); err != nil {
+				// Commit callback failures (T007 rollbacks, etc.) are
+				// logged here; T007's WriteFinalize writes the matching
+				// terminal row via its own error paths so we don't
+				// double-book.
+				p.logger.Error("finalize onCommit returned error",
+					"instance_id", uuidString(p.instanceID),
+					"ticket_id", uuidString(p.ticketID),
+					"err", err)
+			}
+		}
+		return
+	}
+
+	// Failed attempt. Cap enforcement: 3 attempts → bail.
+	if p.finalize.attempts >= 3 {
+		p.finalize.state.CapExhausted = true
+		p.logger.Warn("finalize cap exhausted; signalling bail",
+			"instance_id", uuidString(p.instanceID),
+			"ticket_id", uuidString(p.ticketID),
+			"attempts", p.finalize.attempts)
+		if p.finalize.onBail != nil {
+			p.finalize.onBail(ExitFinalizeInvalid)
 		}
 	}
 }
@@ -254,6 +454,7 @@ func Run(
 	ticketID pgtype.UUID,
 	logger *slog.Logger,
 	onBail func(reason string),
+	finalize FinalizeDeps,
 ) (Result, error) {
 	if logger == nil {
 		return Result{}, errors.New("pipeline: logger is required")
@@ -264,6 +465,19 @@ func Run(
 		instanceID: instanceID,
 		ticketID:   ticketID,
 		result:     &result,
+	}
+	// M2.2.1 T006: wire the finalize observer when the role expects
+	// finalize. finalize.State must be non-nil so spawn.go's Adjudicate
+	// call can read the populated state after Run returns. OnBail
+	// defaults to the outer onBail so the counter-driven cap-exhaustion
+	// path reuses the same SIGTERM infra as MCP-bail.
+	if finalize.Expected && finalize.State != nil {
+		r.finalize = &finalizeHook{
+			state:    finalize.State,
+			onCommit: finalize.OnCommit,
+			onBail:   onBail,
+		}
+		finalize.State.Expected = true
 	}
 
 	scanner := bufio.NewScanner(stdout)
@@ -324,7 +538,7 @@ func Run(
 // failure classes still capture a cost when one was emitted (claude_error,
 // acceptance_failed) but a pre-result failure (mcp bail, parse, timeout,
 // shutdown, no_result, signal) writes NULL.
-func Adjudicate(result Result, wait WaitDetail, helloTxtOK bool) (status, exitReason string) {
+func Adjudicate(result Result, wait WaitDetail, helloTxtOK bool, finalize FinalizeState) (status, exitReason string) {
 	switch {
 	case result.MCPBailed:
 		return "failed", FormatMCPFailure(result.MCPOffenderName, result.MCPOffenderStatus)
@@ -333,7 +547,24 @@ func Adjudicate(result Result, wait WaitDetail, helloTxtOK bool) (status, exitRe
 	case wait.ShutdownInitiated:
 		return "failed", ExitSupervisorShutdown
 	case errors.Is(wait.ContextErr, context.DeadlineExceeded):
+		// M2.2.1 precedence (T002): timeout wins over finalize_never_called.
+		// A subprocess killed by the per-invocation timeout always lands
+		// here, regardless of whether finalize was expected.
 		return "timeout", ExitTimeout
+	case finalize.CapExhausted && result.ResultSeen && isBudgetTerminalReason(result.TerminalReason):
+		// M2.2.1 precedence (T002 / SC-258): budget_exceeded wins over
+		// finalize_invalid when the subprocess reports a budget-shaped
+		// result before/during the retry counter's SIGTERM. Checked
+		// BEFORE the bare CapExhausted branch so budget stays the
+		// canonical reason when both apply.
+		return "failed", ExitBudgetExceeded
+	case finalize.CapExhausted:
+		// M2.2.1 (T006 / FR-257): the retry counter flagged cap-
+		// exhaustion after three failed finalize attempts. Independent
+		// of wait.Signaled because spawn.go's bailed flag suppresses
+		// Signaled for counter-driven bails (to distinguish them from
+		// operator SIGKILL / external signals).
+		return "failed", ExitFinalizeInvalid
 	case wait.Signaled:
 		return "failed", FormatSignalled(wait.Signal)
 	case !result.ResultSeen:
@@ -351,6 +582,13 @@ func Adjudicate(result Result, wait WaitDetail, helloTxtOK bool) (status, exitRe
 		// shim per plan §"Error vocabulary". Real-Claude observations
 		// feed back into a tighter enum post-M2.2.
 		return "failed", ExitBudgetExceeded
+	case finalize.Expected && !finalize.Committed:
+		// M2.2.1 (T002 / US5): the role was expected to finalize but the
+		// subprocess exited cleanly without a successful finalize commit.
+		// Distinct from finalize_invalid (which implies retries occurred)
+		// — finalize_never_called means zero attempts OR attempts that
+		// never converged to a committed outcome prior to clean exit.
+		return "failed", ExitFinalizeNeverCalled
 	case !helloTxtOK:
 		return "failed", ExitAcceptanceFailed
 	default:

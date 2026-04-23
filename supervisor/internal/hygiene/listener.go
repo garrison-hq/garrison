@@ -203,6 +203,56 @@ func evaluateAndWrite(ctx context.Context, deps Deps, transitionID, ticketID, ag
 		return nil
 	}
 
+	// M2.2.1 T008: route finalize-shaped rows to the pure-Go
+	// EvaluateFinalizeOutcome; legacy M2.2 rows continue through the
+	// palace-query-based Evaluate. The routing key is the agent_instances
+	// exit_reason: IsFinalizeExitReason distinguishes the two paths.
+	// SelectAgentInstanceFinalizedState returns (status, exit_reason,
+	// has_transition) in one round-trip.
+	finalized, err := deps.Queries.SelectAgentInstanceFinalizedState(ctx, agentInstanceID)
+	if err != nil {
+		return fmt.Errorf("SelectAgentInstanceFinalizedState: %w", err)
+	}
+	exitReason := ""
+	if finalized.ExitReason != nil {
+		exitReason = *finalized.ExitReason
+	}
+
+	// M2.2.1 finalize-shaped rows: pure-Go evaluation, no palace query.
+	if IsFinalizeExitReason(exitReason) {
+		status := EvaluateFinalizeOutcome(AgentInstanceFinalizeSignal{
+			ExitReason:    exitReason,
+			HasTransition: finalized.HasTransition,
+		})
+		writeCtx, cancel := context.WithTimeout(
+			context.WithoutCancel(ctx),
+			deps.TerminalWriteGrace,
+		)
+		defer cancel()
+		if err := deps.Queries.UpdateTicketTransitionHygiene(writeCtx, store.UpdateTicketTransitionHygieneParams{
+			ID:            transitionID,
+			HygieneStatus: ptr(string(status)),
+		}); err != nil {
+			deps.Logger.Warn("hygiene UPDATE failed",
+				"ticket_transition_id", uuidText(transitionID),
+				"ticket_id", uuidText(ticketID),
+				"agent_instance_id", uuidText(agentInstanceID),
+				"intended_status", string(status),
+				"err", err,
+			)
+			return err
+		}
+		deps.Logger.Info("hygiene evaluated (finalize path)",
+			"ticket_transition_id", uuidText(transitionID),
+			"ticket_id", uuidText(ticketID),
+			"agent_instance_id", uuidText(agentInstanceID),
+			"exit_reason", exitReason,
+			"hygiene_status", string(status),
+		)
+		return nil
+	}
+
+	// Legacy M2.2 path below: palace query + Evaluate.
 	win, err := deps.Queries.GetAgentInstanceRunWindow(ctx, agentInstanceID)
 	if err != nil {
 		return fmt.Errorf("GetAgentInstanceRunWindow: %w", err)
@@ -218,7 +268,7 @@ func evaluateAndWrite(ctx context.Context, deps Deps, transitionID, ticketID, ag
 	if win.FinishedAt.Valid {
 		windowEnd = win.FinishedAt.Time
 	}
-	if win.StartedAt.Valid == false {
+	if !win.StartedAt.Valid {
 		return errors.New("agent_instance started_at is null")
 	}
 	queryWin := TimeWindow{Start: win.StartedAt.Time, End: windowEnd}

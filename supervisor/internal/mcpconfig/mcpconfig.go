@@ -78,6 +78,25 @@ func (mp MempalaceParams) enabled() bool {
 	return mp.DockerBin != "" && mp.MempalaceContainer != "" && mp.PalacePath != ""
 }
 
+// FinalizeParams bundles the values the finalize MCP entry needs
+// (M2.2.1 FR-256). SupervisorBin resolves the supervisor binary path;
+// AgentInstanceID is the uuid the supervisor just INSERTed in the
+// spawn.Spawn dedupe transaction — the finalize subcommand reads it
+// from GARRISON_AGENT_INSTANCE_ID env per spec Clarification 2026-04-23 Q4;
+// DatabaseURL is the garrison_agent_ro DSN the finalize handler uses
+// to query agent_instances for the already-committed check (FR-260).
+// Leaving AgentInstanceID empty disables the entry (useful for M2.1/M2.2-
+// era tests that don't exercise finalize).
+type FinalizeParams struct {
+	SupervisorBin   string
+	AgentInstanceID string
+	DatabaseURL     string
+}
+
+func (fp FinalizeParams) enabled() bool {
+	return fp.SupervisorBin != "" && fp.AgentInstanceID != "" && fp.DatabaseURL != ""
+}
+
 // Write creates the per-invocation MCP config file. Returns the absolute
 // path on success. The caller is expected to `defer Remove(path)` against
 // the returned path so every exit path (success, claude error, timeout,
@@ -94,12 +113,12 @@ func (mp MempalaceParams) enabled() bool {
 // entry is added to mcpServers per plan §"MCP config extension" /
 // internal/mempalace.MCPServerSpec. FR-204 / FR-205 (additive; postgres
 // entry untouched).
-func Write(ctx context.Context, dir string, instanceID pgtype.UUID, supervisorBin, dsn string, mempalaceParams MempalaceParams) (string, error) {
-	return WriteWithOps(ctx, DefaultOps, dir, instanceID, supervisorBin, dsn, mempalaceParams)
+func Write(ctx context.Context, dir string, instanceID pgtype.UUID, supervisorBin, dsn string, mempalaceParams MempalaceParams, finalizeParams FinalizeParams) (string, error) {
+	return WriteWithOps(ctx, DefaultOps, dir, instanceID, supervisorBin, dsn, mempalaceParams, finalizeParams)
 }
 
 // WriteWithOps is the testable form. Production callers use Write.
-func WriteWithOps(_ context.Context, ops fileOps, dir string, instanceID pgtype.UUID, supervisorBin, dsn string, mempalaceParams MempalaceParams) (string, error) {
+func WriteWithOps(_ context.Context, ops fileOps, dir string, instanceID pgtype.UUID, supervisorBin, dsn string, mempalaceParams MempalaceParams, finalizeParams FinalizeParams) (string, error) {
 	if dir == "" {
 		return "", errors.New("mcpconfig: dir is empty")
 	}
@@ -131,6 +150,22 @@ func WriteWithOps(_ context.Context, ops fileOps, dir string, instanceID pgtype.
 			Command: command,
 			Args:    args,
 			Env:     env,
+		}
+	}
+	// M2.2.1 T004: third entry `finalize` — the in-tree MCP server
+	// implementing the finalize_ticket tool. Env carries the agent_
+	// instance_id per spec Clarification 2026-04-23 Q4 so the server
+	// can scope its already-committed check and attempt reporting to
+	// this specific spawn. GARRISON_DATABASE_URL lets the handler run
+	// SelectAgentInstanceFinalizedState on every tool call (FR-260).
+	if finalizeParams.enabled() {
+		servers["finalize"] = mcpServerSpec{
+			Command: finalizeParams.SupervisorBin,
+			Args:    []string{"mcp", "finalize"},
+			Env: map[string]string{
+				"GARRISON_AGENT_INSTANCE_ID": finalizeParams.AgentInstanceID,
+				"GARRISON_DATABASE_URL":      finalizeParams.DatabaseURL,
+			},
 		}
 	}
 

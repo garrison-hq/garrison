@@ -19,6 +19,7 @@ import (
 
 	"github.com/garrison-hq/garrison/supervisor/internal/agents"
 	"github.com/garrison-hq/garrison/supervisor/internal/concurrency"
+	"github.com/garrison-hq/garrison/supervisor/internal/finalize"
 	"github.com/garrison-hq/garrison/supervisor/internal/mcpconfig"
 	"github.com/garrison-hq/garrison/supervisor/internal/mempalace"
 	"github.com/garrison-hq/garrison/supervisor/internal/store"
@@ -85,6 +86,14 @@ type Deps struct {
 	MempalaceContainer string
 	PalacePath         string
 	DockerHost         string
+
+	// M2.2.1 T011: finalize-flow collaborators. Palace is the shared
+	// client (same instance the hygiene goroutine uses — one
+	// docker-exec pool per process). FinalizeWriteTimeout bounds the
+	// atomic write's wall clock per FR-261 / Clarify Q5; 30s default
+	// comes from config.DefaultFinalizeWriteTimeout.
+	Palace               *mempalace.Client
+	FinalizeWriteTimeout time.Duration
 }
 
 // UseFake decides which branch Spawn runs. UseFakeAgent wins if set;
@@ -377,13 +386,24 @@ func runRealClaude(
 	// Step 4: write per-invocation MCP config. Disk errors here land in
 	// the spawn_failed terminal (clarify-session Q2) — dispatcher continues
 	// onto the next event.
+	// M2.2.1 T011: populate FinalizeParams with the just-INSERTed
+	// agent_instance_id. The mcpconfig writer emits the `finalize` MCP
+	// entry with GARRISON_AGENT_INSTANCE_ID + GARRISON_DATABASE_URL env
+	// vars so the subprocess server scopes its already-committed check
+	// to this specific spawn per FR-260.
 	mcpPath, err := mcpconfig.Write(ctx, deps.MCPConfigDir, instanceID, deps.SupervisorBin, deps.AgentRODSN,
 		mcpconfig.MempalaceParams{
 			DockerBin:          deps.DockerBin,
 			MempalaceContainer: deps.MempalaceContainer,
 			PalacePath:         deps.PalacePath,
 			DockerHost:         deps.DockerHost,
-		})
+		},
+		mcpconfig.FinalizeParams{
+			SupervisorBin:   deps.SupervisorBin,
+			AgentInstanceID: formatUUID(instanceID),
+			DatabaseURL:     deps.AgentRODSN,
+		},
+	)
 	if err != nil {
 		logger.Error("mcpconfig.Write failed; recording spawn_failed", "err", err)
 		return writeFail(ExitSpawnFailed)
@@ -497,9 +517,67 @@ func runRealClaude(
 	)
 	pipelineDone := make(chan struct{})
 	stderrDone := make(chan struct{})
+
+	// M2.2.1 T011: wire the finalize observer. Expected iff the role +
+	// column match the M2.2.1 finalize flow (engineer@in_dev or
+	// qa-engineer@qa_review). For all other (role, column) pairs
+	// FinalizeDeps is zero-valued and Run's finalize branches short-
+	// circuit, preserving M2.2 behaviour.
+	finalizeExpected := finalizeExpectedForRole(roleSlug, payload.ColumnSlug)
+	finalizeState := &FinalizeState{Expected: finalizeExpected}
+	fromCol, toCol := transitionColumns(roleSlug, payload.ColumnSlug)
+	onCommit := func(rawPayload json.RawMessage) error {
+		if deps.Palace == nil {
+			logger.Error("finalize onCommit: deps.Palace is nil; skipping atomic write")
+			return fmt.Errorf("finalize: no palace client wired")
+		}
+		parsed, verr := finalize.Validate(rawPayload)
+		if verr != nil {
+			// The finalize MCP server already validated this payload
+			// before it sent ok=true, so a re-validation failure here
+			// indicates a schema drift between server and spawn — a bug.
+			logger.Error("finalize onCommit: re-validation failed",
+				"err", verr.Error(),
+				"field", verr.Field)
+			return fmt.Errorf("finalize re-validate: %w", verr)
+		}
+		// Cost at this moment may be NULL — the supervisor's stream
+		// parser fires OnCommit on the finalize tool_result, which
+		// typically arrives before the result event. Writing NULL here
+		// is correct; any later cost signal is log-observed only.
+		cost, _ := parseCostToNumeric(result.TotalCostUSD)
+		if !result.ResultSeen {
+			cost = pgtype.Numeric{}
+		}
+		wing := ""
+		if agent.PalaceWing != nil {
+			wing = *agent.PalaceWing
+		}
+		return WriteFinalize(execCtx, FinalizeWriteDeps{
+			Pool:         deps.Pool,
+			Queries:      deps.Queries,
+			Palace:       deps.Palace,
+			Logger:       logger,
+			WriteTimeout: deps.FinalizeWriteTimeout,
+		}, parsed, FinalizeMeta{
+			AgentInstanceID: instanceID,
+			TicketID:        ticketUUID,
+			EventID:         eventID,
+			Wing:            wing,
+			FromColumn:      fromCol,
+			ToColumn:        toCol,
+			Cost:            cost,
+			WakeUpStatus:    string(wakeUpStatus),
+		})
+	}
+
 	go func() {
 		defer close(pipelineDone)
-		result, pipelineErr = Run(execCtx, stdout, instanceID, ticketUUID, logger, onBail)
+		result, pipelineErr = Run(execCtx, stdout, instanceID, ticketUUID, logger, onBail, FinalizeDeps{
+			Expected: finalizeExpected,
+			State:    finalizeState,
+			OnCommit: onCommit,
+		})
 	}()
 	go func() {
 		defer close(stderrDone)
@@ -591,7 +669,25 @@ func runRealClaude(
 		helloTxtOK = checkHelloTxt(*dept.WorkspacePath, payload.TicketID)
 	}
 
-	status, exitReason := Adjudicate(result, wait, helloTxtOK)
+	// M2.2.1 T011: if the pipeline's OnCommit already committed the
+	// atomic write, WriteFinalize wrote the terminal agent_instances
+	// row inside its own transaction — we MUST NOT call
+	// writeTerminalCostAndWakeup again (double-write the terminal row
+	// + attempt a second InsertTicketTransition). The subprocess's
+	// post-commit events were already observed + logged by the
+	// pipeline; nothing more to do for this spawn.
+	if finalizeState.Committed {
+		logger.Info("finalize already committed atomic tx; skipping M2.1 terminal write",
+			"ticket_id", payload.TicketID,
+			"instance_id", formatUUID(instanceID),
+		)
+		return nil
+	}
+
+	// Adjudicate receives a snapshot of the finalize state so the new
+	// precedence rows (budget > finalize_invalid, timeout > finalize_
+	// never_called, etc.) fire correctly per T002.
+	status, exitReason := Adjudicate(result, wait, helloTxtOK, *finalizeState)
 
 	// Cost stays NULL unless a result event landed; that keeps the
 	// aggregate cost query honest about what Claude actually billed.
@@ -616,7 +712,7 @@ func runRealClaude(
 	// in_dev → qa_review; qa-engineer transitions qa_review → done. Any
 	// other role (fake-agent M2.1 tests that default to "engineer" via
 	// Spawn's backward-compat branch) lands on the M2.1 todo → done path.
-	fromCol, toCol := transitionColumns(roleSlug, payload.ColumnSlug)
+	// fromCol, toCol were computed earlier for the finalize onCommit; reuse.
 	return writeTerminalCostAndWakeup(termCtx, deps, instanceID, eventID, ticketUUID,
 		status, exitReason, cost, string(wakeUpStatus), insertTransition, fromCol, toCol)
 }
@@ -635,6 +731,25 @@ func acceptanceGateSatisfied(roleSlug, fromColumn string) bool {
 		// M2.2 only skips the check when the engineer is running the
 		// in_dev workflow. M2.1 engineer@todo and any call without
 		// column info fall through to the M1 hello.txt check.
+		return fromColumn == "in_dev"
+	case "qa-engineer":
+		return true
+	default:
+		return false
+	}
+}
+
+// finalizeExpectedForRole returns true for the (role, origin-column)
+// combinations where M2.2.1's finalize_ticket flow is expected. The
+// engineer role is finalize-expected only on the M2.2 in_dev column
+// (the M2.1 todo path predates finalize and uses the M1 acceptance
+// gate instead). qa-engineer is always finalize-expected. Any other
+// role or column combination leaves FinalizeState.Expected=false so
+// the pipeline's finalize observer + Adjudicate's finalize branches
+// all short-circuit per plan §"Decisions baked into this plan" item 7.
+func finalizeExpectedForRole(roleSlug, fromColumn string) bool {
+	switch roleSlug {
+	case "engineer":
 		return fromColumn == "in_dev"
 	case "qa-engineer":
 		return true

@@ -83,6 +83,22 @@ func (q *Queries) InsertTicketTransition(ctx context.Context, arg InsertTicketTr
 	return id, err
 }
 
+const selectTicketObjective = `-- name: SelectTicketObjective :one
+SELECT objective FROM tickets WHERE id = $1
+`
+
+// M2.2.1: read the ticket's objective text for the FR-263 diary
+// serialization — the supervisor's atomic writer prepends this prose
+// to the drawer body so mempalace_search queries keyed on objective
+// text return the drawer (semantic-similarity fails on raw UUIDs per
+// M2.2 live-run finding).
+func (q *Queries) SelectTicketObjective(ctx context.Context, id pgtype.UUID) (string, error) {
+	row := q.db.QueryRow(ctx, selectTicketObjective, id)
+	var objective string
+	err := row.Scan(&objective)
+	return objective, err
+}
+
 const updateTicketColumnSlug = `-- name: UpdateTicketColumnSlug :exec
 UPDATE tickets SET column_slug = $2 WHERE id = $1
 `
