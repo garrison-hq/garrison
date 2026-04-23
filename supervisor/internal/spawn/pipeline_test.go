@@ -26,7 +26,7 @@ func TestAdjudicateSuccess(t *testing.T) {
 		TotalCostUSD:   "0.003",
 		IsError:        false,
 	}
-	status, reason := Adjudicate(r, WaitDetail{ExitCode: 0}, true)
+	status, reason := Adjudicate(r, WaitDetail{ExitCode: 0}, true, FinalizeState{})
 	if status != "succeeded" || reason != ExitCompleted {
 		t.Errorf("Adjudicate(success) = (%q, %q); want (succeeded, completed)", status, reason)
 	}
@@ -39,7 +39,7 @@ func TestAdjudicateClaudeError(t *testing.T) {
 		TotalCostUSD:   "0.004",
 		IsError:        true,
 	}
-	status, reason := Adjudicate(r, WaitDetail{ExitCode: 0}, true)
+	status, reason := Adjudicate(r, WaitDetail{ExitCode: 0}, true, FinalizeState{})
 	if status != "failed" || reason != ExitClaudeError {
 		t.Errorf("Adjudicate(claude_error) = (%q, %q); want (failed, claude_error)", status, reason)
 	}
@@ -47,7 +47,7 @@ func TestAdjudicateClaudeError(t *testing.T) {
 
 func TestAdjudicateNoResult(t *testing.T) {
 	r := Result{ResultSeen: false}
-	status, reason := Adjudicate(r, WaitDetail{ExitCode: 0}, true)
+	status, reason := Adjudicate(r, WaitDetail{ExitCode: 0}, true, FinalizeState{})
 	if status != "failed" || reason != ExitNoResult {
 		t.Errorf("Adjudicate(no_result) = (%q, %q); want (failed, no_result)", status, reason)
 	}
@@ -55,21 +55,21 @@ func TestAdjudicateNoResult(t *testing.T) {
 
 func TestAdjudicateAcceptanceFailed(t *testing.T) {
 	r := Result{ResultSeen: true, IsError: false, TotalCostUSD: "0.001"}
-	status, reason := Adjudicate(r, WaitDetail{ExitCode: 0}, false)
+	status, reason := Adjudicate(r, WaitDetail{ExitCode: 0}, false, FinalizeState{})
 	if status != "failed" || reason != ExitAcceptanceFailed {
 		t.Errorf("Adjudicate(acceptance_failed) = (%q, %q); want (failed, acceptance_failed)", status, reason)
 	}
 }
 
 func TestAdjudicateTimeout(t *testing.T) {
-	status, reason := Adjudicate(Result{}, WaitDetail{ContextErr: context.DeadlineExceeded}, true)
+	status, reason := Adjudicate(Result{}, WaitDetail{ContextErr: context.DeadlineExceeded}, true, FinalizeState{})
 	if status != "timeout" || reason != ExitTimeout {
 		t.Errorf("Adjudicate(timeout) = (%q, %q); want (timeout, timeout)", status, reason)
 	}
 }
 
 func TestAdjudicateShutdown(t *testing.T) {
-	status, reason := Adjudicate(Result{}, WaitDetail{ShutdownInitiated: true, ContextErr: context.Canceled}, true)
+	status, reason := Adjudicate(Result{}, WaitDetail{ShutdownInitiated: true, ContextErr: context.Canceled}, true, FinalizeState{})
 	if status != "failed" || reason != ExitSupervisorShutdown {
 		t.Errorf("Adjudicate(shutdown) = (%q, %q); want (failed, supervisor_shutdown)", status, reason)
 	}
@@ -81,7 +81,7 @@ func TestAdjudicateMCPBail(t *testing.T) {
 		MCPOffenderName:   "postgres",
 		MCPOffenderStatus: "failed",
 	}
-	status, reason := Adjudicate(r, WaitDetail{}, true)
+	status, reason := Adjudicate(r, WaitDetail{}, true, FinalizeState{})
 	if status != "failed" || reason != "mcp_postgres_failed" {
 		t.Errorf("Adjudicate(mcp_bail) = (%q, %q); want (failed, mcp_postgres_failed)", status, reason)
 	}
@@ -89,7 +89,7 @@ func TestAdjudicateMCPBail(t *testing.T) {
 
 func TestAdjudicateParseError(t *testing.T) {
 	r := Result{ParseError: true}
-	status, reason := Adjudicate(r, WaitDetail{}, true)
+	status, reason := Adjudicate(r, WaitDetail{}, true, FinalizeState{})
 	if status != "failed" || reason != ExitParseError {
 		t.Errorf("Adjudicate(parse_error) = (%q, %q); want (failed, parse_error)", status, reason)
 	}
@@ -97,7 +97,7 @@ func TestAdjudicateParseError(t *testing.T) {
 
 func TestAdjudicateSignaled(t *testing.T) {
 	r := Result{ResultSeen: false}
-	status, reason := Adjudicate(r, WaitDetail{Signaled: true, Signal: syscall.SIGKILL, ExitCode: -1}, true)
+	status, reason := Adjudicate(r, WaitDetail{Signaled: true, Signal: syscall.SIGKILL, ExitCode: -1}, true, FinalizeState{})
 	if status != "failed" {
 		t.Errorf("Adjudicate(signaled) status = %q; want failed", status)
 	}
@@ -110,7 +110,7 @@ func TestAdjudicateSignaled(t *testing.T) {
 
 func TestAdjudicateTimeoutOutranksNoResult(t *testing.T) {
 	r := Result{ResultSeen: false}
-	status, reason := Adjudicate(r, WaitDetail{ContextErr: context.DeadlineExceeded}, true)
+	status, reason := Adjudicate(r, WaitDetail{ContextErr: context.DeadlineExceeded}, true, FinalizeState{})
 	if reason != ExitTimeout {
 		t.Errorf("timeout+no_result → %q; want timeout (timeout outranks no_result)", reason)
 	}
@@ -121,7 +121,7 @@ func TestAdjudicateTimeoutOutranksNoResult(t *testing.T) {
 
 func TestAdjudicateShutdownOutranksClaudeError(t *testing.T) {
 	r := Result{ResultSeen: true, IsError: true, TotalCostUSD: "0.001"}
-	status, reason := Adjudicate(r, WaitDetail{ShutdownInitiated: true, ContextErr: context.Canceled}, true)
+	status, reason := Adjudicate(r, WaitDetail{ShutdownInitiated: true, ContextErr: context.Canceled}, true, FinalizeState{})
 	if reason != ExitSupervisorShutdown {
 		t.Errorf("shutdown+claude_error → %q; want supervisor_shutdown", reason)
 	}
@@ -139,7 +139,7 @@ func TestAdjudicateMCPBailOutranksEverything(t *testing.T) {
 		ResultSeen:        true, // would otherwise outrank acceptance
 		IsError:           true, // would otherwise say claude_error
 	}
-	_, reason := Adjudicate(r, WaitDetail{ShutdownInitiated: true, ContextErr: context.Canceled, Signaled: true, Signal: syscall.SIGKILL}, false)
+	_, reason := Adjudicate(r, WaitDetail{ShutdownInitiated: true, ContextErr: context.Canceled, Signaled: true, Signal: syscall.SIGKILL}, false, FinalizeState{})
 	if reason != "mcp_postgres_failed" {
 		t.Errorf("mcp bail should win over every other cause; got %q", reason)
 	}
@@ -416,6 +416,7 @@ func TestAdjudicateBudgetExceeded(t *testing.T) {
 		Result{ResultSeen: true, IsError: false, TerminalReason: "budget_exceeded", TotalCostUSD: "0.11"},
 		WaitDetail{ExitCode: 0},
 		false, // helloTxtOK — irrelevant; budget path outranks
+		FinalizeState{},
 	)
 	if got != "failed" || reason != ExitBudgetExceeded {
 		t.Errorf("got (%s, %s); want (failed, %s)", got, reason, ExitBudgetExceeded)
@@ -432,6 +433,7 @@ func TestAdjudicateBudgetCaseInsensitive(t *testing.T) {
 				Result{ResultSeen: true, TerminalReason: tr, TotalCostUSD: "0.11"},
 				WaitDetail{ExitCode: 0},
 				false,
+				FinalizeState{},
 			)
 			if got != "failed" || reason != ExitBudgetExceeded {
 				t.Errorf("terminal_reason=%q → (%s, %s); want (failed, %s)", tr, got, reason, ExitBudgetExceeded)
@@ -452,8 +454,91 @@ func TestAdjudicateBudgetDoesNotOverrideMCPBail(t *testing.T) {
 		},
 		WaitDetail{ExitCode: 0},
 		false,
+		FinalizeState{},
 	)
 	if got != "failed" || reason != "mcp_mempalace_failed" {
 		t.Errorf("got (%s, %s); want (failed, mcp_mempalace_failed) — MCP bail must outrank budget", got, reason)
+	}
+}
+
+// TestAdjudicateBudgetWinsOverFinalizeInvalid — M2.2.1 T002 / SC-258:
+// when the retry counter SIGTERMs the subprocess AND the subprocess
+// already reported a budget-shaped result, budget_exceeded is the
+// canonical exit reason (not finalize_invalid).
+func TestAdjudicateBudgetWinsOverFinalizeInvalid(t *testing.T) {
+	got, reason := Adjudicate(
+		Result{ResultSeen: true, TerminalReason: "budget_exceeded", TotalCostUSD: "0.10"},
+		WaitDetail{Signaled: true, Signal: syscall.SIGTERM, ExitCode: -1},
+		true, // helloTxtOK irrelevant
+		FinalizeState{Expected: true, Attempted: true, CapExhausted: true},
+	)
+	if got != "failed" || reason != ExitBudgetExceeded {
+		t.Errorf("got (%s, %s); want (failed, %s) — budget must outrank finalize_invalid",
+			got, reason, ExitBudgetExceeded)
+	}
+}
+
+// TestAdjudicateTimeoutWinsOverNeverCalled — M2.2.1 T002: when a
+// subprocess times out before the agent can even attempt finalize,
+// the exit reason is "timeout", not "finalize_never_called". Timeout
+// is the external cause; finalize_never_called is the internal
+// observation that would apply if the subprocess exited cleanly.
+func TestAdjudicateTimeoutWinsOverNeverCalled(t *testing.T) {
+	got, reason := Adjudicate(
+		Result{ResultSeen: false},
+		WaitDetail{ContextErr: context.DeadlineExceeded},
+		true,
+		FinalizeState{Expected: true, Attempted: false, Committed: false},
+	)
+	if got != "timeout" || reason != ExitTimeout {
+		t.Errorf("got (%s, %s); want (timeout, %s) — timeout must outrank finalize_never_called",
+			got, reason, ExitTimeout)
+	}
+}
+
+// TestAdjudicateFinalizeInvalidOnSignaledCapExhausted — the counter-
+// driven SIGTERM path: subprocess killed via SIGTERM with
+// CapExhausted=true and no budget result should yield finalize_invalid
+// rather than the generic signaled_SIGTERM.
+func TestAdjudicateFinalizeInvalidOnSignaledCapExhausted(t *testing.T) {
+	got, reason := Adjudicate(
+		Result{ResultSeen: true, TerminalReason: "stopped_by_user", TotalCostUSD: "0.05"},
+		WaitDetail{Signaled: true, Signal: syscall.SIGTERM, ExitCode: -1},
+		true,
+		FinalizeState{Expected: true, Attempted: true, CapExhausted: true},
+	)
+	if got != "failed" || reason != ExitFinalizeInvalid {
+		t.Errorf("got (%s, %s); want (failed, %s)", got, reason, ExitFinalizeInvalid)
+	}
+}
+
+// TestAdjudicateFinalizeNeverCalledOnCleanExit — subprocess exits
+// cleanly without ever calling finalize_ticket; for roles that expect
+// finalize, Adjudicate classifies as finalize_never_called.
+func TestAdjudicateFinalizeNeverCalledOnCleanExit(t *testing.T) {
+	got, reason := Adjudicate(
+		Result{ResultSeen: true, TerminalReason: "success", IsError: false, TotalCostUSD: "0.02"},
+		WaitDetail{ExitCode: 0},
+		true, // helloTxtOK=true (M2.2 roles pre-pass the gate)
+		FinalizeState{Expected: true, Attempted: false, Committed: false},
+	)
+	if got != "failed" || reason != ExitFinalizeNeverCalled {
+		t.Errorf("got (%s, %s); want (failed, %s)", got, reason, ExitFinalizeNeverCalled)
+	}
+}
+
+// TestAdjudicateFinalizeNotExpectedPreservesM22 — for roles where
+// FinalizeState.Expected=false (M1/M2.1 fake-agent path, M2.2 engineer
+// on todo column), Adjudicate's M2.2 behaviour is preserved exactly.
+func TestAdjudicateFinalizeNotExpectedPreservesM22(t *testing.T) {
+	got, reason := Adjudicate(
+		Result{ResultSeen: true, TerminalReason: "success", IsError: false, TotalCostUSD: "0.01"},
+		WaitDetail{ExitCode: 0},
+		true,
+		FinalizeState{Expected: false},
+	)
+	if got != "succeeded" || reason != ExitCompleted {
+		t.Errorf("got (%s, %s); want (succeeded, completed) — non-finalize role must behave identically to M2.2",
+			got, reason)
 	}
 }

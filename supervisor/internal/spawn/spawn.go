@@ -591,7 +591,11 @@ func runRealClaude(
 		helloTxtOK = checkHelloTxt(*dept.WorkspacePath, payload.TicketID)
 	}
 
-	status, exitReason := Adjudicate(result, wait, helloTxtOK)
+	// M2.2.1: FinalizeState is zero-valued at T002; T006 populates it
+	// from pipeline observations. A zero state keeps Adjudicate's M1/M2.1/
+	// M2.2 precedence behaviour unchanged because Expected=false short-
+	// circuits every finalize_* classification branch.
+	status, exitReason := Adjudicate(result, wait, helloTxtOK, FinalizeState{})
 
 	// Cost stays NULL unless a result event landed; that keeps the
 	// aggregate cost query honest about what Claude actually billed.

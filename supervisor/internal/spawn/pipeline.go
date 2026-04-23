@@ -79,6 +79,24 @@ type WaitDetail struct {
 	Signaled bool
 }
 
+// FinalizeState captures the M2.2.1 finalize-flow observations Adjudicate
+// needs to classify a subprocess termination correctly. Populated by the
+// pipeline's stream-json parser (T006) as `tool_use` events for
+// `finalize_ticket` arrive. The zero value is "this role never interacts
+// with finalize" — Adjudicate then falls back to M1/M2.1/M2.2 precedence
+// unchanged.
+//
+// Expected is true only for roles that participate in the finalize flow
+// (engineer and qa-engineer in M2.2.1). A non-finalize role (the M1/M2.1
+// fake-agent path, the M2.2 engineer@todo back-compat path) leaves
+// Expected=false and this struct has no effect on classification.
+type FinalizeState struct {
+	Expected     bool // role is expected to call finalize_ticket
+	Attempted    bool // at least one finalize tool_use event observed
+	Committed    bool // WriteFinalize successfully committed the atomic tx
+	CapExhausted bool // 3rd failed attempt reached; SIGTERM queued by counter
+}
+
 // pipelineRouter implements claudeproto.Router and streams observations
 // into a captured Result. It performs no I/O of its own beyond slog lines;
 // the bail side effect (killProcessGroup) is delegated to the caller via
@@ -324,7 +342,7 @@ func Run(
 // failure classes still capture a cost when one was emitted (claude_error,
 // acceptance_failed) but a pre-result failure (mcp bail, parse, timeout,
 // shutdown, no_result, signal) writes NULL.
-func Adjudicate(result Result, wait WaitDetail, helloTxtOK bool) (status, exitReason string) {
+func Adjudicate(result Result, wait WaitDetail, helloTxtOK bool, finalize FinalizeState) (status, exitReason string) {
 	switch {
 	case result.MCPBailed:
 		return "failed", FormatMCPFailure(result.MCPOffenderName, result.MCPOffenderStatus)
@@ -333,7 +351,22 @@ func Adjudicate(result Result, wait WaitDetail, helloTxtOK bool) (status, exitRe
 	case wait.ShutdownInitiated:
 		return "failed", ExitSupervisorShutdown
 	case errors.Is(wait.ContextErr, context.DeadlineExceeded):
+		// M2.2.1 precedence (T002): timeout wins over finalize_never_called.
+		// A subprocess killed by the per-invocation timeout always lands
+		// here, regardless of whether finalize was expected.
 		return "timeout", ExitTimeout
+	case wait.Signaled && finalize.CapExhausted && result.ResultSeen && isBudgetTerminalReason(result.TerminalReason):
+		// M2.2.1 precedence (T002 / SC-258): budget_exceeded wins over
+		// finalize_invalid when the subprocess reports a budget-shaped
+		// result before/during the retry counter's SIGTERM. Keeps M2.2's
+		// budget surface stable under the M2.2.1 retry-loop scenarios.
+		return "failed", ExitBudgetExceeded
+	case wait.Signaled && finalize.CapExhausted:
+		// M2.2.1 (T006 / FR-257): the retry counter SIGTERMed the process
+		// group after three failed finalize attempts. Preferred over the
+		// generic signaled_SIGTERM label because the root cause is the
+		// schema-validation loop, not an external signal.
+		return "failed", ExitFinalizeInvalid
 	case wait.Signaled:
 		return "failed", FormatSignalled(wait.Signal)
 	case !result.ResultSeen:
@@ -351,6 +384,13 @@ func Adjudicate(result Result, wait WaitDetail, helloTxtOK bool) (status, exitRe
 		// shim per plan §"Error vocabulary". Real-Claude observations
 		// feed back into a tighter enum post-M2.2.
 		return "failed", ExitBudgetExceeded
+	case finalize.Expected && !finalize.Committed:
+		// M2.2.1 (T002 / US5): the role was expected to finalize but the
+		// subprocess exited cleanly without a successful finalize commit.
+		// Distinct from finalize_invalid (which implies retries occurred)
+		// — finalize_never_called means zero attempts OR attempts that
+		// never converged to a committed outcome prior to clean exit.
+		return "failed", ExitFinalizeNeverCalled
 	case !helloTxtOK:
 		return "failed", ExitAcceptanceFailed
 	default:
