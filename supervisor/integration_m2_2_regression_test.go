@@ -17,12 +17,12 @@ import "testing"
 // This is an architectural shift the spec explicitly documents, not a
 // regression in the Go code. The fix is one of:
 //
-//   1. Update M2.1 integration tests to insert at column_slug='in_dev'
-//      (and seed per M2.2 expectations). Changes the test harness but
-//      preserves M2.1's runtime guarantees.
-//   2. Register both `work.ticket.created.engineering.todo` AND
-//      `work.ticket.created.engineering.in_dev` in main.go so the M2.2
-//      supervisor listens for both (M2.1 back-compat channel).
+//  1. Update M2.1 integration tests to insert at column_slug='in_dev'
+//     (and seed per M2.2 expectations). Changes the test harness but
+//     preserves M2.1's runtime guarantees.
+//  2. Register both `work.ticket.created.engineering.todo` AND
+//     `work.ticket.created.engineering.in_dev` in main.go so the M2.2
+//     supervisor listens for both (M2.1 back-compat channel).
 //
 // Plan.md committed to approach #1 (the channel shift is a committed
 // M2.2 decision). Approach #2 is reversible operator policy; a

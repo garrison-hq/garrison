@@ -16,9 +16,9 @@ type fakePalaceExec struct {
 	stdout, stderr []byte
 	err            error
 
-	calls   [][]string
-	stdins  []string
-	runFn   func(ctx context.Context) ([]byte, []byte, error)
+	calls  [][]string
+	stdins []string
+	runFn  func(ctx context.Context) ([]byte, []byte, error)
 }
 
 func (f *fakePalaceExec) Run(ctx context.Context, args []string, stdin io.Reader) ([]byte, []byte, error) {
@@ -37,9 +37,9 @@ func (f *fakePalaceExec) Run(ctx context.Context, args []string, stdin io.Reader
 
 // mcpResponseLine is a convenience for fixture construction.
 const (
-	initRespLine    = `{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{}}}` + "\n"
-	searchRespLine  = `{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"{\"results\":[{\"wing\":\"wing_frontend_engineer\",\"content\":\"This covers ticket_abc-123 at length well over 100 characters with the engineer's findings and rationale for the approach taken.\",\"created_at\":\"2026-04-23T12:01:00Z\"}]}"}]}}` + "\n"
-	kgRespLine      = `{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"{\"triples\":[{\"subject\":\"agent_instance_xyz\",\"predicate\":\"completed\",\"object\":\"ticket_abc-123\",\"valid_from\":\"2026-04-23T12:01:00Z\"}]}"}]}}` + "\n"
+	initRespLine   = `{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{}}}` + "\n"
+	searchRespLine = `{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"{\"results\":[{\"wing\":\"wing_frontend_engineer\",\"content\":\"This covers ticket_abc-123 at length well over 100 characters with the engineer's findings and rationale for the approach taken.\",\"created_at\":\"2026-04-23T12:01:00Z\"}]}"}]}}` + "\n"
+	kgRespLine     = `{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"{\"triples\":[{\"subject\":\"agent_instance_xyz\",\"predicate\":\"completed\",\"object\":\"ticket_abc-123\",\"valid_from\":\"2026-04-23T12:01:00Z\"}]}"}]}}` + "\n"
 )
 
 func TestClientQuerySuccess(t *testing.T) {

@@ -18,11 +18,11 @@ import "time"
 type Status string
 
 const (
-	StatusClean         Status = "clean"
-	StatusMissingDiary  Status = "missing_diary"
-	StatusMissingKG     Status = "missing_kg"
-	StatusThin          Status = "thin"
-	StatusPending       Status = "pending"
+	StatusClean        Status = "clean"
+	StatusMissingDiary Status = "missing_diary"
+	StatusMissingKG    Status = "missing_kg"
+	StatusThin         Status = "thin"
+	StatusPending      Status = "pending"
 
 	// ThinBodyThreshold is the per-FR-214 boundary: diary body < 100
 	// chars is flagged as 'thin' regardless of KG-triple presence. The

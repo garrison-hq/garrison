@@ -97,7 +97,7 @@ func TestM22EngineerPlusQAHappyPath(t *testing.T) {
 		"GARRISON_MOCK_CLAUDE_SCRIPT_ENGINEER="+engineerScript,
 		"GARRISON_MOCK_CLAUDE_SCRIPT_QA_ENGINEER="+qaScript,
 		"GARRISON_SUBPROCESS_TIMEOUT=30s",
-		"GARRISON_HYGIENE_DELAY=1s",         // accelerated for test
+		"GARRISON_HYGIENE_DELAY=1s",          // accelerated for test
 		"GARRISON_HYGIENE_SWEEP_INTERVAL=3s", // accelerated
 		"GARRISON_LOG_LEVEL=info",
 	)

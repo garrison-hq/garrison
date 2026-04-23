@@ -829,11 +829,11 @@ func writeTerminalCostAndWakeup(
 		wakeUpPtr = &wakeUpStatus
 	}
 	if err := q.UpdateInstanceTerminalWithCostAndWakeup(ctx, store.UpdateInstanceTerminalWithCostAndWakeupParams{
-		ID:            instanceID,
-		Status:        status,
-		ExitReason:    &reason,
-		TotalCostUsd:  cost,
-		WakeUpStatus:  wakeUpPtr,
+		ID:           instanceID,
+		Status:       status,
+		ExitReason:   &reason,
+		TotalCostUsd: cost,
+		WakeUpStatus: wakeUpPtr,
 	}); err != nil {
 		_ = tx.Rollback(ctx)
 		return fmt.Errorf("spawn: UpdateInstanceTerminalWithCostAndWakeup: %w", err)

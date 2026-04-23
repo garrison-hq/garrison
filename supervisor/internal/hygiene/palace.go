@@ -52,9 +52,10 @@ var ErrPalaceQueryFailed = errors.New("hygiene: palace query failed")
 // the sweep cycle reprocesses on the next tick.
 //
 // The JSON-RPC protocol is a subset of MCP:
-//   1. initialize
-//   2. tools/call mempalace_search (wing=<wing>, query=<ticketIDText>)
-//   3. tools/call mempalace_kg_query (entity=<ticketIDText>)
+//  1. initialize
+//  2. tools/call mempalace_search (wing=<wing>, query=<ticketIDText>)
+//  3. tools/call mempalace_kg_query (entity=<ticketIDText>)
+//
 // The mempalace.mcp_server exits on EOF of stdin; closing the Exec's
 // stdin reader after the last request-line triggers clean teardown.
 func (c *Client) Query(ctx context.Context, ticketIDText, wing string, window TimeWindow) ([]PalaceDrawer, []PalaceTriple, error) {
