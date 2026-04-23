@@ -260,6 +260,23 @@ func runDaemon() int {
 		supervisorBin = exe
 	}
 
+	// M2.2.1 T011: palace client shared across the hygiene listener and
+	// the finalize atomic writer. Constructed outside the fake-agent
+	// gate so the spawn deps can hold a pointer unconditionally;
+	// fake-agent + disable-bootstrap paths set spawn.Deps.Palace=nil
+	// and WriteFinalize's nil-guard handles it (no atomic write runs).
+	var sharedPalaceClient *mempalace.Client
+	if !cfg.UseFakeAgent && !cfg.DisablePalaceBootstrap {
+		sharedPalaceClient = &mempalace.Client{
+			DockerBin:          cfg.DockerBin,
+			MempalaceContainer: cfg.MempalaceContainer,
+			PalacePath:         cfg.PalacePath,
+			DockerHost:         cfg.DockerHost,
+			Timeout:            10 * time.Second,
+			Exec:               mempalace.RealDockerExec{DockerBin: cfg.DockerBin},
+		}
+	}
+
 	spawnDeps := spawn.Deps{
 		Pool:               pool,
 		Queries:            queries,
@@ -280,6 +297,9 @@ func runDaemon() int {
 		MempalaceContainer: cfg.MempalaceContainer,
 		PalacePath:         cfg.PalacePath,
 		DockerHost:         cfg.DockerHost,
+		// M2.2.1 — palace + timeout for the atomic finalize writer.
+		Palace:               sharedPalaceClient,
+		FinalizeWriteTimeout: cfg.FinalizeWriteTimeout,
 	}
 
 	engineerHandler := func(ctx context.Context, eventID pgtype.UUID) error {
@@ -332,19 +352,11 @@ func runDaemon() int {
 	// TerminalWriteGrace per FR-217. GARRISON_DISABLE_PALACE_BOOTSTRAP
 	// gates these off alongside the bootstrap itself (same test-hook).
 	if !cfg.UseFakeAgent && !cfg.DisablePalaceBootstrap {
-		palaceClient := &hygiene.Client{
-			DockerBin:          cfg.DockerBin,
-			MempalaceContainer: cfg.MempalaceContainer,
-			PalacePath:         cfg.PalacePath,
-			DockerHost:         cfg.DockerHost,
-			Timeout:            10 * time.Second,
-			Exec:               mempalace.RealDockerExec{DockerBin: cfg.DockerBin},
-		}
 		hygieneDeps := hygiene.Deps{
 			DSN:                cfg.AgentMempalaceDSN(),
 			Dialer:             pgdb.NewRealDialer(),
 			Queries:            queries,
-			Palace:             palaceClient,
+			Palace:             sharedPalaceClient, // M2.2.1 T011: reuse the spawn-deps palace client
 			Logger:             logger,
 			Delay:              cfg.HygieneDelay,
 			SweepInterval:      cfg.HygieneSweepInterval,
