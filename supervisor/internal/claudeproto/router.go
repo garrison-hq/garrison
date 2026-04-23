@@ -139,7 +139,10 @@ func decodeAssistant(raw []byte) (AssistantEvent, error) {
 		Message struct {
 			Model   string `json:"model"`
 			Content []struct {
-				Type string `json:"type"`
+				Type  string          `json:"type"`
+				Name  string          `json:"name"`  // tool_use
+				ID    string          `json:"id"`    // tool_use
+				Input json.RawMessage `json:"input"` // tool_use
 			} `json:"content"`
 		} `json:"message"`
 	}
@@ -148,17 +151,25 @@ func decodeAssistant(raw []byte) (AssistantEvent, error) {
 	}
 	types := make([]string, 0, 4)
 	seen := make(map[string]struct{}, 4)
+	var toolUses []ToolUseBlock
 	for _, c := range wire.Message.Content {
-		if _, ok := seen[c.Type]; ok {
-			continue
+		if _, ok := seen[c.Type]; !ok {
+			seen[c.Type] = struct{}{}
+			types = append(types, c.Type)
 		}
-		seen[c.Type] = struct{}{}
-		types = append(types, c.Type)
+		if c.Type == "tool_use" {
+			toolUses = append(toolUses, ToolUseBlock{
+				Name:      c.Name,
+				ToolUseID: c.ID,
+				InputRaw:  c.Input,
+			})
+		}
 	}
 	return AssistantEvent{
 		Model:             wire.Message.Model,
 		ContentBlockCount: len(wire.Message.Content),
 		ContentTypes:      types,
+		ToolUses:          toolUses,
 		Raw:               raw,
 	}, nil
 }

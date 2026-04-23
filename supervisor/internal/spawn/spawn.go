@@ -437,7 +437,7 @@ func runRealClaude(
 	stderrDone := make(chan struct{})
 	go func() {
 		defer close(pipelineDone)
-		result, pipelineErr = Run(execCtx, stdout, instanceID, logger, onBail)
+		result, pipelineErr = Run(execCtx, stdout, instanceID, ticketUUID, logger, onBail)
 	}()
 	go func() {
 		defer close(stderrDone)
