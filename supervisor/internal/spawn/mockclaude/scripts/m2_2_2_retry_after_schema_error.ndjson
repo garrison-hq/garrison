@@ -1,0 +1,13 @@
+# M2.2.2 retry-after-schema-error fixture (US1 / SC-305). One failed
+# attempt whose rationale is too short triggers the M2.2.2 richer
+# error response (failure=validation, constraint=min_length, hint);
+# the second attempt is a well-formed payload → supervisor commits.
+# Mirrors M2.2.1's finalize_retry_then_success.ndjson but shorter:
+# M2.2.2's thesis is that richer errors make retry recovery happen
+# in one cycle, not two.
+#init-mcp-servers [{"name":"postgres","status":"connected"},{"name":"mempalace","status":"connected"},{"name":"finalize","status":"connected"}]
+{"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","content":[{"type":"text","text":"First attempt — rationale too short."}]}}
+#finalize-tool-use-fail 1 schema diary_entry.rationale
+{"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","content":[{"type":"text","text":"Read the hint; extended the rationale. Retrying."}]}}
+#finalize-tool-use-ok 2 {"ticket_id":"{{TICKET_ID}}","outcome":"Mock retry-after-schema-error — second attempt validated","diary_entry":{"rationale":"Second attempt. The first rejection named the diary_entry.rationale field with constraint=min_length and Expected='string with min length 50'; I expanded the rationale accordingly and the second submission is well-formed.","artifacts":["changes/hello-{{TICKET_ID}}.md"],"blockers":["First attempt had too-short rationale"],"discoveries":["Richer errors made the fix obvious"]},"kg_triples":[{"subject":"agent_instance_mock","predicate":"completed","object":"ticket_{{TICKET_ID}}","valid_from":"now"}]}
+{"type":"result","subtype":"success","is_error":false,"duration_ms":900,"duration_api_ms":700,"total_cost_usd":0.025,"stop_reason":"end_turn","terminal_reason":"completed","result":"Finalized on 2nd attempt via hint","session_id":"mock-session-m222-retry","permission_denials":[]}

@@ -1,0 +1,18 @@
+# M2.2.2 three-retries-exhausted fixture (US2 / SC-306). Three
+# consecutive malformed payloads each touch a different invalid
+# field; after the third, the supervisor's retry counter hits 3 and
+# SIGTERMs. exit_reason=finalize_invalid; no ticket_transitions row.
+# Directly mirrors M2.2.1's finalize_retry_exhausted.ndjson — the
+# regression check that the retry cap still works with the new
+# richer-error shape (Q9 additive guarantee).
+#init-mcp-servers [{"name":"postgres","status":"connected"},{"name":"mempalace","status":"connected"},{"name":"finalize","status":"connected"}]
+{"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","content":[{"type":"text","text":"Attempt 1 — empty kg_triples."}]}}
+#finalize-tool-use-fail 1 schema kg_triples
+{"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","content":[{"type":"text","text":"Attempt 2 — rationale too short (ignoring hint)."}]}}
+#finalize-tool-use-fail 2 schema diary_entry.rationale
+{"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","content":[{"type":"text","text":"Attempt 3 — outcome too short."}]}}
+#finalize-tool-use-fail 3 schema outcome
+# Supervisor's retry counter hits 3 → SIGTERMs the process group.
+# mockclaude catches the signal via the standard handler and exits.
+# No result event follows.
+#sleep 500ms
