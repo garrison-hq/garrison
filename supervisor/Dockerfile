@@ -43,21 +43,26 @@ ARG CLAUDE_KEY_URL=https://downloads.claude.ai/keys/claude-code.asc
 ARG CLAUDE_KEY_FINGERPRINT="31DD DE24 DDFA B679 F42D  7BD2 BAA9 29FF 1A7E CACE"
 ARG CLAUDE_PLATFORM=linux-x64-musl
 
+# Every curl uses `--proto '=https' --proto-redir '=https' --tlsv1.2` so
+# the build fails closed on any non-HTTPS URL, including a redirect that
+# would downgrade from HTTPS to HTTP. The ARG-supplied URLs are HTTPS by
+# default but could be overridden at build time; these flags make the
+# protocol constraint explicit rather than hope-based.
 RUN apk add --no-cache ca-certificates gnupg curl jq \
- && curl -fsSL "${CLAUDE_KEY_URL}" | gpg --import 2>&1 \
+ && curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL "${CLAUDE_KEY_URL}" | gpg --import 2>&1 \
  && EXPECTED_FP=$(echo "${CLAUDE_KEY_FINGERPRINT}" | tr -d ' \t') \
  && ACTUAL_FP=$(gpg --fingerprint security@anthropic.com | tr -d ' \t\n') \
  && (echo "${ACTUAL_FP}" | grep -q "${EXPECTED_FP}" \
      || (echo "claude signing key fingerprint mismatch"; echo "expected: ${EXPECTED_FP}"; echo "actual:   ${ACTUAL_FP}"; exit 1)) \
  && mkdir -p /work && cd /work \
- && curl -fsSLO "${CLAUDE_RELEASES}/${CLAUDE_VERSION}/manifest.json" \
- && curl -fsSLO "${CLAUDE_RELEASES}/${CLAUDE_VERSION}/manifest.json.sig" \
+ && curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSLO "${CLAUDE_RELEASES}/${CLAUDE_VERSION}/manifest.json" \
+ && curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSLO "${CLAUDE_RELEASES}/${CLAUDE_VERSION}/manifest.json.sig" \
  && gpg --verify manifest.json.sig manifest.json \
  && BIN_NAME=$(jq -r ".platforms[\"${CLAUDE_PLATFORM}\"].binary" manifest.json) \
  && BIN_SHA=$(jq -r ".platforms[\"${CLAUDE_PLATFORM}\"].checksum" manifest.json) \
  && test -n "${BIN_NAME}" && test "${BIN_NAME}" != "null" \
  && test -n "${BIN_SHA}"  && test "${BIN_SHA}"  != "null" \
- && curl -fsSL "${CLAUDE_RELEASES}/${CLAUDE_VERSION}/${CLAUDE_PLATFORM}/${BIN_NAME}" -o claude \
+ && curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL "${CLAUDE_RELEASES}/${CLAUDE_VERSION}/${CLAUDE_PLATFORM}/${BIN_NAME}" -o claude \
  && echo "${BIN_SHA}  claude" | sha256sum -c \
  && chmod +x claude
 
