@@ -1,6 +1,6 @@
-# Garrison M2.2 deployment topology.
+# Garrison M2.3 deployment topology.
 #
-# Four services (per Session 2026-04-23 Deployment clarification):
+# Seven services (M2.2 four + M2.3 three):
 #   postgres              — M1/M2.1 state store + pg_notify event bus
 #   mempalace             — MemPalace 3.3.2 sidecar; idle host for per-exec work
 #   docker-proxy          — linuxserver/socket-proxy with POST=1 EXEC=1
@@ -9,6 +9,12 @@
 #                           T001 finding F5). Supervisor reaches it by
 #                           service-name DNS.
 #   supervisor            — Garrison Go binary + claude 2.1.117 + docker-cli
+#   infisical-postgres    — Postgres 15 backing store for Infisical (isolated
+#                           from garrison-postgres; separate volume)
+#   infisical-redis       — Redis 7 session/queue store for Infisical
+#   infisical             — Infisical secrets manager; reachable as
+#                           garrison-infisical:8080 on the compose network.
+#                           NOT published to host (FR-422).
 #
 # Supervisor never mounts /var/run/docker.sock directly. All docker API
 # access flows through the filtered proxy. Residual security envelope
@@ -66,6 +72,45 @@ services:
     # only reachable over the compose network via DNS.
     restart: unless-stopped
 
+  # M2.3: Infisical backing Postgres (isolated from garrison-postgres).
+  infisical-postgres:
+    image: postgres:15-alpine
+    container_name: garrison-infisical-postgres
+    environment:
+      POSTGRES_DB: infisical
+      POSTGRES_USER: infisical
+      POSTGRES_PASSWORD: ${GARRISON_INFISICAL_PG_PASSWORD:?GARRISON_INFISICAL_PG_PASSWORD required}
+    volumes:
+      - infisical-postgres-data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  # M2.3: Infisical backing Redis.
+  infisical-redis:
+    image: redis:7-alpine
+    container_name: garrison-infisical-redis
+    restart: unless-stopped
+
+  # M2.3: Infisical secrets manager. Internal network only (no ports: block).
+  # Set GARRISON_INFISICAL_IMAGE env var to pin a specific digest:
+  #   GARRISON_INFISICAL_IMAGE=infisical/infisical@sha256:<digest>
+  # See docs/ops-checklist.md §"M2.3 — Infisical deployment" for the
+  # recommended pinning procedure.
+  infisical:
+    image: ${GARRISON_INFISICAL_IMAGE:-infisical/infisical:latest}
+    container_name: garrison-infisical
+    depends_on:
+      infisical-postgres:
+        condition: service_started
+      infisical-redis:
+        condition: service_started
+    environment:
+      ENCRYPTION_KEY: ${GARRISON_INFISICAL_ENCRYPTION_KEY:?GARRISON_INFISICAL_ENCRYPTION_KEY required}
+      AUTH_SECRET: ${GARRISON_INFISICAL_AUTH_SECRET:?GARRISON_INFISICAL_AUTH_SECRET required}
+      DB_CONNECTION_URI: postgres://infisical:${GARRISON_INFISICAL_PG_PASSWORD}@infisical-postgres:5432/infisical
+      REDIS_URL: redis://infisical-redis:6379
+      SITE_URL: http://garrison-infisical:8080
+    restart: unless-stopped
+
   supervisor:
     build:
       context: .
@@ -79,6 +124,8 @@ services:
         condition: service_started
       docker-proxy:
         condition: service_started
+      infisical:
+        condition: service_started
     environment:
       GARRISON_DATABASE_URL: postgres://supervisor:${GARRISON_POSTGRES_PASSWORD}@postgres:5432/garrison
       GARRISON_AGENT_RO_PASSWORD: ${GARRISON_AGENT_RO_PASSWORD:?GARRISON_AGENT_RO_PASSWORD required}
@@ -90,8 +137,13 @@ services:
       # HAProxy on :2375, not a unix-socket proxy). No shared socket
       # volume; reachable by service-name DNS over the compose network.
       DOCKER_HOST: tcp://garrison-docker-proxy:2375
+      # M2.3: Infisical vault credentials. See ops-checklist.md for setup.
+      GARRISON_INFISICAL_ADDR: http://garrison-infisical:8080
+      GARRISON_INFISICAL_CLIENT_ID: ${GARRISON_INFISICAL_CLIENT_ID:?GARRISON_INFISICAL_CLIENT_ID required}
+      GARRISON_INFISICAL_CLIENT_SECRET: ${GARRISON_INFISICAL_CLIENT_SECRET:?GARRISON_INFISICAL_CLIENT_SECRET required}
     restart: unless-stopped
 
 volumes:
   postgres-data:
   mempalace-palace:
+  infisical-postgres-data:
