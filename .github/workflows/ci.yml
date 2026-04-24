@@ -90,6 +90,21 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: supervisor/go.mod
+          cache-dependency-path: supervisor/go.sum
+      # Regenerate test coverage for Sonar. Duplicates the `test (unit)`
+      # job's work but keeps the data in this job's workspace so the
+      # scanner can pick it up without cross-job artifact choreography.
+      # Only the default build tag is covered; integration/chaos/
+      # live_acceptance/experiment tags are separate suites and not
+      # part of the coverage baseline.
+      - name: Generate Go coverage
+        working-directory: supervisor
+        run: |
+          make copy-migrations
+          go test -coverprofile=coverage.out -covermode=atomic ./...
       # Pinned to the full commit SHA of v5.0.0 per SonarQube's own
       # githubactions:S7637 rule. The tag-form (`@v5.0.0`) would let a
       # compromised publisher silently retag to a malicious commit.
