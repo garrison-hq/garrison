@@ -579,10 +579,10 @@ func scanPgmcpContractViolations(log string) string {
 
 func writePostFixRawData(path string, runs []postFixExperimentRun, grand float64) error {
 	type envelope struct {
-		Runs           []postFixExperimentRun `json:"runs"`
-		GrandCost      float64                `json:"grand_cost_usd"`
-		GrandCap       float64                `json:"grand_budget_cap_usd"`
-		PerRunCap      float64                `json:"per_run_budget_cap_usd"`
+		Runs      []postFixExperimentRun `json:"runs"`
+		GrandCost float64                `json:"grand_cost_usd"`
+		GrandCap  float64                `json:"grand_budget_cap_usd"`
+		PerRunCap float64                `json:"per_run_budget_cap_usd"`
 	}
 	b, err := json.MarshalIndent(envelope{
 		Runs:      runs,

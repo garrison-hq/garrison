@@ -117,18 +117,18 @@ Code-adjacent documentation lives where engineering ships it; no separate docs d
 // experimentRun captures the per-iteration data the findings report
 // needs. Ordered exactly as the raw-data table columns in the spec.
 type experimentRun struct {
-	Index             int     `json:"index"`              // 1..12
-	Ticket            string  `json:"ticket"`             // "A" or "B"
-	Model             string  `json:"model"`              // haiku/opus short label
-	RunInGroup        int     `json:"run_in_group"`       // 1..3
-	FinalizeCalled    bool    `json:"finalize_called"`    // (4)
-	FinalizeAttempt   string  `json:"finalize_attempt"`   // "1"/"2"/"3"/"N/A"
+	Index             int     `json:"index"`                         // 1..12
+	Ticket            string  `json:"ticket"`                        // "A" or "B"
+	Model             string  `json:"model"`                         // haiku/opus short label
+	RunInGroup        int     `json:"run_in_group"`                  // 1..3
+	FinalizeCalled    bool    `json:"finalize_called"`               // (4)
+	FinalizeAttempt   string  `json:"finalize_attempt"`              // "1"/"2"/"3"/"N/A"
 	FirstAttemptError string  `json:"first_attempt_error,omitempty"` // (6)
-	ExitReasons       string  `json:"exit_reasons"`       // pipe-joined per role
-	HygieneStatuses   string  `json:"hygiene_statuses"`   // pipe-joined
-	TotalCostUSD      float64 `json:"total_cost_usd"`     // summed across instances
-	WallClockSeconds  float64 `json:"wall_clock_seconds"` // max(finished_at-started_at)
-	FinalColumnSlug   string  `json:"final_column_slug"`  // where the ticket ended up
+	ExitReasons       string  `json:"exit_reasons"`                  // pipe-joined per role
+	HygieneStatuses   string  `json:"hygiene_statuses"`              // pipe-joined
+	TotalCostUSD      float64 `json:"total_cost_usd"`                // summed across instances
+	WallClockSeconds  float64 `json:"wall_clock_seconds"`            // max(finished_at-started_at)
+	FinalColumnSlug   string  `json:"final_column_slug"`             // where the ticket ended up
 	TicketUUID        string  `json:"ticket_uuid"`
 	RunErr            string  `json:"run_err,omitempty"`
 	OpusPalacePhaseS  float64 `json:"opus_palace_phase_seconds,omitempty"` // (11) best-effort
