@@ -70,7 +70,16 @@ func runMigrate() int {
 }
 
 // applyAgentROPassword sets the garrison_agent_ro role's password from
-// GARRISON_AGENT_RO_PASSWORD if present.
+// GARRISON_AGENT_RO_PASSWORD if present. Thin wrapper over
+// applyAgentROPasswordValue so the NUL-byte guard and the
+// password-unset branch are unit-testable without touching the OS
+// environment (`os.Setenv` rejects NUL bytes at the syscall layer,
+// so the guard can only be exercised via direct-value injection).
+func applyAgentROPassword(ctx context.Context, db *sql.DB, logger *slog.Logger) error {
+	return applyAgentROPasswordValue(ctx, db, logger, os.Getenv("GARRISON_AGENT_RO_PASSWORD"))
+}
+
+// applyAgentROPasswordValue is the testable core of applyAgentROPassword.
 //
 // `ALTER ROLE ... PASSWORD` is DDL and does not accept a parameter
 // placeholder in the password-literal position, so we cannot write
@@ -84,8 +93,7 @@ func runMigrate() int {
 // string built on the Go side; it is bound as a pgx parameter and
 // interpolated by Postgres's canonical literal-quoter. NUL bytes are
 // still rejected up front for a clearer error than Postgres's own.
-func applyAgentROPassword(ctx context.Context, db *sql.DB, logger *slog.Logger) error {
-	password := os.Getenv("GARRISON_AGENT_RO_PASSWORD")
+func applyAgentROPasswordValue(ctx context.Context, db *sql.DB, logger *slog.Logger, password string) error {
 	if password == "" {
 		logger.Warn("GARRISON_AGENT_RO_PASSWORD is unset; garrison_agent_ro role has no password and cannot authenticate. Set the env var and re-run --migrate.")
 		return nil
