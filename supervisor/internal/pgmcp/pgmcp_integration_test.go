@@ -115,15 +115,45 @@ func TestPgmcpQueryHappyPath(t *testing.T) {
 	if r.Error != nil {
 		t.Fatalf("tools/call query: %+v", r.Error)
 	}
-	rm, _ := r.Result.(map[string]any)
-	rows, _ := rm["rows"].([]any)
+	payload := decodeToolResult(t, r)
+	rows, _ := payload["rows"].([]any)
 	if len(rows) != 1 {
-		t.Fatalf("expected 1 row, got %d", len(rows))
+		t.Fatalf("expected 1 row, got %d (payload=%+v)", len(rows), payload)
 	}
 	row, _ := rows[0].(map[string]any)
 	if row["one"] == nil {
 		t.Errorf("expected 'one' column; got %v", row)
 	}
+}
+
+// decodeToolResult unwraps an MCP CallToolResult — the shape pgmcp
+// returns per MCP 2024-11-05 — into the inner structured payload
+// (`{"rows":..., "truncated":...}` for query, `{"plan":...}` for
+// explain). Fails the test on any envelope defect so regressions in the
+// wrapper itself surface as test failures, not silent parsing.
+func decodeToolResult(t *testing.T, r jsonRPCResponse) map[string]any {
+	t.Helper()
+	rm, ok := r.Result.(map[string]any)
+	if !ok {
+		t.Fatalf("result is not an object: %T %+v", r.Result, r.Result)
+	}
+	if isErr, _ := rm["isError"].(bool); isErr {
+		t.Fatalf("CallToolResult isError=true: %+v", rm)
+	}
+	content, _ := rm["content"].([]any)
+	if len(content) != 1 {
+		t.Fatalf("expected 1 content item, got %d (%+v)", len(content), rm)
+	}
+	item, _ := content[0].(map[string]any)
+	if s, _ := item["type"].(string); s != "text" {
+		t.Fatalf("expected text content, got type=%v (%+v)", item["type"], item)
+	}
+	text, _ := item["text"].(string)
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(text), &payload); err != nil {
+		t.Fatalf("content.text is not valid JSON: %v (text=%q)", err, text)
+	}
+	return payload
 }
 
 // TestPgmcpRejectsDML verifies the protocol-layer filter returns a
@@ -182,10 +212,10 @@ func TestPgmcpExplainRunsAgainstRealTable(t *testing.T) {
 	if r.Error != nil {
 		t.Fatalf("explain: %+v", r.Error)
 	}
-	rm, _ := r.Result.(map[string]any)
-	plan, _ := rm["plan"].([]any)
+	payload := decodeToolResult(t, r)
+	plan, _ := payload["plan"].([]any)
 	if len(plan) == 0 {
-		t.Errorf("expected non-empty plan, got %+v", r.Result)
+		t.Errorf("expected non-empty plan, got %+v", payload)
 	}
 }
 
