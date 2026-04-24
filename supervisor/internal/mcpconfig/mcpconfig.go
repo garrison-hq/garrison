@@ -25,10 +25,31 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/garrison-hq/garrison/supervisor/internal/mempalace"
 	"github.com/jackc/pgx/v5/pgtype"
 )
+
+// bannedMCPNamePatterns lists substring patterns that flag a vault-proxying
+// MCP server in the config (Rule 3 / FR-410 / D2.4). Case-insensitive match.
+var bannedMCPNamePatterns = []string{"vault", "secret", "infisical"}
+
+// RejectVaultServers checks the composed MCP config for any server whose name
+// matches a banned pattern. Returns a non-nil error naming the offending key
+// on the first match; nil means no banned server found.
+// Called from WriteWithOps before the config is written to disk.
+func RejectVaultServers(cfg mcpConfig) error {
+	for name := range cfg.MCPServers {
+		lower := strings.ToLower(name)
+		for _, pattern := range bannedMCPNamePatterns {
+			if strings.Contains(lower, pattern) {
+				return fmt.Errorf("mcpconfig: banned vault-pattern server %q in MCP config", name)
+			}
+		}
+	}
+	return nil
+}
 
 // mcpConfig is the top-level shape Claude Code expects for --mcp-config.
 type mcpConfig struct {
@@ -170,6 +191,14 @@ func WriteWithOps(_ context.Context, ops fileOps, dir string, instanceID pgtype.
 	}
 
 	cfg := mcpConfig{MCPServers: servers}
+
+	// Rule 3 (FR-410): reject before serialising so no vault-proxying config
+	// ever reaches disk. The error is classified into ExitVaultMCPInConfig
+	// by the spawn path (T008).
+	if err := RejectVaultServers(cfg); err != nil {
+		return "", err
+	}
+
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		// encoding/json never errors for this shape, but surface it
