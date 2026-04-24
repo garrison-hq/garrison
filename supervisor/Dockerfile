@@ -15,7 +15,15 @@
 # --- build stage ----------------------------------------------------------
 FROM golang:1.25-alpine AS build
 WORKDIR /src
-COPY . .
+# Copy only what `go build ./cmd/supervisor` needs. A bare `COPY . .` would
+# recursively pull in test fixtures, bin/, logs, and the top-level *_test.go
+# files — more surface than the build requires. `copy-migrations` in the
+# Makefile stages the repo-root SQL into cmd/supervisor/migrations/ before
+# `docker build` runs, so the migrations ride in under cmd/.
+COPY go.mod go.sum ./
+RUN go mod download
+COPY cmd/ ./cmd/
+COPY internal/ ./internal/
 ARG VERSION=dev
 RUN CGO_ENABLED=0 go build -ldflags="-X main.version=${VERSION}" -o /out/supervisor ./cmd/supervisor
 
@@ -70,5 +78,16 @@ ENV USE_BUILTIN_RIPGREP=0 \
     DISABLE_AUTOUPDATER=1 \
     GARRISON_CLAUDE_BIN=/usr/local/bin/claude \
     GARRISON_MCP_CONFIG_DIR=/var/lib/garrison/mcp
-RUN mkdir -p /var/lib/garrison/mcp && chmod 0750 /var/lib/garrison/mcp
+# Create a non-root user and own the MCP config dir. The supervisor reaches
+# Docker through garrison-docker-proxy over TCP (DOCKER_HOST=tcp://…) so it
+# does not need docker-group membership on the local socket. Keeping the
+# runtime non-privileged narrows the blast radius of a supervisor RCE even
+# though the socket-proxy's filter is the primary defence (see M2.2
+# vault-threat-model §"M2.2 deployment assumptions").
+RUN addgroup -S garrison \
+ && adduser -S -G garrison -H -s /sbin/nologin garrison \
+ && mkdir -p /var/lib/garrison/mcp \
+ && chown -R garrison:garrison /var/lib/garrison \
+ && chmod 0750 /var/lib/garrison/mcp
+USER garrison
 ENTRYPOINT ["/supervisor"]
