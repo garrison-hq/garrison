@@ -20,6 +20,7 @@ type Agent struct {
 	PalaceWing   *string
 	Status       string
 	CreatedAt    pgtype.Timestamptz
+	McpConfig    []byte
 }
 
 type AgentInstance struct {

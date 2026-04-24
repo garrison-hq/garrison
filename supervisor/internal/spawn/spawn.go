@@ -376,8 +376,18 @@ func runRealClaude(
 	}
 
 	// --- M2.3 vault steps V1–V5 (D4.5 / FR-409 / FR-405 / FR-407 / FR-412) ---
-	// V2: Rule 3 enforcement is inside mcpconfig.Write (T007); the error
-	// is classified into ExitVaultMCPInConfig at the Write() call site below.
+	// Rule 3 pre-check: run BEFORE the vault fetch so no Infisical request is
+	// made when the agent's mcp_config carries a banned server name (T013 /
+	// D4.5 ordering). mcpconfig.Write also checks Rule 3 inside WriteWithOps
+	// against the full composed config as a defence-in-depth guard.
+	if err := mcpconfig.CheckExtraServers(agent.McpConfig); err != nil {
+		if errors.Is(err, mcpconfig.ErrVaultMCPBanned) {
+			logger.Error("Rule 3 pre-check: vault-pattern server in agents.mcp_config", "err", err)
+			return writeFail(ExitVaultMCPInConfig)
+		}
+		logger.Error("Rule 3 pre-check: parse agents.mcp_config failed", "err", err)
+		return writeFail(ExitSpawnFailed)
+	}
 	fetched, vaultExit := vaultOrchestrate(ctx, deps, roleSlug, instanceID, ticketUUID, agent.AgentMD, logger)
 	if vaultExit != "" {
 		return writeFail(vaultExit)
@@ -437,6 +447,7 @@ func runRealClaude(
 			AgentInstanceID: formatUUID(instanceID),
 			DatabaseURL:     deps.AgentRODSN,
 		},
+		agent.McpConfig, // M2.3 T013: agent-specific servers; Rule 3 checks these
 	)
 	if err != nil {
 		if errors.Is(err, mcpconfig.ErrVaultMCPBanned) {

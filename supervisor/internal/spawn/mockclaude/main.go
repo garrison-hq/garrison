@@ -183,14 +183,22 @@ func runDirective(line, ticketID string, exitCode *int) error {
 
 	case "#write-env-to-file":
 		// M2.3: write the value of an environment variable to a file in cwd.
-		// Used by m2_3_vault_uses_env_var.ndjson to prove the supervisor
-		// injected the vaulted secret into the subprocess environment.
 		// Format: #write-env-to-file VARNAME FILENAME
 		if len(fields) < 3 {
 			return fmt.Errorf("#write-env-to-file requires VARNAME FILENAME")
 		}
 		value := os.Getenv(fields[1])
 		return os.WriteFile(fields[2], []byte(value), 0o644)
+
+	case "#dump-env-to-file":
+		// M2.3 T013: dump all environment variable names (KEY=VALUE) to a
+		// file in cwd. Used by Rule 2 tests to verify no vault-related env
+		// var was injected into the subprocess environment.
+		// Format: #dump-env-to-file FILENAME
+		if len(fields) < 2 {
+			return fmt.Errorf("#dump-env-to-file requires FILENAME")
+		}
+		return os.WriteFile(fields[1], []byte(strings.Join(os.Environ(), "\n")), 0o644)
 	case "#":
 		// Pure comment.
 		return nil

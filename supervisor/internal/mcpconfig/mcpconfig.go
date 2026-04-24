@@ -40,6 +40,23 @@ var ErrVaultMCPBanned = errors.New("mcpconfig: vault-pattern server banned")
 // MCP server in the config (Rule 3 / FR-410 / D2.4). Case-insensitive match.
 var bannedMCPNamePatterns = []string{"vault", "secret", "infisical"}
 
+// CheckExtraServers is a pre-spawn guard: it parses extraServersJSON (the raw
+// value of agents.mcp_config) and runs RejectVaultServers on the extra entries
+// alone. Call this BEFORE the vault fetch so Rule 3 can abort without touching
+// Infisical at all (spec D4.5 ordering / T013 assertion). Returns
+// ErrVaultMCPBanned wrapping the offending server name, nil if clean.
+// A nil/empty/"{}" input is always clean.
+func CheckExtraServers(extraServersJSON []byte) error {
+	if len(extraServersJSON) == 0 || string(extraServersJSON) == "{}" {
+		return nil
+	}
+	var extra map[string]mcpServerSpec
+	if err := json.Unmarshal(extraServersJSON, &extra); err != nil {
+		return fmt.Errorf("mcpconfig: parse extraServersJSON for Rule 3 pre-check: %w", err)
+	}
+	return RejectVaultServers(mcpConfig{MCPServers: extra})
+}
+
 // RejectVaultServers checks the composed MCP config for any server whose name
 // matches a banned pattern. Returns a non-nil error naming the offending key
 // on the first match; nil means no banned server found.
@@ -139,12 +156,18 @@ func (fp FinalizeParams) enabled() bool {
 // entry is added to mcpServers per plan §"MCP config extension" /
 // internal/mempalace.MCPServerSpec. FR-204 / FR-205 (additive; postgres
 // entry untouched).
-func Write(ctx context.Context, dir string, instanceID pgtype.UUID, supervisorBin, dsn string, mempalaceParams MempalaceParams, finalizeParams FinalizeParams) (string, error) {
-	return WriteWithOps(ctx, DefaultOps, dir, instanceID, supervisorBin, dsn, mempalaceParams, finalizeParams)
+//
+// M2.3 extension (T013): extraServersJSON is the raw JSON from
+// agents.mcp_config (a JSONB map[name]→mcpServerSpec). If non-nil and
+// non-empty, those entries are merged into the config before Rule 3
+// (RejectVaultServers) runs. This allows the database to hold
+// agent-specific servers; Rule 3 catches any that match vault patterns.
+func Write(ctx context.Context, dir string, instanceID pgtype.UUID, supervisorBin, dsn string, mempalaceParams MempalaceParams, finalizeParams FinalizeParams, extraServersJSON []byte) (string, error) {
+	return WriteWithOps(ctx, DefaultOps, dir, instanceID, supervisorBin, dsn, mempalaceParams, finalizeParams, extraServersJSON)
 }
 
 // WriteWithOps is the testable form. Production callers use Write.
-func WriteWithOps(_ context.Context, ops fileOps, dir string, instanceID pgtype.UUID, supervisorBin, dsn string, mempalaceParams MempalaceParams, finalizeParams FinalizeParams) (string, error) {
+func WriteWithOps(_ context.Context, ops fileOps, dir string, instanceID pgtype.UUID, supervisorBin, dsn string, mempalaceParams MempalaceParams, finalizeParams FinalizeParams, extraServersJSON []byte) (string, error) {
 	if dir == "" {
 		return "", errors.New("mcpconfig: dir is empty")
 	}
@@ -192,6 +215,19 @@ func WriteWithOps(_ context.Context, ops fileOps, dir string, instanceID pgtype.
 				"GARRISON_AGENT_INSTANCE_ID": finalizeParams.AgentInstanceID,
 				"GARRISON_DATABASE_URL":      finalizeParams.DatabaseURL,
 			},
+		}
+	}
+
+	// M2.3 T013: merge agent-specific servers from agents.mcp_config before
+	// Rule 3 runs. An agent may declare additional MCP servers in its DB row;
+	// any vault-pattern name among them triggers ExitVaultMCPInConfig.
+	if len(extraServersJSON) > 0 && string(extraServersJSON) != "{}" {
+		var extra map[string]mcpServerSpec
+		if err := json.Unmarshal(extraServersJSON, &extra); err != nil {
+			return "", fmt.Errorf("mcpconfig: parse extraServersJSON: %w", err)
+		}
+		for name, spec := range extra {
+			servers[name] = spec
 		}
 	}
 

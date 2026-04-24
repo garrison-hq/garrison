@@ -30,7 +30,7 @@ func TestWriteHappyPath(t *testing.T) {
 	dir := t.TempDir()
 	id := mustUUID(t, "11111111-1111-4111-8111-111111111111")
 
-	path, err := Write(context.Background(), dir, id, "/usr/local/bin/supervisor", "postgres://roonly@localhost/garrison", MempalaceParams{}, FinalizeParams{})
+	path, err := Write(context.Background(), dir, id, "/usr/local/bin/supervisor", "postgres://roonly@localhost/garrison", MempalaceParams{}, FinalizeParams{}, nil)
 	if err != nil {
 		t.Fatalf("Write: %v", err)
 	}
@@ -85,11 +85,11 @@ func TestWriteIsolationAcrossInvocations(t *testing.T) {
 	idA := mustUUID(t, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
 	idB := mustUUID(t, "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
 
-	pathA, err := Write(context.Background(), dir, idA, "/bin/supA", "dsnA", MempalaceParams{}, FinalizeParams{})
+	pathA, err := Write(context.Background(), dir, idA, "/bin/supA", "dsnA", MempalaceParams{}, FinalizeParams{}, nil)
 	if err != nil {
 		t.Fatalf("write A: %v", err)
 	}
-	pathB, err := Write(context.Background(), dir, idB, "/bin/supB", "dsnB", MempalaceParams{}, FinalizeParams{})
+	pathB, err := Write(context.Background(), dir, idB, "/bin/supB", "dsnB", MempalaceParams{}, FinalizeParams{}, nil)
 	if err != nil {
 		t.Fatalf("write B: %v", err)
 	}
@@ -129,7 +129,7 @@ func TestRemoveMissingFile(t *testing.T) {
 func TestRemoveRealFile(t *testing.T) {
 	dir := t.TempDir()
 	id := mustUUID(t, "22222222-2222-4222-8222-222222222222")
-	path, err := Write(context.Background(), dir, id, "/bin/sup", "dsn", MempalaceParams{}, FinalizeParams{})
+	path, err := Write(context.Background(), dir, id, "/bin/sup", "dsn", MempalaceParams{}, FinalizeParams{}, nil)
 	if err != nil {
 		t.Fatalf("Write: %v", err)
 	}
@@ -169,7 +169,7 @@ func TestWriteReturnsErrorOnDiskFull(t *testing.T) {
 	ops := &fakeOps{writeErr: syscall.ENOSPC}
 	id := mustUUID(t, "33333333-3333-4333-8333-333333333333")
 
-	_, err := WriteWithOps(context.Background(), ops, "/var/lib/garrison/mcp", id, "/bin/sup", "dsn", MempalaceParams{}, FinalizeParams{})
+	_, err := WriteWithOps(context.Background(), ops, "/var/lib/garrison/mcp", id, "/bin/sup", "dsn", MempalaceParams{}, FinalizeParams{}, nil)
 	if err == nil {
 		t.Fatalf("expected error, got nil")
 	}
@@ -190,7 +190,7 @@ func TestWriteReturnsErrorOnDiskFull(t *testing.T) {
 func TestWriteReturnsErrorOnPermissionDenied(t *testing.T) {
 	ops := &fakeOps{writeErr: syscall.EACCES}
 	id := mustUUID(t, "44444444-4444-4444-8444-444444444444")
-	_, err := WriteWithOps(context.Background(), ops, "/var/lib/garrison/mcp", id, "/bin/sup", "dsn", MempalaceParams{}, FinalizeParams{})
+	_, err := WriteWithOps(context.Background(), ops, "/var/lib/garrison/mcp", id, "/bin/sup", "dsn", MempalaceParams{}, FinalizeParams{}, nil)
 	if err == nil || !errors.Is(err, syscall.EACCES) {
 		t.Fatalf("expected EACCES-wrapped error, got %v", err)
 	}
@@ -223,7 +223,7 @@ func TestWritePostgresPlusMempalace(t *testing.T) {
 		PalacePath:         "/palace",
 		DockerHost:         "tcp://garrison-docker-proxy:2375",
 	}
-	path, err := Write(context.Background(), dir, id, "/bin/sup", "dsn", mp, FinalizeParams{})
+	path, err := Write(context.Background(), dir, id, "/bin/sup", "dsn", mp, FinalizeParams{}, nil)
 	if err != nil {
 		t.Fatalf("Write: %v", err)
 	}
@@ -278,7 +278,7 @@ func TestWriteMempalaceEnvCarriesDockerHost(t *testing.T) {
 		PalacePath:         "/palace",
 		DockerHost:         "tcp://override:9999",
 	}
-	path, err := Write(context.Background(), dir, id, "/bin/sup", "dsn", mp, FinalizeParams{})
+	path, err := Write(context.Background(), dir, id, "/bin/sup", "dsn", mp, FinalizeParams{}, nil)
 	if err != nil {
 		t.Fatalf("Write: %v", err)
 	}
@@ -294,7 +294,7 @@ func TestWriteMempalaceEnvCarriesDockerHost(t *testing.T) {
 func TestWriteEmptyMempalaceParamsOmitsEntry(t *testing.T) {
 	dir := t.TempDir()
 	id := mustUUID(t, "77777777-7777-4777-8777-777777777777")
-	path, err := Write(context.Background(), dir, id, "/bin/sup", "dsn", MempalaceParams{}, FinalizeParams{})
+	path, err := Write(context.Background(), dir, id, "/bin/sup", "dsn", MempalaceParams{}, FinalizeParams{}, nil)
 	if err != nil {
 		t.Fatalf("Write: %v", err)
 	}
@@ -326,7 +326,7 @@ func TestBuildConfigIncludesFinalizeEntry(t *testing.T) {
 		AgentInstanceID: "a1b2c3d4-1111-2222-3333-444455556666",
 		DatabaseURL:     "postgres://garrison_agent_ro:pw@pg/garrison",
 	}
-	path, err := Write(context.Background(), dir, id, "/bin/sup", "dsn", mp, fp)
+	path, err := Write(context.Background(), dir, id, "/bin/sup", "dsn", mp, fp, nil)
 	if err != nil {
 		t.Fatalf("Write: %v", err)
 	}
@@ -365,7 +365,7 @@ func TestBuildConfigIncludesFinalizeEntry(t *testing.T) {
 func TestBuildConfigOmitsFinalizeEntryWhenParamsEmpty(t *testing.T) {
 	dir := t.TempDir()
 	id := mustUUID(t, "99999999-9999-4999-8999-999999999999")
-	path, err := Write(context.Background(), dir, id, "/bin/sup", "dsn", MempalaceParams{}, FinalizeParams{})
+	path, err := Write(context.Background(), dir, id, "/bin/sup", "dsn", MempalaceParams{}, FinalizeParams{}, nil)
 	if err != nil {
 		t.Fatalf("Write: %v", err)
 	}

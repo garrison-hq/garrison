@@ -27,6 +27,8 @@ var ErrAgentNotFound = errors.New("agents: no active agent for department+role")
 // The JSONB `skills` and `mcp_tools` columns are intentionally omitted —
 // M2.1 does not act on either (M3+ territory). `listens_for` is carried
 // because main.go wires event-handler registration off it in T014.
+// `mcp_config` is carried for M2.3 T013: Rule 3 checks agent-specific
+// MCP servers before spawn (FR-410 / D2.4).
 type Agent struct {
 	ID           pgtype.UUID
 	DepartmentID pgtype.UUID
@@ -35,6 +37,7 @@ type Agent struct {
 	Model        string
 	ListensFor   []string
 	PalaceWing   *string
+	McpConfig    []byte
 }
 
 // Querier is the narrow seam the cache depends on. *store.Queries satisfies
@@ -80,6 +83,7 @@ func NewCache(ctx context.Context, q Querier) (*Cache, error) {
 			Model:        r.Model,
 			ListensFor:   listensFor,
 			PalaceWing:   r.PalaceWing,
+			McpConfig:    r.McpConfig,
 		}
 	}
 	return &Cache{byDeptRole: m}, nil
