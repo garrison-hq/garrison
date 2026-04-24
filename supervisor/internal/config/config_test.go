@@ -37,6 +37,13 @@ var allEnvVars = []string{
 	"GARRISON_HYGIENE_DELAY",
 	"GARRISON_HYGIENE_SWEEP_INTERVAL",
 	"DOCKER_HOST",
+	// M2.3 additions
+	"GARRISON_INFISICAL_ADDR",
+	"GARRISON_INFISICAL_CLIENT_ID",
+	"GARRISON_INFISICAL_CLIENT_SECRET",
+	"GARRISON_INFISICAL_PROJECT_ID",
+	"GARRISON_INFISICAL_ENVIRONMENT",
+	"GARRISON_CUSTOMER_ID",
 }
 
 // clearAll unsets every GARRISON_* env var the config package reads, so a test
@@ -136,6 +143,11 @@ func realAgentEnv(t *testing.T) {
 	// M2.2: real-claude path requires the mempalace-role password.
 	t.Setenv("GARRISON_AGENT_MEMPALACE_PASSWORD", "secret-mp-pw")
 	t.Setenv("GARRISON_MCP_CONFIG_DIR", t.TempDir())
+	// M2.3: Infisical config; use GARRISON_CUSTOMER_ID to bypass the DB query.
+	t.Setenv("GARRISON_INFISICAL_ADDR", "http://garrison-infisical:8080")
+	t.Setenv("GARRISON_INFISICAL_CLIENT_ID", "test-client-id")
+	t.Setenv("GARRISON_INFISICAL_CLIENT_SECRET", "test-client-secret")
+	t.Setenv("GARRISON_CUSTOMER_ID", "00000000-0000-0000-0000-000000000001")
 
 	// Build an isolated $PATH containing fake claude + docker binaries so
 	// exec.LookPath succeeds without depending on the host having either
@@ -432,6 +444,11 @@ func TestM22AgentMempalaceDSNComposition(t *testing.T) {
 	t.Setenv("GARRISON_MCP_CONFIG_DIR", t.TempDir())
 	t.Setenv("GARRISON_CLAUDE_BIN", "/bin/true")
 	t.Setenv("GARRISON_DOCKER_BIN", "/bin/true")
+	// M2.3: Infisical config required on the real-Claude path.
+	t.Setenv("GARRISON_INFISICAL_ADDR", "http://garrison-infisical:8080")
+	t.Setenv("GARRISON_INFISICAL_CLIENT_ID", "test-id")
+	t.Setenv("GARRISON_INFISICAL_CLIENT_SECRET", "test-secret")
+	t.Setenv("GARRISON_CUSTOMER_ID", "00000000-0000-0000-0000-000000000001")
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -498,5 +515,69 @@ func TestConfigRejectsNegativeFinalizeTimeout(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "GARRISON_FINALIZE_WRITE_TIMEOUT") {
 		t.Errorf("error should name the env var: %v", err)
+	}
+}
+
+// TestLoadConfigInfisicalAddrRequired — M2.3 T006: GARRISON_INFISICAL_ADDR
+// must be set on the real-Claude path.
+func TestLoadConfigInfisicalAddrRequired(t *testing.T) {
+	realAgentEnv(t)
+	t.Setenv("GARRISON_INFISICAL_ADDR", "")
+
+	_, err := config.Load()
+	if err == nil {
+		t.Fatal("Load(): want error when GARRISON_INFISICAL_ADDR is unset")
+	}
+	if !strings.Contains(err.Error(), "GARRISON_INFISICAL_ADDR") {
+		t.Errorf("error = %v; want it to name GARRISON_INFISICAL_ADDR", err)
+	}
+}
+
+// TestLoadConfigInfisicalClientIDRequired — M2.3 T006.
+func TestLoadConfigInfisicalClientIDRequired(t *testing.T) {
+	realAgentEnv(t)
+	t.Setenv("GARRISON_INFISICAL_CLIENT_ID", "")
+
+	_, err := config.Load()
+	if err == nil {
+		t.Fatal("Load(): want error when GARRISON_INFISICAL_CLIENT_ID is unset")
+	}
+	if !strings.Contains(err.Error(), "GARRISON_INFISICAL_CLIENT_ID") {
+		t.Errorf("error = %v; want it to name GARRISON_INFISICAL_CLIENT_ID", err)
+	}
+}
+
+// TestLoadConfigInfisicalClientSecretRequired — M2.3 T006.
+func TestLoadConfigInfisicalClientSecretRequired(t *testing.T) {
+	realAgentEnv(t)
+	t.Setenv("GARRISON_INFISICAL_CLIENT_SECRET", "")
+
+	_, err := config.Load()
+	if err == nil {
+		t.Fatal("Load(): want error when GARRISON_INFISICAL_CLIENT_SECRET is unset")
+	}
+	if !strings.Contains(err.Error(), "GARRISON_INFISICAL_CLIENT_SECRET") {
+		t.Errorf("error = %v; want it to name GARRISON_INFISICAL_CLIENT_SECRET", err)
+	}
+}
+
+// TestLoadConfigCustomerIDFromEnvOverride — M2.3 T006: GARRISON_CUSTOMER_ID
+// bypasses the DB bootstrap query; accessor returns the parsed UUID.
+func TestLoadConfigCustomerIDFromEnvOverride(t *testing.T) {
+	realAgentEnv(t)
+	const rawUUID = "12345678-1234-1234-1234-123456789abc"
+	t.Setenv("GARRISON_CUSTOMER_ID", rawUUID)
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load(): unexpected error: %v", err)
+	}
+	got := cfg.CustomerID()
+	if !got.Valid {
+		t.Fatal("CustomerID().Valid = false; want true")
+	}
+	gotStr := got.String()
+	if gotStr != rawUUID {
+		t.Errorf("CustomerID() = %q; want %q", gotStr, rawUUID)
 	}
 }

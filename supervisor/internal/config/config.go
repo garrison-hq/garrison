@@ -4,6 +4,7 @@
 package config
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -14,6 +15,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 const (
@@ -117,6 +121,14 @@ type Config struct {
 
 	agentROPassword        string
 	agentMempalacePassword string
+
+	// M2.3 Infisical fields — unexported; accessed via accessor methods.
+	infisicalAddr          string
+	infisicalClientID      string
+	infisicalClientSecret  string
+	infisicalProjectID     string
+	infisicalEnvironment   string
+	customerID             pgtype.UUID
 }
 
 // AgentMempalaceDSN returns the SELECT-only DSN the hygiene checker uses.
@@ -150,6 +162,25 @@ func (c *Config) AgentRODSN() string {
 	u.User = url.UserPassword(AgentRORole, c.agentROPassword)
 	return u.String()
 }
+
+// InfisicalAddr returns the Infisical server URL (GARRISON_INFISICAL_ADDR).
+func (c *Config) InfisicalAddr() string { return c.infisicalAddr }
+
+// InfisicalClientID returns the Machine Identity client_id (GARRISON_INFISICAL_CLIENT_ID).
+func (c *Config) InfisicalClientID() string { return c.infisicalClientID }
+
+// InfisicalClientSecret returns the Machine Identity client_secret (GARRISON_INFISICAL_CLIENT_SECRET).
+func (c *Config) InfisicalClientSecret() string { return c.infisicalClientSecret }
+
+// InfisicalProjectID returns the Infisical project ID (GARRISON_INFISICAL_PROJECT_ID).
+func (c *Config) InfisicalProjectID() string { return c.infisicalProjectID }
+
+// InfisicalEnvironment returns the Infisical environment slug (GARRISON_INFISICAL_ENVIRONMENT).
+func (c *Config) InfisicalEnvironment() string { return c.infisicalEnvironment }
+
+// CustomerID returns the UUID of the operating entity's row in companies.
+// Resolved once at LoadConfig time via SELECT id FROM companies LIMIT 1.
+func (c *Config) CustomerID() pgtype.UUID { return c.customerID }
 
 // Load reads GARRISON_* env vars, applies defaults, and validates per plan.md
 // §"Config" and §"internal/config". It returns a descriptive error that names
@@ -349,7 +380,74 @@ func Load() (*Config, error) {
 	}
 	cfg.DockerBin = dockerBin
 
+	// M2.3: Infisical connection settings (D6.3 / FR-402).
+	infisicalAddr := os.Getenv("GARRISON_INFISICAL_ADDR")
+	if infisicalAddr == "" {
+		return nil, fmt.Errorf("config: required env var GARRISON_INFISICAL_ADDR is unset or empty")
+	}
+	cfg.infisicalAddr = infisicalAddr
+
+	infisicalClientID := os.Getenv("GARRISON_INFISICAL_CLIENT_ID")
+	if infisicalClientID == "" {
+		return nil, fmt.Errorf("config: required env var GARRISON_INFISICAL_CLIENT_ID is unset or empty")
+	}
+	cfg.infisicalClientID = infisicalClientID
+
+	infisicalClientSecret := os.Getenv("GARRISON_INFISICAL_CLIENT_SECRET")
+	if infisicalClientSecret == "" {
+		return nil, fmt.Errorf("config: required env var GARRISON_INFISICAL_CLIENT_SECRET is unset or empty")
+	}
+	cfg.infisicalClientSecret = infisicalClientSecret
+
+	if v := os.Getenv("GARRISON_INFISICAL_PROJECT_ID"); v != "" {
+		cfg.infisicalProjectID = v
+	}
+	if v := os.Getenv("GARRISON_INFISICAL_ENVIRONMENT"); v != "" {
+		cfg.infisicalEnvironment = v
+	}
+
+	// Resolve customer_id from companies table once at startup (OQ-2).
+	// GARRISON_CUSTOMER_ID overrides the DB query for environments where
+	// the UUID is known statically (e.g. Coolify env block). When unset,
+	// the one-shot pool is opened and closed before Load returns.
+	if v := os.Getenv("GARRISON_CUSTOMER_ID"); v != "" {
+		var id pgtype.UUID
+		if err := id.Scan(v); err != nil {
+			return nil, fmt.Errorf("config: GARRISON_CUSTOMER_ID %q is not a valid UUID: %w", v, err)
+		}
+		cfg.customerID = id
+	} else {
+		customerID, err := resolveCustomerID(cfg.DatabaseURL)
+		if err != nil {
+			return nil, err
+		}
+		cfg.customerID = customerID
+	}
+
 	return cfg, nil
+}
+
+// resolveCustomerID queries SELECT id FROM companies LIMIT 1.
+func resolveCustomerID(databaseURL string) (pgtype.UUID, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		return pgtype.UUID{}, fmt.Errorf("config: CustomerID resolution: open pool: %w", err)
+	}
+	defer pool.Close()
+
+	var id pgtype.UUID
+	err = pool.QueryRow(ctx, `SELECT id FROM companies LIMIT 1`).Scan(&id)
+	if err != nil {
+		// pgx returns pgx.ErrNoRows when no row exists.
+		return pgtype.UUID{}, fmt.Errorf("config: CustomerID resolution found zero rows in companies — run the M1 bootstrap seed first")
+	}
+	if !id.Valid {
+		return pgtype.UUID{}, fmt.Errorf("config: CustomerID resolution returned invalid UUID")
+	}
+	return id, nil
 }
 
 // resolveDockerBin honours GARRISON_DOCKER_BIN and otherwise falls back

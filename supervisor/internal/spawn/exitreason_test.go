@@ -5,6 +5,37 @@ import (
 	"testing"
 )
 
+// TestM23ExitReasonConstantsExistAndHaveCorrectValues asserts every M2.3
+// exit_reason constant has the exact snake_case string value mandated by
+// D7.1, FR-405, FR-407, and FR-410.
+func TestM23ExitReasonConstantsExistAndHaveCorrectValues(t *testing.T) {
+	want := map[string]string{
+		"ExitSecretLeakedInAgentMd": "secret_leaked_in_agent_md",
+		"ExitVaultMCPInConfig":      "vault_mcp_in_config",
+		"ExitVaultUnavailable":      "vault_unavailable",
+		"ExitVaultAuthExpired":      "vault_auth_expired",
+		"ExitVaultPermissionDenied": "vault_permission_denied",
+		"ExitVaultRateLimited":      "vault_rate_limited",
+		"ExitVaultSecretNotFound":   "vault_secret_not_found",
+		"ExitVaultAuditFailed":      "vault_audit_failed",
+	}
+	got := map[string]string{
+		"ExitSecretLeakedInAgentMd": ExitSecretLeakedInAgentMd,
+		"ExitVaultMCPInConfig":      ExitVaultMCPInConfig,
+		"ExitVaultUnavailable":      ExitVaultUnavailable,
+		"ExitVaultAuthExpired":      ExitVaultAuthExpired,
+		"ExitVaultPermissionDenied": ExitVaultPermissionDenied,
+		"ExitVaultRateLimited":      ExitVaultRateLimited,
+		"ExitVaultSecretNotFound":   ExitVaultSecretNotFound,
+		"ExitVaultAuditFailed":      ExitVaultAuditFailed,
+	}
+	for name, wantVal := range want {
+		if got[name] != wantVal {
+			t.Errorf("constant %s = %q, want %q", name, got[name], wantVal)
+		}
+	}
+}
+
 // TestFormatMCPFailureCanonical pins the canonical shape FR-108 emits into
 // agent_instances.exit_reason when an init-event MCP health check fails.
 func TestFormatMCPFailureCanonical(t *testing.T) {
