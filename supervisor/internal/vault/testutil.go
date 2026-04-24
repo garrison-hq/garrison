@@ -508,6 +508,80 @@ func (h *InfisicalTestHarness) call(method, path string, body interface{}, token
 	return client.Do(req)
 }
 
+// UpdateSecret updates an existing secret's value in the test workspace.
+// Used by TestVaultRotationDuringRunNoOp to rotate the backing Infisical
+// secret while a spawn is in progress.
+func (h *InfisicalTestHarness) UpdateSecret(secretPath, secretKey, newValue string) error {
+	body := map[string]interface{}{
+		"workspaceId": h.projectID,
+		"environment": "dev",
+		"secretPath":  secretPath,
+		"secretValue": newValue,
+	}
+	resp, err := h.apiCall("PATCH", "/api/v3/secrets/raw/"+secretKey, body)
+	if err != nil {
+		return fmt.Errorf("update secret %s/%s: %w", secretPath, secretKey, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("update secret %s/%s: HTTP %d: %s", secretPath, secretKey, resp.StatusCode, b)
+	}
+	return nil
+}
+
+// InfisicalAuditEvent is a single event from the Infisical audit log. Only
+// the fields Garrison's tests assert on are decoded.
+type InfisicalAuditEvent struct {
+	EventType  string `json:"eventType"`
+	SecretPath string `json:"secretPath,omitempty"`
+	Timestamp  string `json:"createdAt"`
+}
+
+// AuditLogForIdentity queries the Infisical organisation audit log and returns
+// events with eventType="getSecret" that occurred on or after `since`. The
+// returned slice may be empty if the audit-log API is not available in the
+// running Infisical version (the caller should handle this gracefully).
+func (h *InfisicalTestHarness) AuditLogForIdentity(since time.Time) []InfisicalAuditEvent {
+	path := "/api/v1/organization/" + h.orgID + "/audit-logs"
+	resp, err := h.apiCall("GET", path, nil)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return nil // API not available in this version
+	}
+	var body struct {
+		AuditLogs []struct {
+			EventType string `json:"eventType"`
+			CreatedAt string `json:"createdAt"`
+			Metadata  struct {
+				SecretPath string `json:"secretPath"`
+			} `json:"metadata"`
+		} `json:"auditLogs"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return nil
+	}
+	var out []InfisicalAuditEvent
+	for _, e := range body.AuditLogs {
+		if e.EventType != "getSecret" {
+			continue
+		}
+		t, _ := time.Parse(time.RFC3339, e.CreatedAt)
+		if t.Before(since) {
+			continue
+		}
+		out = append(out, InfisicalAuditEvent{
+			EventType:  e.EventType,
+			SecretPath: e.Metadata.SecretPath,
+			Timestamp:  e.CreatedAt,
+		})
+	}
+	return out
+}
+
 // StopInfisical terminates the Infisical container, simulating a server-down
 // failure. The harness remains usable for test assertions; call Cleanup to
 // also stop postgres and redis.

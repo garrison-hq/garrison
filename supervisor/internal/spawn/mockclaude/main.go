@@ -116,6 +116,9 @@ func main() {
 	for scanner.Scan() {
 		line := scanner.Text()
 		if strings.HasPrefix(line, "#") {
+			// Expand {{TICKET_ID}} in directive arguments so fixture files can
+			// reference the ticket ID in file paths and other directive params.
+			line = strings.ReplaceAll(line, "{{TICKET_ID}}", ticketID)
 			if err := runDirective(line, ticketID, &exitCode); err != nil {
 				fmt.Fprintf(os.Stderr, "mockclaude: directive %q: %v\n", line, err)
 				os.Exit(1)

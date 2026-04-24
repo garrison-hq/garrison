@@ -1,0 +1,11 @@
+# M2.3 T015 rotation-during-run fixture — long-running engineer spawn.
+# Sleeps 6s after init to give the test time to rotate the backing Infisical
+# secret, then writes the env-var value to a ticket-specific file so each
+# spawn's captured value can be asserted independently.
+# {{TICKET_ID}} substitution is applied to directive lines (main.go support).
+#init-mcp-servers [{"name":"postgres","status":"connected"},{"name":"mempalace","status":"connected"},{"name":"finalize","status":"connected"}]
+{"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","content":[{"type":"text","text":"Starting long-running task. Waiting before reading env var to allow rotation test to rotate the secret mid-run."}]}}
+#sleep 6s
+#write-env-to-file EXAMPLE_API_KEY vault_secret_{{TICKET_ID}}.txt
+#finalize-tool-use-ok 1 {"ticket_id":"{{TICKET_ID}}","outcome":"M2.3 rotation during run — wrote vault secret with ticket-specific filename","diary_entry":{"rationale":"The mock engineer captured the injected secret value during the subprocess lifetime. Secret rotation mid-run should not affect the running subprocess.","artifacts":["vault_secret_{{TICKET_ID}}.txt"],"blockers":[],"discoveries":[]},"kg_triples":[{"subject":"agent_mock","predicate":"rotation_noop","object":"ticket_{{TICKET_ID}}","valid_from":"now"}]}
+{"type":"result","subtype":"success","is_error":false,"duration_ms":7000,"duration_api_ms":200,"total_cost_usd":0.002,"stop_reason":"end_turn","terminal_reason":"completed","result":"Finalized after rotation window","session_id":"mock-session-m23-rotation","permission_denials":[]}
