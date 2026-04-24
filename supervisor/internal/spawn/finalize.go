@@ -37,6 +37,7 @@ import (
 	"github.com/garrison-hq/garrison/supervisor/internal/finalize"
 	"github.com/garrison-hq/garrison/supervisor/internal/mempalace"
 	"github.com/garrison-hq/garrison/supervisor/internal/store"
+	"github.com/garrison-hq/garrison/supervisor/internal/vault"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -140,6 +141,17 @@ func WriteFinalize(parentCtx context.Context, deps FinalizeWriteDeps, payload *f
 		}, logger)
 	}
 
+	// M2.3 T009: pattern-scanner hook (FR-418 / FR-419 / D7.3). Scan and
+	// redact secret patterns from the finalize payload fields before the
+	// MemPalace write so no raw credential ever reaches the palace drawer.
+	// Non-blocking: redact-and-warn only (never blocks the write per FR-419).
+	hygieneStatus := FinalizeDiaryHygieneStatus
+	if matched := scanAndRedactPayload(payload); len(matched) > 0 {
+		hygieneStatus = "suspected_secret_emitted"
+		logger.Warn("pattern scanner matched secrets in finalize payload; redacted before palace write",
+			"labels", matched)
+	}
+
 	// Step 1: MemPalace diary write. The serialization shape is per
 	// FR-263 + clarify Q6: `<ticket_objective>\n\n---\n<yaml>\n---\n\n<rationale>`.
 	body := serializeDiary(objective, meta.TicketID, payload, time.Now().UTC())
@@ -177,8 +189,9 @@ func WriteFinalize(parentCtx context.Context, deps FinalizeWriteDeps, payload *f
 		}, logger)
 	}
 
-	// Step 3: ticket_transitions insert with hygiene_status='clean'.
-	clean := FinalizeDiaryHygieneStatus
+	// Step 3: ticket_transitions insert. hygieneStatus is 'clean' unless the
+	// pattern scanner flagged secrets above (D7.3 / FR-419).
+	clean := hygieneStatus
 	transitionID, err := q.InsertTicketTransition(ctx, store.InsertTicketTransitionParams{
 		TicketID:                   meta.TicketID,
 		FromColumn:                 &meta.FromColumn,
@@ -442,4 +455,33 @@ func classifyCtxErr(ctx context.Context, defaultReason string) string {
 		return ExitFinalizeWriteTimeout
 	}
 	return defaultReason
+}
+
+// scanAndRedactPayload runs vault.ScanAndRedact over the finalize payload
+// fields named in FR-418 (rationale + kg_triple subject/predicate/object).
+// Each field is replaced with its redacted form in-place. The union of all
+// matched labels is returned so the caller can decide the hygiene_status.
+func scanAndRedactPayload(p *finalize.FinalizePayload) []vault.Label {
+	var matched []vault.Label
+
+	redacted, labels := vault.ScanAndRedact(p.DiaryEntry.Rationale)
+	p.DiaryEntry.Rationale = redacted
+	matched = append(matched, labels...)
+
+	for i := range p.KGTriples {
+		if redacted, labels := vault.ScanAndRedact(p.KGTriples[i].Subject); len(labels) > 0 {
+			p.KGTriples[i].Subject = redacted
+			matched = append(matched, labels...)
+		}
+		if redacted, labels := vault.ScanAndRedact(p.KGTriples[i].Predicate); len(labels) > 0 {
+			p.KGTriples[i].Predicate = redacted
+			matched = append(matched, labels...)
+		}
+		if redacted, labels := vault.ScanAndRedact(p.KGTriples[i].Object); len(labels) > 0 {
+			p.KGTriples[i].Object = redacted
+			matched = append(matched, labels...)
+		}
+	}
+
+	return matched
 }
