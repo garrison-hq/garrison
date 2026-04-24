@@ -45,6 +45,16 @@ const (
 	ActualTruncateMax = 100
 )
 
+// Format strings for the Expected / Actual fields of ValidationError
+// responses. Extracted so every constraint branch renders the same
+// phrasing, and to keep the single-source guarantee that Sonar's
+// go:S1192 rule prefers over repeated literals.
+const (
+	expectedStringMinLenFmt = "string with min length %d"
+	expectedStringMaxLenFmt = "string with max length %d"
+	actualNItemsFmt         = "%d items"
+)
+
 // ErrorType enumerates the response categories per FR-255.
 type ErrorType string
 
@@ -266,13 +276,13 @@ func Validate(raw json.RawMessage) (*FinalizePayload, *ValidationError) {
 		return nil, newValidationError(
 			"outcome", ConstraintMinLength,
 			fmt.Sprintf("outcome length %d is below minimum %d", n, OutcomeMin),
-			fmt.Sprintf("string with min length %d", OutcomeMin), p.Outcome,
+			fmt.Sprintf(expectedStringMinLenFmt, OutcomeMin), p.Outcome,
 		)
 	} else if n > OutcomeMax {
 		return nil, newValidationError(
 			"outcome", ConstraintMaxLength,
 			fmt.Sprintf("outcome length %d exceeds maximum %d", n, OutcomeMax),
-			fmt.Sprintf("string with max length %d", OutcomeMax), p.Outcome,
+			fmt.Sprintf(expectedStringMaxLenFmt, OutcomeMax), p.Outcome,
 		)
 	}
 
@@ -280,13 +290,13 @@ func Validate(raw json.RawMessage) (*FinalizePayload, *ValidationError) {
 		return nil, newValidationError(
 			"diary_entry.rationale", ConstraintMinLength,
 			fmt.Sprintf("rationale length %d is below minimum %d", n, RationaleMin),
-			fmt.Sprintf("string with min length %d", RationaleMin), p.DiaryEntry.Rationale,
+			fmt.Sprintf(expectedStringMinLenFmt, RationaleMin), p.DiaryEntry.Rationale,
 		)
 	} else if n > RationaleMax {
 		return nil, newValidationError(
 			"diary_entry.rationale", ConstraintMaxLength,
 			fmt.Sprintf("rationale length %d exceeds maximum %d", n, RationaleMax),
-			fmt.Sprintf("string with max length %d", RationaleMax), p.DiaryEntry.Rationale,
+			fmt.Sprintf(expectedStringMaxLenFmt, RationaleMax), p.DiaryEntry.Rationale,
 		)
 	}
 
@@ -305,14 +315,14 @@ func Validate(raw json.RawMessage) (*FinalizePayload, *ValidationError) {
 			"kg_triples", ConstraintMinItems,
 			fmt.Sprintf("kg_triples length %d is below minimum %d", n, KGTripleArrayMin),
 			fmt.Sprintf("array with min length %d", KGTripleArrayMin),
-			fmt.Sprintf("%d items", n),
+			fmt.Sprintf(actualNItemsFmt, n),
 		)
 	} else if n > KGTripleArrayMax {
 		return nil, newValidationError(
 			"kg_triples", ConstraintMaxItems,
 			fmt.Sprintf("kg_triples length %d exceeds maximum %d", n, KGTripleArrayMax),
 			fmt.Sprintf("array with max length %d", KGTripleArrayMax),
-			fmt.Sprintf("%d items", n),
+			fmt.Sprintf(actualNItemsFmt, n),
 		)
 	}
 
@@ -468,7 +478,7 @@ func validateStringArray(arr []string, field string) *ValidationError {
 			field, ConstraintMaxItems,
 			fmt.Sprintf("array length %d exceeds maximum %d", len(arr), ArtifactArrayMax),
 			fmt.Sprintf("array with max length %d", ArtifactArrayMax),
-			fmt.Sprintf("%d items", len(arr)),
+			fmt.Sprintf(actualNItemsFmt, len(arr)),
 		)
 	}
 	for i, s := range arr {
@@ -476,7 +486,7 @@ func validateStringArray(arr []string, field string) *ValidationError {
 			return newValidationError(
 				fmt.Sprintf("%s[%d]", field, i), ConstraintMaxLength,
 				fmt.Sprintf("string length %d exceeds maximum %d", len(s), ArtifactItemMax),
-				fmt.Sprintf("string with max length %d", ArtifactItemMax),
+				fmt.Sprintf(expectedStringMaxLenFmt, ArtifactItemMax),
 				s,
 			)
 		}
@@ -489,13 +499,13 @@ func validateTripleField(s, field string) *ValidationError {
 		return newValidationError(
 			field, ConstraintMinLength,
 			fmt.Sprintf("length %d is below minimum %d", n, TripleFieldMin),
-			fmt.Sprintf("string with min length %d", TripleFieldMin), s,
+			fmt.Sprintf(expectedStringMinLenFmt, TripleFieldMin), s,
 		)
 	} else if n > TripleFieldMax {
 		return newValidationError(
 			field, ConstraintMaxLength,
 			fmt.Sprintf("length %d exceeds maximum %d", n, TripleFieldMax),
-			fmt.Sprintf("string with max length %d", TripleFieldMax), s,
+			fmt.Sprintf(expectedStringMaxLenFmt, TripleFieldMax), s,
 		)
 	}
 	return nil

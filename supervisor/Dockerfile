@@ -48,7 +48,7 @@ ARG CLAUDE_PLATFORM=linux-x64-musl
 # would downgrade from HTTPS to HTTP. The ARG-supplied URLs are HTTPS by
 # default but could be overridden at build time; these flags make the
 # protocol constraint explicit rather than hope-based.
-RUN apk add --no-cache ca-certificates gnupg curl jq \
+RUN apk add --no-cache ca-certificates curl gnupg jq \
  && curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL "${CLAUDE_KEY_URL}" | gpg --import 2>&1 \
  && EXPECTED_FP=$(echo "${CLAUDE_KEY_FINGERPRINT}" | tr -d ' \t') \
  && ACTUAL_FP=$(gpg --fingerprint security@anthropic.com | tr -d ' \t\n') \
@@ -76,7 +76,7 @@ FROM alpine:3.20
 # garrison-docker-proxy sidecar (filtered docker socket). Used to exec
 # into garrison-mempalace for palace bootstrap, wake-up, hygiene palace
 # queries, and for Claude subprocesses spawning mempalace.mcp_server.
-RUN apk add --no-cache ca-certificates libgcc libstdc++ ripgrep docker-cli
+RUN apk add --no-cache ca-certificates docker-cli libgcc libstdc++ ripgrep
 COPY --from=build /out/supervisor /supervisor
 COPY --from=claude-install /work/claude /usr/local/bin/claude
 ENV USE_BUILTIN_RIPGREP=0 \
