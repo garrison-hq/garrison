@@ -81,6 +81,29 @@ func TestFirstKeywordSkipsCommentsAndWhitespace(t *testing.T) {
 	}
 }
 
+// TestNormalizeValueUUID pins the [16]byte → canonical UUID-string
+// conversion. pgx's default type map returns UUID columns as [16]byte,
+// which would JSON-serialise as a 16-integer array without this case.
+func TestNormalizeValueUUID(t *testing.T) {
+	got := normalizeValue([16]byte{
+		0xc0, 0xba, 0xb6, 0x55, 0x06, 0x75, 0x4e, 0x8a,
+		0xb5, 0xdd, 0xa6, 0xe3, 0xf2, 0xa2, 0xaf, 0x6a,
+	})
+	want := "c0bab655-0675-4e8a-b5dd-a6e3f2a2af6a"
+	if got != want {
+		t.Errorf("normalizeValue([16]byte) = %v (type %T); want %q", got, got, want)
+	}
+}
+
+// TestNormalizeValueBytesSlice pins the pre-existing []byte case so a
+// future refactor doesn't regress it while working on [16]byte.
+func TestNormalizeValueBytesSlice(t *testing.T) {
+	got := normalizeValue([]byte("hello"))
+	if got != "hello" {
+		t.Errorf("normalizeValue([]byte) = %v (type %T); want %q", got, got, "hello")
+	}
+}
+
 // TestFirstWordBasics pins the log-line helper's behaviour on the shapes
 // that actually show up in practice. Leading `(` at index 0 is treated as
 // part of the token (there's nothing before it to split on); otherwise

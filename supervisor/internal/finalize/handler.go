@@ -13,7 +13,7 @@ import (
 
 // Handler receives validated tool calls. It does NOT perform the atomic
 // write — that's the supervisor's job via internal/spawn.WriteFinalize
-// (T007). Handler's sole responsibilities:
+// (M2.2.1 T007). Handler's sole responsibilities:
 //
 //  1. Validate the payload against the schema (via tool.go::Validate).
 //  2. Query agent_instances to detect already-committed state (FR-260).
@@ -46,16 +46,39 @@ func NewHandler(pool *pgxpool.Pool, agentInstanceID pgtype.UUID, logger *slog.Lo
 	}
 }
 
-// ToolResult is the finalize_ticket response body per FR-254/FR-255.
-// `Ok` indicates whether the validation succeeded; on false, the error
-// fields are populated. `Attempt` is the handler-local counter value
-// at the time of the response (1-based).
+// ToolResult is the finalize_ticket response body per FR-254/FR-255
+// plus the M2.2.2 rich-error extensions per FR-301. `Ok` indicates
+// whether validation succeeded; on false, the error fields are
+// populated. `Attempt` is the handler-local counter value at the time
+// of the response (1-based).
+//
+// JSON-tag policy per plan §"`internal/finalize/handler.go`":
+//   - M2.2.1 fields (ErrorType, Field, Message) keep `,omitempty` so
+//     OK responses stay compact (backward compat with M2.2.1 test
+//     fixtures that parse the sparse shape).
+//   - Failure keeps `,omitempty` because OK responses don't carry a
+//     failure class — the JSON reads cleaner without it on success.
+//   - The remaining new fields (Line, Column, Excerpt, Constraint,
+//     Expected, Actual, Hint) drop `omitempty` so empty-string /
+//     zero-value fields serialize as `""` / `0` at the JSON layer
+//     per Clarification 2026-04-23 Q1's wire-shape-stability
+//     requirement. Agents parsing the error object find the same
+//     field set regardless of which Failure branch fired.
 type ToolResult struct {
 	Ok        bool      `json:"ok"`
 	Attempt   int       `json:"attempt"`
 	ErrorType ErrorType `json:"error_type,omitempty"`
 	Field     string    `json:"field,omitempty"`
 	Message   string    `json:"message,omitempty"`
+
+	Failure    Failure    `json:"failure,omitempty"`
+	Line       int        `json:"line"`
+	Column     int        `json:"column"`
+	Excerpt    string     `json:"excerpt"`
+	Constraint Constraint `json:"constraint"`
+	Expected   string     `json:"expected"`
+	Actual     string     `json:"actual"`
+	Hint       string     `json:"hint"`
 }
 
 // Handle validates one tools/call payload and returns the MCP content
@@ -71,15 +94,23 @@ func (h *Handler) Handle(ctx context.Context, rawArgs json.RawMessage) (json.Raw
 	// regardless of whether the repeated payload is schema-valid.
 	committed, err := h.checkAlreadyCommitted(ctx)
 	if err != nil {
-		// Database read failures surface as schema errors with a
-		// generic message — the agent can't do anything about a
-		// Postgres issue, but we don't leak internals.
+		// Database read failures surface as a FailureState rejection
+		// with a generic hint — the agent can't do anything about a
+		// Postgres issue, but we don't leak internals. M2.2.2: wire
+		// shape matches the other state path per Clarification Q3.
 		h.Logger.Error("finalize: already-committed check failed", "err", err,
 			"agent_instance_id", uuidString(h.AgentInstanceID))
-		return h.errorResult(ErrorTypeSchema, "", "internal error checking finalize state"), nil
+		verr := &ValidationError{
+			ErrorType: ErrorTypeSchema,
+			Field:     "",
+			Message:   "internal error checking finalize state",
+			Failure:   FailureState,
+			Hint:      "internal error checking finalize state; please retry",
+		}
+		return h.errorResult(verr), nil
 	}
 	if committed {
-		return h.errorResult(ErrorTypeSchema, "", "finalize_ticket already succeeded for this agent_instance"), nil
+		return h.stateRejectionResult(), nil
 	}
 
 	// Step 2: schema validation.
@@ -89,8 +120,10 @@ func (h *Handler) Handle(ctx context.Context, rawArgs json.RawMessage) (json.Raw
 			"agent_instance_id", uuidString(h.AgentInstanceID),
 			"attempt", h.attempts,
 			"error_type", verr.ErrorType,
-			"field", verr.Field)
-		return h.errorResult(verr.ErrorType, verr.Field, verr.Message), nil
+			"field", verr.Field,
+			"failure", verr.Failure,
+			"constraint", verr.Constraint)
+		return h.errorResult(verr), nil
 	}
 
 	// Step 3: success. The supervisor-side event observer in
@@ -128,13 +161,49 @@ func (h *Handler) okResult() json.RawMessage {
 	return mcpContentEnvelope(raw)
 }
 
-func (h *Handler) errorResult(t ErrorType, field, message string) json.RawMessage {
+// stateRejectionResult builds the already-committed (FR-260) response
+// per Clarification 2026-04-23 Q3. `failure="state"` distinguishes
+// this lifecycle objection from schema-shape validation and decode
+// errors; `constraint`, `expected`, `actual`, `line`, `column`,
+// `excerpt` are all empty/zero. The M2.2.1 `message` field carries
+// the same string as `hint` for Q9 backward compat.
+func (h *Handler) stateRejectionResult() json.RawMessage {
+	const msg = "finalize_ticket already succeeded for this agent_instance"
 	body := ToolResult{
 		Ok:        false,
 		Attempt:   h.attempts,
-		ErrorType: t,
-		Field:     field,
-		Message:   message,
+		ErrorType: ErrorTypeSchema,
+		Field:     "",
+		Message:   msg,
+		Failure:   FailureState,
+		Hint:      msg,
+	}
+	raw, _ := json.Marshal(body)
+	return mcpContentEnvelope(raw)
+}
+
+// errorResult builds a tool_result envelope from a populated
+// ValidationError. Copies all 11 fields into the ToolResult;
+// truncates Actual to ActualTruncateMax (100) chars per FR-303.
+func (h *Handler) errorResult(verr *ValidationError) json.RawMessage {
+	actual := verr.Actual
+	if len(actual) > ActualTruncateMax {
+		actual = actual[:ActualTruncateMax]
+	}
+	body := ToolResult{
+		Ok:         false,
+		Attempt:    h.attempts,
+		ErrorType:  verr.ErrorType,
+		Field:      verr.Field,
+		Message:    verr.Message,
+		Failure:    verr.Failure,
+		Line:       verr.Line,
+		Column:     verr.Column,
+		Excerpt:    verr.Excerpt,
+		Constraint: verr.Constraint,
+		Expected:   verr.Expected,
+		Actual:     actual,
+		Hint:       verr.Hint,
 	}
 	raw, _ := json.Marshal(body)
 	return mcpContentEnvelope(raw)

@@ -15,7 +15,15 @@
 # --- build stage ----------------------------------------------------------
 FROM golang:1.25-alpine AS build
 WORKDIR /src
-COPY . .
+# Copy only what `go build ./cmd/supervisor` needs. A bare `COPY . .` would
+# recursively pull in test fixtures, bin/, logs, and the top-level *_test.go
+# files — more surface than the build requires. `copy-migrations` in the
+# Makefile stages the repo-root SQL into cmd/supervisor/migrations/ before
+# `docker build` runs, so the migrations ride in under cmd/.
+COPY go.mod go.sum ./
+RUN go mod download
+COPY cmd/ ./cmd/
+COPY internal/ ./internal/
 ARG VERSION=dev
 RUN CGO_ENABLED=0 go build -ldflags="-X main.version=${VERSION}" -o /out/supervisor ./cmd/supervisor
 
@@ -35,21 +43,34 @@ ARG CLAUDE_KEY_URL=https://downloads.claude.ai/keys/claude-code.asc
 ARG CLAUDE_KEY_FINGERPRINT="31DD DE24 DDFA B679 F42D  7BD2 BAA9 29FF 1A7E CACE"
 ARG CLAUDE_PLATFORM=linux-x64-musl
 
-RUN apk add --no-cache ca-certificates gnupg curl jq \
- && curl -fsSL "${CLAUDE_KEY_URL}" | gpg --import 2>&1 \
+# Every network fetch below goes through a `safecurl` shell helper that
+# pins `--proto '=https' --proto-redir '=https' --tlsv1.2`, so the build
+# fails closed on any non-HTTPS URL — including a redirect that would
+# downgrade HTTPS to HTTP. The ARG-supplied URLs are HTTPS by default
+# but could be overridden at build time; the helper makes the protocol
+# constraint explicit rather than hope-based, and keeps each fetch
+# command short enough to read without horizontal scrolling.
+RUN apk add --no-cache ca-certificates curl gnupg jq \
+ && safecurl() { curl --proto '=https' --proto-redir '=https' --tlsv1.2 "$@"; } \
+ && safecurl -fsSL "${CLAUDE_KEY_URL}" | gpg --import 2>&1 \
  && EXPECTED_FP=$(echo "${CLAUDE_KEY_FINGERPRINT}" | tr -d ' \t') \
  && ACTUAL_FP=$(gpg --fingerprint security@anthropic.com | tr -d ' \t\n') \
  && (echo "${ACTUAL_FP}" | grep -q "${EXPECTED_FP}" \
-     || (echo "claude signing key fingerprint mismatch"; echo "expected: ${EXPECTED_FP}"; echo "actual:   ${ACTUAL_FP}"; exit 1)) \
+     || ( \
+       echo "claude signing key fingerprint mismatch"; \
+       echo "expected: ${EXPECTED_FP}"; \
+       echo "actual:   ${ACTUAL_FP}"; \
+       exit 1 \
+     )) \
  && mkdir -p /work && cd /work \
- && curl -fsSLO "${CLAUDE_RELEASES}/${CLAUDE_VERSION}/manifest.json" \
- && curl -fsSLO "${CLAUDE_RELEASES}/${CLAUDE_VERSION}/manifest.json.sig" \
+ && safecurl -fsSLO "${CLAUDE_RELEASES}/${CLAUDE_VERSION}/manifest.json" \
+ && safecurl -fsSLO "${CLAUDE_RELEASES}/${CLAUDE_VERSION}/manifest.json.sig" \
  && gpg --verify manifest.json.sig manifest.json \
  && BIN_NAME=$(jq -r ".platforms[\"${CLAUDE_PLATFORM}\"].binary" manifest.json) \
  && BIN_SHA=$(jq -r ".platforms[\"${CLAUDE_PLATFORM}\"].checksum" manifest.json) \
  && test -n "${BIN_NAME}" && test "${BIN_NAME}" != "null" \
  && test -n "${BIN_SHA}"  && test "${BIN_SHA}"  != "null" \
- && curl -fsSL "${CLAUDE_RELEASES}/${CLAUDE_VERSION}/${CLAUDE_PLATFORM}/${BIN_NAME}" -o claude \
+ && safecurl -fsSL "${CLAUDE_RELEASES}/${CLAUDE_VERSION}/${CLAUDE_PLATFORM}/${BIN_NAME}" -o claude \
  && echo "${BIN_SHA}  claude" | sha256sum -c \
  && chmod +x claude
 
@@ -63,12 +84,23 @@ FROM alpine:3.20
 # garrison-docker-proxy sidecar (filtered docker socket). Used to exec
 # into garrison-mempalace for palace bootstrap, wake-up, hygiene palace
 # queries, and for Claude subprocesses spawning mempalace.mcp_server.
-RUN apk add --no-cache ca-certificates libgcc libstdc++ ripgrep docker-cli
+RUN apk add --no-cache ca-certificates docker-cli libgcc libstdc++ ripgrep
 COPY --from=build /out/supervisor /supervisor
 COPY --from=claude-install /work/claude /usr/local/bin/claude
 ENV USE_BUILTIN_RIPGREP=0 \
     DISABLE_AUTOUPDATER=1 \
     GARRISON_CLAUDE_BIN=/usr/local/bin/claude \
     GARRISON_MCP_CONFIG_DIR=/var/lib/garrison/mcp
-RUN mkdir -p /var/lib/garrison/mcp && chmod 0750 /var/lib/garrison/mcp
+# Create a non-root user and own the MCP config dir. The supervisor reaches
+# Docker through garrison-docker-proxy over TCP (DOCKER_HOST=tcp://…) so it
+# does not need docker-group membership on the local socket. Keeping the
+# runtime non-privileged narrows the blast radius of a supervisor RCE even
+# though the socket-proxy's filter is the primary defence (see M2.2
+# vault-threat-model §"M2.2 deployment assumptions").
+RUN addgroup -S garrison \
+ && adduser -S -G garrison -H -s /sbin/nologin garrison \
+ && mkdir -p /var/lib/garrison/mcp \
+ && chown -R garrison:garrison /var/lib/garrison \
+ && chmod 0750 /var/lib/garrison/mcp
+USER garrison
 ENTRYPOINT ["/supervisor"]

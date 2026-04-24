@@ -37,6 +37,12 @@ jobs:
           go-version-file: supervisor/go.mod
           cache-dependency-path: supervisor/go.sum
       - run: make test
+      - name: Upload unit coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-coverage
+          path: supervisor/coverage.out
+          if-no-files-found: error
 
   test-integration:
     name: test (integration)
@@ -51,6 +57,12 @@ jobs:
           go-version-file: supervisor/go.mod
           cache-dependency-path: supervisor/go.sum
       - run: make test-integration
+      - name: Upload integration coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-coverage
+          path: supervisor/int-coverage.out
+          if-no-files-found: error
 
   test-chaos:
     name: test (chaos)
@@ -80,3 +92,41 @@ jobs:
           cache-dependency-path: supervisor/go.sum
       - run: make build
       - run: ./bin/supervisor --version
+
+  sonarcloud:
+    name: SonarCloud scan
+    runs-on: ubuntu-latest
+    # Needs both test suites so the scan sees merged unit + integration
+    # coverage. If either fails, Sonar doesn't run — better than posting
+    # a stale coverage number.
+    needs: [test-unit, test-integration]
+    steps:
+      # fetch-depth 0 gives Sonar full git history so blame-based
+      # new-code detection and authorship work correctly.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # Download both coverage profiles produced by the test jobs. Sonar
+      # reads them from supervisor/coverage.out and supervisor/
+      # int-coverage.out per sonar-project.properties.
+      - name: Download unit coverage
+        uses: actions/download-artifact@v4
+        with:
+          name: unit-coverage
+          path: supervisor
+      - name: Download integration coverage
+        uses: actions/download-artifact@v4
+        with:
+          name: integration-coverage
+          path: supervisor
+      # Pinned to the full commit SHA of v5.0.0 per SonarQube's own
+      # githubactions:S7637 rule. The tag-form (`@v5.0.0`) would let a
+      # compromised publisher silently retag to a malicious commit.
+      # v5.0.0 is a thin redirect to SonarSource/sonarqube-scan-action@v5
+      # and emits a deprecation warning; the scan itself still runs. If
+      # SonarCloud's automatic analysis is enabled on this project, disable
+      # it in the Sonar UI before relying on this CI job — the two analysis
+      # modes are mutually exclusive.
+      - uses: SonarSource/sonarcloud-github-action@ffc3010689be73b8e5ae0c57ce35968afd7909e8 # v5.0.0
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}

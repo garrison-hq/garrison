@@ -284,10 +284,10 @@ func (s *server) runQuery(ctx context.Context, sql string) jsonRPCResponse {
 	if err := rows.Err(); err != nil {
 		return jsonRPCResponse{Error: &jsonRPCError{Code: errCodeInternal, Message: err.Error()}}
 	}
-	return jsonRPCResponse{Result: map[string]any{
+	return toolResultOK(map[string]any{
 		"rows":      out,
 		"truncated": truncated,
-	}}
+	})
 }
 
 func (s *server) runExplain(ctx context.Context, sql string) jsonRPCResponse {
@@ -313,7 +313,28 @@ func (s *server) runExplain(ctx context.Context, sql string) jsonRPCResponse {
 	if err := rows.Err(); err != nil {
 		return jsonRPCResponse{Error: &jsonRPCError{Code: errCodeInternal, Message: err.Error()}}
 	}
-	return jsonRPCResponse{Result: map[string]any{"plan": plan}}
+	return toolResultOK(map[string]any{"plan": plan})
+}
+
+// toolResultOK wraps a domain payload in MCP's CallToolResult envelope —
+// the shape `tools/call` requires per MCP 2024-11-05. The payload is
+// JSON-encoded into a single text content item so the caller can parse
+// it back into the structured fields (`rows`/`truncated` for query,
+// `plan` for explain). Without this wrapper, Claude Code's MCP client
+// sees no `content` array and renders the tool_result as
+// "(mcp__postgres__query completed with no output)" — which reproduced
+// as every successful pgmcp call being invisible to the agent.
+func toolResultOK(payload map[string]any) jsonRPCResponse {
+	buf, err := json.Marshal(payload)
+	if err != nil {
+		return jsonRPCResponse{Error: &jsonRPCError{Code: errCodeInternal, Message: err.Error()}}
+	}
+	return jsonRPCResponse{Result: map[string]any{
+		"content": []any{
+			map[string]any{"type": "text", "text": string(buf)},
+		},
+		"isError": false,
+	}}
 }
 
 // normalizeValue flattens pgx-returned values into JSON-friendly forms.
@@ -323,6 +344,12 @@ func normalizeValue(v any) any {
 	switch x := v.(type) {
 	case []byte:
 		return string(x)
+	case [16]byte:
+		// pgx's default type map returns UUID columns as a fixed-size
+		// byte array, not a slice. Without this case the value would
+		// be JSON-serialised as an integer list, which agents can't
+		// round-trip into follow-up queries.
+		return fmt.Sprintf("%x-%x-%x-%x-%x", x[0:4], x[4:6], x[6:8], x[8:10], x[10:16])
 	default:
 		return v
 	}

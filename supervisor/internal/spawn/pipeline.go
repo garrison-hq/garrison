@@ -569,19 +569,27 @@ func Adjudicate(result Result, wait WaitDetail, helloTxtOK bool, finalize Finali
 		return "failed", FormatSignalled(wait.Signal)
 	case !result.ResultSeen:
 		return "failed", ExitNoResult
-	case result.IsError:
-		return "failed", ExitClaudeError
 	case result.ResultSeen && isBudgetTerminalReason(result.TerminalReason):
-		// M2.2 / FR-220: terminal result reports the --max-budget-usd
-		// was exceeded. Happens with is_error=false when Claude wraps
-		// up mid-turn under a budget ceiling; kept ABOVE the hello.txt
-		// check because a truncated run shouldn't be re-classified as
-		// acceptance_failed on a missing artefact — it's a cost issue.
+		// M2.2.2 FR-306: budget signal beats IsError when both apply.
+		// Claude's is_error=true + terminal_reason="error_max_budget_usd"
+		// combination classifies as budget_exceeded (the cost root
+		// cause) rather than claude_error (the symptom). Pre-M2.2.2
+		// this check ran AFTER result.IsError, which hid the cost
+		// signal under the generic claude_error bucket — M2.2.1's
+		// live-run append documented the bug.
+		//
+		// The original M2.2 / FR-220 rationale still applies for
+		// is_error=false + budget-terminal-reason: when Claude wraps
+		// up mid-turn under a budget ceiling, we still classify as
+		// budget_exceeded here (kept ABOVE the hello.txt check
+		// because a truncated run shouldn't be re-classified as
+		// acceptance_failed on a missing artefact — it's a cost issue).
 		// The exact TerminalReason string on 2.1.117 is not spike-pinned;
 		// case-insensitive substring match on "budget" is the defensive
-		// shim per plan §"Error vocabulary". Real-Claude observations
-		// feed back into a tighter enum post-M2.2.
+		// shim per plan §"Error vocabulary".
 		return "failed", ExitBudgetExceeded
+	case result.IsError:
+		return "failed", ExitClaudeError
 	case finalize.Expected && !finalize.Committed:
 		// M2.2.1 (T002 / US5): the role was expected to finalize but the
 		// subprocess exited cleanly without a successful finalize commit.

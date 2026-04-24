@@ -8,6 +8,11 @@
 // the server's only responsibility is schema validation and rejecting
 // double-finalize attempts by querying agent_instances (FR-260). See
 // plan §"New package internal/finalize" for the full shape.
+//
+// M2.2.2 extends the error-response layer with richer fields
+// (Failure/Line/Column/Excerpt/Constraint/Expected/Actual/Hint per
+// FR-301) so agents can diagnose + retry schema rejections. The
+// schema itself is unchanged (FR-321).
 package finalize
 
 import (
@@ -34,6 +39,20 @@ const (
 	KGTripleArrayMax = 100
 	TripleFieldMin   = 3
 	TripleFieldMax   = 500
+
+	// ActualTruncateMax caps how long an Actual field can be in a
+	// tool_result envelope. Applied by the handler per FR-303.
+	ActualTruncateMax = 100
+)
+
+// Format strings for the Expected / Actual fields of ValidationError
+// responses. Extracted so every constraint branch renders the same
+// phrasing, and to keep the single-source guarantee that Sonar's
+// go:S1192 rule prefers over repeated literals.
+const (
+	expectedStringMinLenFmt = "string with min length %d"
+	expectedStringMaxLenFmt = "string with max length %d"
+	actualNItemsFmt         = "%d items"
 )
 
 // ErrorType enumerates the response categories per FR-255.
@@ -46,14 +65,56 @@ const (
 	ErrorTypeBudgetExhausted ErrorType = "budget_exhausted"
 )
 
-// ValidationError is the structured reason a payload was rejected. Field
-// is a JSON path (e.g. "diary_entry.rationale") or empty for non-field-
-// scoped errors. The handler returns these as MCP tool_result payloads;
-// the agent can correct its next attempt from the error's contents.
+// Failure narrows ValidationError into one of three classes per
+// Clarifications 2026-04-23 Q1 + Q3. Decode = JSON broken; validation
+// = payload shape wrong; state = server refuses on lifecycle grounds
+// (already-committed, FR-260).
+type Failure string
+
+const (
+	FailureDecode     Failure = "decode"
+	FailureValidation Failure = "validation"
+	FailureState      Failure = "state"
+)
+
+// Constraint enumerates the validation-failure subtypes per FR-303.
+// Empty (ConstraintNone) for FailureDecode and FailureState responses.
+type Constraint string
+
+const (
+	ConstraintNone         Constraint = ""
+	ConstraintRequired     Constraint = "required"
+	ConstraintMinLength    Constraint = "min_length"
+	ConstraintMaxLength    Constraint = "max_length"
+	ConstraintMinItems     Constraint = "min_items"
+	ConstraintMaxItems     Constraint = "max_items"
+	ConstraintTypeMismatch Constraint = "type_mismatch"
+	ConstraintFormat       Constraint = "format"
+)
+
+// ValidationError is the structured reason a payload was rejected.
+// Field is a JSON path (e.g. "diary_entry.rationale") or empty for
+// non-field-scoped errors. The handler returns these as MCP
+// tool_result payloads; the agent can correct its next attempt from
+// the error's contents.
+//
+// M2.2.1 fields: ErrorType, Field, Message (preserved verbatim for
+// backward compat per context §"Binding questions" Q9).
+// M2.2.2 additions: Failure, Line, Column, Excerpt, Constraint,
+// Expected, Actual, Hint — see FR-301.
 type ValidationError struct {
 	ErrorType ErrorType
 	Field     string
 	Message   string
+
+	Failure    Failure
+	Line       int        // 1-based; 0 when not applicable
+	Column     int        // 1-based; 0 when not applicable
+	Excerpt    string     // <=40 source bytes; empty when N/A
+	Constraint Constraint // empty for decode + state
+	Expected   string     // empty for decode + state
+	Actual     string     // full value; handler truncates per FR-303
+	Hint       string     // non-empty on every error per FR-305
 }
 
 func (v *ValidationError) Error() string {
@@ -180,8 +241,12 @@ func ToolDescriptor() map[string]any {
 
 // Validate runs the hand-written type-switch validator over the raw
 // JSON arguments the MCP tools/call carries. Returns the populated
-// FinalizePayload (with "now" substituted) on success, or a
+// FinalizePayload (with "now" substituted) on success, or a populated
 // ValidationError pointing at the first field that failed.
+//
+// Every error-path constructs the full M2.2.2 rich-error shape (FR-301)
+// — Failure class, Constraint name, human-readable Expected/Actual,
+// and a rendered Hint string — before returning.
 //
 // "now" substitution happens here per plan §"internal/finalize/tool.go >
 // valid_from literal substitution" — downstream code sees only
@@ -189,34 +254,50 @@ func ToolDescriptor() map[string]any {
 func Validate(raw json.RawMessage) (*FinalizePayload, *ValidationError) {
 	var p rawPayload
 	if err := json.Unmarshal(raw, &p); err != nil {
-		return nil, &ValidationError{
-			ErrorType: ErrorTypeSchema,
-			Field:     "",
-			Message:   "arguments are not a valid JSON object: " + err.Error(),
-		}
+		return nil, newDecodeOrTypeError(raw, err)
 	}
 
 	if p.TicketID == "" {
-		return nil, &ValidationError{ErrorType: ErrorTypeSchema, Field: "ticket_id", Message: "ticket_id is required"}
+		return nil, newValidationError(
+			"ticket_id", ConstraintRequired,
+			"ticket_id is required",
+			"non-empty UUID string", "",
+		)
 	}
 	if !uuidRe.MatchString(p.TicketID) {
-		return nil, &ValidationError{ErrorType: ErrorTypeSchema, Field: "ticket_id", Message: "ticket_id is not a valid UUID"}
+		return nil, newValidationError(
+			"ticket_id", ConstraintFormat,
+			"ticket_id is not a valid UUID",
+			"UUID (8-4-4-4-12 hex)", p.TicketID,
+		)
 	}
 
 	if n := len(p.Outcome); n < OutcomeMin {
-		return nil, &ValidationError{ErrorType: ErrorTypeSchema, Field: "outcome",
-			Message: fmt.Sprintf("outcome length %d is below minimum %d", n, OutcomeMin)}
+		return nil, newValidationError(
+			"outcome", ConstraintMinLength,
+			fmt.Sprintf("outcome length %d is below minimum %d", n, OutcomeMin),
+			fmt.Sprintf(expectedStringMinLenFmt, OutcomeMin), p.Outcome,
+		)
 	} else if n > OutcomeMax {
-		return nil, &ValidationError{ErrorType: ErrorTypeSchema, Field: "outcome",
-			Message: fmt.Sprintf("outcome length %d exceeds maximum %d", n, OutcomeMax)}
+		return nil, newValidationError(
+			"outcome", ConstraintMaxLength,
+			fmt.Sprintf("outcome length %d exceeds maximum %d", n, OutcomeMax),
+			fmt.Sprintf(expectedStringMaxLenFmt, OutcomeMax), p.Outcome,
+		)
 	}
 
 	if n := len(p.DiaryEntry.Rationale); n < RationaleMin {
-		return nil, &ValidationError{ErrorType: ErrorTypeSchema, Field: "diary_entry.rationale",
-			Message: fmt.Sprintf("rationale length %d is below minimum %d", n, RationaleMin)}
+		return nil, newValidationError(
+			"diary_entry.rationale", ConstraintMinLength,
+			fmt.Sprintf("rationale length %d is below minimum %d", n, RationaleMin),
+			fmt.Sprintf(expectedStringMinLenFmt, RationaleMin), p.DiaryEntry.Rationale,
+		)
 	} else if n > RationaleMax {
-		return nil, &ValidationError{ErrorType: ErrorTypeSchema, Field: "diary_entry.rationale",
-			Message: fmt.Sprintf("rationale length %d exceeds maximum %d", n, RationaleMax)}
+		return nil, newValidationError(
+			"diary_entry.rationale", ConstraintMaxLength,
+			fmt.Sprintf("rationale length %d exceeds maximum %d", n, RationaleMax),
+			fmt.Sprintf(expectedStringMaxLenFmt, RationaleMax), p.DiaryEntry.Rationale,
+		)
 	}
 
 	if err := validateStringArray(p.DiaryEntry.Artifacts, "diary_entry.artifacts"); err != nil {
@@ -230,11 +311,19 @@ func Validate(raw json.RawMessage) (*FinalizePayload, *ValidationError) {
 	}
 
 	if n := len(p.KGTriples); n < KGTripleArrayMin {
-		return nil, &ValidationError{ErrorType: ErrorTypeSchema, Field: "kg_triples",
-			Message: fmt.Sprintf("kg_triples length %d is below minimum %d", n, KGTripleArrayMin)}
+		return nil, newValidationError(
+			"kg_triples", ConstraintMinItems,
+			fmt.Sprintf("kg_triples length %d is below minimum %d", n, KGTripleArrayMin),
+			fmt.Sprintf("array with min length %d", KGTripleArrayMin),
+			fmt.Sprintf(actualNItemsFmt, n),
+		)
 	} else if n > KGTripleArrayMax {
-		return nil, &ValidationError{ErrorType: ErrorTypeSchema, Field: "kg_triples",
-			Message: fmt.Sprintf("kg_triples length %d exceeds maximum %d", n, KGTripleArrayMax)}
+		return nil, newValidationError(
+			"kg_triples", ConstraintMaxItems,
+			fmt.Sprintf("kg_triples length %d exceeds maximum %d", n, KGTripleArrayMax),
+			fmt.Sprintf("array with max length %d", KGTripleArrayMax),
+			fmt.Sprintf(actualNItemsFmt, n),
+		)
 	}
 
 	now := time.Now().UTC()
@@ -270,15 +359,136 @@ func Validate(raw json.RawMessage) (*FinalizePayload, *ValidationError) {
 	}, nil
 }
 
+// newDecodeOrTypeError classifies a `json.Unmarshal` failure. A
+// *json.UnmarshalTypeError is a schema-shape error (FailureValidation
+// + ConstraintTypeMismatch), not a syntax failure — the JSON parsed
+// but a field's Go type didn't match. Everything else is treated as a
+// decode error with position info from decodePosition().
+func newDecodeOrTypeError(raw []byte, err error) *ValidationError {
+	if utErr, ok := err.(*json.UnmarshalTypeError); ok {
+		verr := &ValidationError{
+			ErrorType:  ErrorTypeSchema,
+			Field:      utErr.Field,
+			Message:    "type mismatch: " + utErr.Error(),
+			Failure:    FailureValidation,
+			Constraint: ConstraintTypeMismatch,
+			Expected:   utErr.Type.String(),
+			Actual:     utErr.Value,
+		}
+		verr.Hint = renderHint(verr)
+		return verr
+	}
+
+	line, col, excerpt := 1, 1, ""
+	if synErr, ok := err.(*json.SyntaxError); ok {
+		line, col, excerpt = decodePosition(raw, synErr.Offset)
+	}
+	verr := &ValidationError{
+		ErrorType: ErrorTypeSchema,
+		Field:     "",
+		Message:   "arguments are not a valid JSON object: " + err.Error(),
+		Failure:   FailureDecode,
+		Line:      line,
+		Column:    col,
+		Excerpt:   excerpt,
+	}
+	verr.Hint = renderHint(verr)
+	return verr
+}
+
+// newValidationError builds a FailureValidation-class ValidationError
+// with Hint rendered from the (Field, Constraint, Expected, Actual)
+// tuple. Keeps the Validate() switch legible — one line per rejection
+// site instead of nine.
+func newValidationError(field string, constraint Constraint, message, expected, actual string) *ValidationError {
+	verr := &ValidationError{
+		ErrorType:  ErrorTypeSchema,
+		Field:      field,
+		Message:    message,
+		Failure:    FailureValidation,
+		Constraint: constraint,
+		Expected:   expected,
+		Actual:     actual,
+	}
+	verr.Hint = renderHint(verr)
+	return verr
+}
+
+// renderHint composes the agent-facing hint from a populated
+// ValidationError. Hints are derived from (Failure, Constraint, Field,
+// Expected, Actual); per FR-305 boilerplate is acceptable. The hint is
+// the single most important field for M2.2.2's compliance thesis — the
+// agent reads it and corrects.
+func renderHint(verr *ValidationError) string {
+	switch verr.Failure {
+	case FailureDecode:
+		return fmt.Sprintf(
+			"the arguments object must be valid JSON at line %d col %d; %s",
+			verr.Line, verr.Column, stripMessagePrefix(verr.Message),
+		)
+	case FailureState:
+		return verr.Message
+	case FailureValidation:
+		return renderValidationHint(verr)
+	}
+	return verr.Message
+}
+
+// renderValidationHint is the per-Constraint branch of renderHint. Kept
+// separate so the outer switch stays flat and the constraint-specific
+// templates are easy to scan.
+func renderValidationHint(verr *ValidationError) string {
+	field := verr.Field
+	if field == "" {
+		field = "(root)"
+	}
+	switch verr.Constraint {
+	case ConstraintRequired:
+		return fmt.Sprintf("the `%s` field is required and cannot be empty", field)
+	case ConstraintMinLength:
+		return fmt.Sprintf("the `%s` field must be %s; you sent length %d", field, verr.Expected, len(verr.Actual))
+	case ConstraintMaxLength:
+		return fmt.Sprintf("the `%s` field must be %s; you sent length %d", field, verr.Expected, len(verr.Actual))
+	case ConstraintMinItems:
+		return fmt.Sprintf("the `%s` array must be %s; you sent %s", field, verr.Expected, verr.Actual)
+	case ConstraintMaxItems:
+		return fmt.Sprintf("the `%s` array must be %s; you sent %s", field, verr.Expected, verr.Actual)
+	case ConstraintTypeMismatch:
+		return fmt.Sprintf("the `%s` field has the wrong type; expected %s", field, verr.Expected)
+	case ConstraintFormat:
+		return fmt.Sprintf("the `%s` field has an invalid format; expected %s", field, verr.Expected)
+	}
+	return verr.Message
+}
+
+// stripMessagePrefix removes the "arguments are not a valid JSON
+// object: " prefix from a decode message so the hint doesn't repeat
+// the framing. Leaves the underlying parser message intact.
+func stripMessagePrefix(msg string) string {
+	const prefix = "arguments are not a valid JSON object: "
+	if strings.HasPrefix(msg, prefix) {
+		return msg[len(prefix):]
+	}
+	return msg
+}
+
 func validateStringArray(arr []string, field string) *ValidationError {
 	if len(arr) > ArtifactArrayMax {
-		return &ValidationError{ErrorType: ErrorTypeSchema, Field: field,
-			Message: fmt.Sprintf("array length %d exceeds maximum %d", len(arr), ArtifactArrayMax)}
+		return newValidationError(
+			field, ConstraintMaxItems,
+			fmt.Sprintf("array length %d exceeds maximum %d", len(arr), ArtifactArrayMax),
+			fmt.Sprintf("array with max length %d", ArtifactArrayMax),
+			fmt.Sprintf(actualNItemsFmt, len(arr)),
+		)
 	}
 	for i, s := range arr {
 		if len(s) > ArtifactItemMax {
-			return &ValidationError{ErrorType: ErrorTypeSchema, Field: fmt.Sprintf("%s[%d]", field, i),
-				Message: fmt.Sprintf("string length %d exceeds maximum %d", len(s), ArtifactItemMax)}
+			return newValidationError(
+				fmt.Sprintf("%s[%d]", field, i), ConstraintMaxLength,
+				fmt.Sprintf("string length %d exceeds maximum %d", len(s), ArtifactItemMax),
+				fmt.Sprintf(expectedStringMaxLenFmt, ArtifactItemMax),
+				s,
+			)
 		}
 	}
 	return nil
@@ -286,11 +496,17 @@ func validateStringArray(arr []string, field string) *ValidationError {
 
 func validateTripleField(s, field string) *ValidationError {
 	if n := len(s); n < TripleFieldMin {
-		return &ValidationError{ErrorType: ErrorTypeSchema, Field: field,
-			Message: fmt.Sprintf("length %d is below minimum %d", n, TripleFieldMin)}
+		return newValidationError(
+			field, ConstraintMinLength,
+			fmt.Sprintf("length %d is below minimum %d", n, TripleFieldMin),
+			fmt.Sprintf(expectedStringMinLenFmt, TripleFieldMin), s,
+		)
 	} else if n > TripleFieldMax {
-		return &ValidationError{ErrorType: ErrorTypeSchema, Field: field,
-			Message: fmt.Sprintf("length %d exceeds maximum %d", n, TripleFieldMax)}
+		return newValidationError(
+			field, ConstraintMaxLength,
+			fmt.Sprintf("length %d exceeds maximum %d", n, TripleFieldMax),
+			fmt.Sprintf(expectedStringMaxLenFmt, TripleFieldMax), s,
+		)
 	}
 	return nil
 }
@@ -309,8 +525,11 @@ func parseValidFrom(s, field string, now time.Time) (time.Time, *ValidationError
 		if t2, err2 := time.Parse(time.RFC3339Nano, s); err2 == nil {
 			return t2.UTC(), nil
 		}
-		return time.Time{}, &ValidationError{ErrorType: ErrorTypeSchema, Field: field,
-			Message: "valid_from must be ISO-8601 or \"now\": " + err.Error()}
+		return time.Time{}, newValidationError(
+			field, ConstraintFormat,
+			"valid_from must be ISO-8601 or \"now\": "+err.Error(),
+			"ISO-8601 timestamp or literal \"now\"", s,
+		)
 	}
 	return t.UTC(), nil
 }

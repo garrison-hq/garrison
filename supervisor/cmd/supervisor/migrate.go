@@ -70,13 +70,30 @@ func runMigrate() int {
 }
 
 // applyAgentROPassword sets the garrison_agent_ro role's password from
-// GARRISON_AGENT_RO_PASSWORD if present. Postgres does not accept parameter
-// placeholders inside `ALTER ROLE ... PASSWORD`, so the literal is embedded
-// and single quotes are escaped by doubling them (standard SQL literal
-// escaping). Passwords containing NUL bytes are rejected explicitly — Postgres
-// rejects them server-side too, but the up-front check yields a clearer error.
+// GARRISON_AGENT_RO_PASSWORD if present. Thin wrapper over
+// applyAgentROPasswordValue so the NUL-byte guard and the
+// password-unset branch are unit-testable without touching the OS
+// environment (`os.Setenv` rejects NUL bytes at the syscall layer,
+// so the guard can only be exercised via direct-value injection).
 func applyAgentROPassword(ctx context.Context, db *sql.DB, logger *slog.Logger) error {
-	password := os.Getenv("GARRISON_AGENT_RO_PASSWORD")
+	return applyAgentROPasswordValue(ctx, db, logger, os.Getenv("GARRISON_AGENT_RO_PASSWORD"))
+}
+
+// applyAgentROPasswordValue is the testable core of applyAgentROPassword.
+//
+// `ALTER ROLE ... PASSWORD` is DDL and does not accept a parameter
+// placeholder in the password-literal position, so we cannot write
+// `PASSWORD $1` directly. Rather than format the password into a Go
+// string ourselves (which would be an SQL-injection shape even with
+// quote-doubling), we bind the value to a transaction-local GUC via
+// `set_config('garrison.new_agent_ro_pw', $1, true)` — which DOES
+// accept parameter placeholders — and let Postgres's own
+// `format('%L', ...)` perform the literal quoting server-side inside
+// a DO block. The password value therefore never appears in any SQL
+// string built on the Go side; it is bound as a pgx parameter and
+// interpolated by Postgres's canonical literal-quoter. NUL bytes are
+// still rejected up front for a clearer error than Postgres's own.
+func applyAgentROPasswordValue(ctx context.Context, db *sql.DB, logger *slog.Logger, password string) error {
 	if password == "" {
 		logger.Warn("GARRISON_AGENT_RO_PASSWORD is unset; garrison_agent_ro role has no password and cannot authenticate. Set the env var and re-run --migrate.")
 		return nil
@@ -84,10 +101,28 @@ func applyAgentROPassword(ctx context.Context, db *sql.DB, logger *slog.Logger) 
 	if strings.ContainsRune(password, 0) {
 		return fmt.Errorf("password contains NUL byte; rejected")
 	}
-	escaped := strings.ReplaceAll(password, "'", "''")
-	stmt := fmt.Sprintf("ALTER ROLE garrison_agent_ro WITH LOGIN PASSWORD '%s'", escaped)
-	if _, err := db.ExecContext(ctx, stmt); err != nil {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx,
+		"SELECT set_config('garrison.new_agent_ro_pw', $1, true)", password); err != nil {
+		return fmt.Errorf("bind password: %w", err)
+	}
+	const alterRoleDO = `DO $body$
+BEGIN
+  EXECUTE format(
+    'ALTER ROLE garrison_agent_ro WITH LOGIN PASSWORD %L',
+    current_setting('garrison.new_agent_ro_pw')
+  );
+END
+$body$`
+	if _, err := tx.ExecContext(ctx, alterRoleDO); err != nil {
 		return fmt.Errorf("alter role: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit: %w", err)
 	}
 	logger.Info("garrison_agent_ro password applied")
 	return nil

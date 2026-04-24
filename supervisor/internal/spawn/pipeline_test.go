@@ -147,6 +147,26 @@ func TestAdjudicateMCPBailOutranksEverything(t *testing.T) {
 	}
 }
 
+// TestAdjudicateBudgetExceededTakesPrecedenceOverIsError — M2.2.2
+// FR-306 / SC-304. A Result with ResultSeen=true, IsError=true, and a
+// budget-shaped TerminalReason classifies as budget_exceeded (the
+// cost root cause) rather than claude_error (the symptom). Pre-M2.2.2
+// the same input returned claude_error, hiding cost spikes behind a
+// generic error bucket — M2.2.1 live-run append documented the bug.
+func TestAdjudicateBudgetExceededTakesPrecedenceOverIsError(t *testing.T) {
+	r := Result{
+		ResultSeen:     true,
+		IsError:        true, // would have returned claude_error pre-M2.2.2
+		TerminalReason: "error_max_budget_usd",
+		TotalCostUSD:   "0.26",
+	}
+	status, reason := Adjudicate(r, WaitDetail{ExitCode: 0}, true, FinalizeState{})
+	if status != "failed" || reason != ExitBudgetExceeded {
+		t.Errorf("Adjudicate(IsError + budget) = (%q, %q); want (failed, budget_exceeded)",
+			status, reason)
+	}
+}
+
 // -------- pipeline.Run behaviour ----------------------------------------
 
 // fixtureInit is a minimal system/init line with a single postgres MCP
