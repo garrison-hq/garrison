@@ -180,6 +180,17 @@ func runDirective(line, ticketID string, exitCode *int) error {
 			return fmt.Errorf("#marker-file requires a path argument")
 		}
 		return os.WriteFile(fields[1], []byte(ticketID), 0o600)
+
+	case "#write-env-to-file":
+		// M2.3: write the value of an environment variable to a file in cwd.
+		// Used by m2_3_vault_uses_env_var.ndjson to prove the supervisor
+		// injected the vaulted secret into the subprocess environment.
+		// Format: #write-env-to-file VARNAME FILENAME
+		if len(fields) < 3 {
+			return fmt.Errorf("#write-env-to-file requires VARNAME FILENAME")
+		}
+		value := os.Getenv(fields[1])
+		return os.WriteFile(fields[2], []byte(value), 0o644)
 	case "#":
 		// Pure comment.
 		return nil
