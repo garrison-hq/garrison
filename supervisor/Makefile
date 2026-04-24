@@ -1,4 +1,6 @@
-.PHONY: build test test-integration test-chaos sqlc migrate run docker lint clean copy-migrations seed-engineer-agent
+.PHONY: build test test-integration test-chaos sqlc migrate run docker lint vet-vaultlog clean copy-migrations seed-engineer-agent
+
+GO ?= $(shell which go 2>/dev/null || echo /home/jeroennouws/.local/go/bin/go)
 
 # copy-migrations stages the repo-root migrations/ into cmd/supervisor/migrations/
 # so `go:embed migrations/*.sql` in cmd/supervisor/migrate.go can find them
@@ -58,9 +60,14 @@ docker: copy-migrations
 # copy-migrations is required because cmd/supervisor/migrate.go has a
 # //go:embed directive that go vet and the compiler resolve at type-check
 # time — without the staged files, `go vet ./...` fails.
-lint: copy-migrations
+lint: copy-migrations vet-vaultlog
 	go vet ./...
 	@if [ -n "$$(gofmt -l .)" ]; then gofmt -l .; exit 1; fi
+
+# vet-vaultlog runs the custom AST analyzer that rejects slog/fmt calls
+# passing vault.SecretValue arguments (Rule 6 / SC-410).
+vet-vaultlog: copy-migrations
+	$(GO) run ./tools/vaultlog/cmd/vaultlog ./...
 
 clean:
 	rm -rf bin/ migrations/ cmd/supervisor/migrations/
