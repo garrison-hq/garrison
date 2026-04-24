@@ -80,3 +80,21 @@ jobs:
           cache-dependency-path: supervisor/go.sum
       - run: make build
       - run: ./bin/supervisor --version
+
+  sonarcloud:
+    name: SonarCloud scan
+    runs-on: ubuntu-latest
+    steps:
+      # fetch-depth 0 gives Sonar full git history so blame-based
+      # new-code detection and authorship work correctly.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # v5.0.0 is a thin redirect to SonarSource/sonarqube-scan-action@v5
+      # and emits a deprecation warning; the scan itself still runs. If
+      # SonarCloud's automatic analysis is enabled on this project, disable
+      # it in the Sonar UI before relying on this CI job — the two analysis
+      # modes are mutually exclusive.
+      - uses: SonarSource/sonarcloud-github-action@v5.0.0
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
