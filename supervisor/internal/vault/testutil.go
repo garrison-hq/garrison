@@ -508,6 +508,116 @@ func (h *InfisicalTestHarness) call(method, path string, body interface{}, token
 	return client.Do(req)
 }
 
+// StopInfisical terminates the Infisical container, simulating a server-down
+// failure. The harness remains usable for test assertions; call Cleanup to
+// also stop postgres and redis.
+func (h *InfisicalTestHarness) StopInfisical(ctx context.Context) error {
+	if h.infisicalC != nil {
+		return h.infisicalC.Terminate(ctx)
+	}
+	return nil
+}
+
+// CreateMachineIdentityNoProjectAccess creates an ML in the organisation but
+// does NOT add it to the test project. The ML can authenticate (and get an
+// access token) but cannot read secrets from the project → Infisical returns
+// 401/403 on secret fetch, which the vault client classifies as a permission
+// error or auth-expired depending on Infisical's version behaviour.
+func (h *InfisicalTestHarness) CreateMachineIdentityNoProjectAccess(name string) (clientID, clientSecret string, err error) {
+	identityID, err := h.createIdentity(name)
+	if err != nil {
+		return "", "", fmt.Errorf("create identity: %w", err)
+	}
+	clientID, err = h.configureUniversalAuth(identityID)
+	if err != nil {
+		return "", "", fmt.Errorf("configure universal auth: %w", err)
+	}
+	clientSecret, err = h.createClientSecret(identityID)
+	if err != nil {
+		return "", "", fmt.Errorf("create client secret: %w", err)
+	}
+	// Intentionally NOT calling addIdentityToProject: the ML has no project access.
+	return clientID, clientSecret, nil
+}
+
+// CreateShortLivedMachineIdentity creates an ML whose access token has a 1-second
+// TTL and whose client secret can be used only once (numUsesLimit=1). After the
+// token expires (~1s after creation), the supervisor's re-auth will fail because
+// the client secret's use limit is exhausted. Use this to force vault_auth_expired.
+func (h *InfisicalTestHarness) CreateShortLivedMachineIdentity(name string) (clientID, clientSecret string, err error) {
+	identityID, err := h.createIdentity(name)
+	if err != nil {
+		return "", "", fmt.Errorf("create identity: %w", err)
+	}
+	// accessTokenTTL=1 means the access token expires after 1 second.
+	clientID, err = h.configureUniversalAuthWithTTL(identityID, 1)
+	if err != nil {
+		return "", "", fmt.Errorf("configure universal auth: %w", err)
+	}
+	// numUsesLimit=1: client secret can only authenticate once (the initial
+	// vault.NewClient call). Any subsequent re-auth attempt will be rejected.
+	clientSecret, err = h.createClientSecretWithLimit(identityID, 1)
+	if err != nil {
+		return "", "", fmt.Errorf("create client secret: %w", err)
+	}
+	if err := h.addIdentityToProject(identityID); err != nil {
+		return "", "", fmt.Errorf("add identity to project: %w", err)
+	}
+	return clientID, clientSecret, nil
+}
+
+func (h *InfisicalTestHarness) configureUniversalAuthWithTTL(identityID string, accessTokenTTL int) (string, error) {
+	body := map[string]interface{}{
+		"clientSecretTrustedIps":  []map[string]string{{"ipAddress": "0.0.0.0/0"}},
+		"accessTokenTrustedIps":   []map[string]string{{"ipAddress": "0.0.0.0/0"}},
+		"accessTokenTTL":          accessTokenTTL,
+		"accessTokenMaxTTL":       2592000,
+		"accessTokenNumUsesLimit": 0,
+	}
+	resp, err := h.apiCall("POST", "/api/v1/auth/universal-auth/identities/"+identityID, body)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 && resp.StatusCode != 201 {
+		b, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("configure UA HTTP %d: %s", resp.StatusCode, b)
+	}
+	var result struct {
+		IdentityUniversalAuth struct {
+			ClientID string `json:"clientId"`
+		} `json:"identityUniversalAuth"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", err
+	}
+	return result.IdentityUniversalAuth.ClientID, nil
+}
+
+func (h *InfisicalTestHarness) createClientSecretWithLimit(identityID string, numUsesLimit int) (string, error) {
+	body := map[string]interface{}{
+		"description":  "garrison-test-limited",
+		"numUsesLimit": numUsesLimit,
+		"ttl":          0,
+	}
+	resp, err := h.apiCall("POST", "/api/v1/auth/universal-auth/identities/"+identityID+"/client-secrets", body)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 && resp.StatusCode != 201 {
+		b, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("create client secret HTTP %d: %s", resp.StatusCode, b)
+	}
+	var result struct {
+		ClientSecret string `json:"clientSecret"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", err
+	}
+	return result.ClientSecret, nil
+}
+
 // infisicalPathJoin joins path parts into a normalized absolute path.
 func infisicalPathJoin(parts ...string) string {
 	result := strings.Join(parts, "/")

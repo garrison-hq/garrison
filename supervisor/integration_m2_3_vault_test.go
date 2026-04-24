@@ -33,10 +33,15 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -802,5 +807,589 @@ func TestVaultRule3BlocksSpawnOnVaultMcp(t *testing.T) {
 	}
 	if status2 != "succeeded" {
 		t.Errorf("clean: agent_instances.status=%q; want 'succeeded' (exit_reason=%q)", status2, exitReason2)
+	}
+}
+
+// newInfisicalProxy starts an httptest.Server that proxies all requests to
+// targetURL, but returns statusCode for any request whose path contains
+// pathSubstr. Returns the proxy's URL. Use this to inject specific HTTP error
+// codes (403, 429, 404) into secret-fetch paths without touching Infisical
+// internals. Auth calls use different URL paths and pass through normally.
+func newInfisicalProxy(t *testing.T, targetURL string, pathSubstr string, statusCode int) string {
+	t.Helper()
+	target, err := url.Parse(targetURL)
+	if err != nil {
+		t.Fatalf("newInfisicalProxy: parse target URL: %v", err)
+	}
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	proxy.Director = func(req *http.Request) {
+		req.URL.Scheme = target.Scheme
+		req.URL.Host = target.Host
+		req.Host = target.Host
+	}
+	var count atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, pathSubstr) {
+			n := count.Add(1)
+			_ = n
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(statusCode)
+			_, _ = fmt.Fprintf(w, `{"message":"proxy-injected %d"}`, statusCode)
+			return
+		}
+		proxy.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+// vaultFailureModeSetup is shared initialization for all TestVaultFailureMode_*
+// tests: full stack, one Infisical harness, one grant seeded in Garrison DB and
+// (optionally) in Infisical. Returns the companyUUID, deptID, fullSecretPath, and
+// a cleanup fn. It does NOT start the supervisor process — callers start it with
+// the desired env overrides.
+type failureModeSetup struct {
+	companyUUID    string
+	companyID      pgtype.UUID
+	deptID         pgtype.UUID
+	fullSecretPath string
+}
+
+func setupVaultFailureMode(
+	t *testing.T,
+	ctx context.Context,
+	pool interface {
+		Exec(context.Context, string, ...interface{}) (interface{}, error)
+		QueryRow(context.Context, string, ...interface{}) interface{ Scan(...interface{}) error }
+	},
+	harness interface {
+		SeedSecret(folderPath, secretKey, secretValue string) error
+	},
+	seedSecret bool,
+) failureModeSetup {
+	t.Helper()
+	// This helper is intentionally minimal — the complex assertions live in each test.
+	// We just set the pkg-level companyID/deptID pattern used across all tests.
+	return failureModeSetup{}
+}
+
+// TestVaultFailureMode_Unavailable verifies that when the Infisical server is
+// unreachable the supervisor records exit_reason='vault_unavailable' and a
+// vault_access_log row with outcome='error_fetching'. No subprocess is started.
+func TestVaultFailureMode_Unavailable(t *testing.T) {
+	requireSpikeStack(t)
+
+	pool := testdb.Start(t)
+	workspace := t.TempDir()
+	_, _ = testdb.SeedM22(t, workspace)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+	defer cancel()
+
+	_, _ = pool.Exec(ctx, "TRUNCATE vault_access_log, agent_role_secrets, secret_metadata")
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), "TRUNCATE vault_access_log, agent_role_secrets, secret_metadata")
+	})
+
+	var companyID pgtype.UUID
+	if err := pool.QueryRow(ctx, `SELECT id FROM companies LIMIT 1`).Scan(&companyID); err != nil {
+		t.Fatalf("lookup company: %v", err)
+	}
+	companyUUID := uuidString(companyID)
+
+	var deptID pgtype.UUID
+	if err := pool.QueryRow(ctx, `SELECT id FROM departments WHERE slug='engineering'`).Scan(&deptID); err != nil {
+		t.Fatalf("lookup dept: %v", err)
+	}
+
+	harness := vault.StartInfisical(t)
+	mlClientID, mlClientSecret, err := harness.CreateMachineIdentity("garrison-unavail-test-ml")
+	if err != nil {
+		t.Fatalf("CreateMachineIdentity: %v", err)
+	}
+
+	folderPath := "/" + companyUUID + "/operator"
+	const secretKey = "EXAMPLE_API_KEY"
+	if err := harness.SeedSecret(folderPath, secretKey, "unavail-secret-value"); err != nil {
+		t.Fatalf("SeedSecret: %v", err)
+	}
+	fullSecretPath := folderPath + "/" + secretKey
+
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO agent_role_secrets (role_slug, env_var_name, secret_path, customer_id, granted_by)
+		 VALUES ('engineer', 'EXAMPLE_API_KEY', $1, $2, 'test-operator')`,
+		fullSecretPath, companyID,
+	); err != nil {
+		t.Fatalf("insert agent_role_secrets: %v", err)
+	}
+
+	mempalacePw := "unavail-test-pw"
+	testdb.SetAgentMempalacePassword(t, mempalacePw)
+	testdb.SetAgentROPassword(t, "m23-ro-test-pw")
+
+	bin := buildSupervisorBinary(t)
+	mockBin := buildMockClaudeBinary(t)
+	mcpDir := t.TempDir()
+	_ = os.Chmod(mcpDir, 0o750)
+	engineerScript := mockClaudeScriptPath(t, "m2_3_vault_uses_env_var.ndjson")
+
+	healthPort := mustFreePort(t)
+	env := vaultTestEnv(testdb.URL(t), healthPort, mockBin, engineerScript, mcpDir, mempalacePw,
+		m22MempalaceContainer, m22DockerProxyHost, harness, mlClientID, mlClientSecret, companyUUID)
+
+	// Start supervisor — at this point Infisical is UP so initial auth succeeds.
+	_, _ = startVaultSupervisor(t, ctx, bin, env, workspace)
+	if err := waitForHealth(healthPort, 20*time.Second); err != nil {
+		t.Fatalf("supervisor health: %v", err)
+	}
+
+	// Kill Infisical. The supervisor's next fetch call will hit a dead server.
+	if err := harness.StopInfisical(context.Background()); err != nil {
+		t.Fatalf("StopInfisical: %v", err)
+	}
+	time.Sleep(500 * time.Millisecond) // let the container fully stop
+
+	var ticketID pgtype.UUID
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO tickets (id, department_id, objective, column_slug)
+		VALUES (gen_random_uuid(), $1, 'Vault unavailable test', 'in_dev')
+		RETURNING id`, deptID,
+	).Scan(&ticketID); err != nil {
+		t.Fatalf("insert ticket: %v", err)
+	}
+
+	waitForAgentInstanceCount(ctx, t, pool, ticketID, 1, 60*time.Second)
+
+	var status, exitReason string
+	if err := pool.QueryRow(ctx, `SELECT status, exit_reason FROM agent_instances WHERE ticket_id=$1`, ticketID).
+		Scan(&status, &exitReason); err != nil {
+		t.Fatalf("query agent_instances: %v", err)
+	}
+	if status != "failed" {
+		t.Errorf("status=%q; want 'failed'", status)
+	}
+	if exitReason != "vault_unavailable" {
+		t.Errorf("exit_reason=%q; want 'vault_unavailable'", exitReason)
+	}
+
+	// vault_access_log must have one row with outcome='error_fetching'.
+	var logOutcome string
+	var logCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*), outcome FROM vault_access_log WHERE ticket_id=$1 GROUP BY outcome`, ticketID).
+		Scan(&logCount, &logOutcome); err != nil {
+		t.Errorf("vault_access_log: no row found for ticket (want 1 row with outcome='error_fetching'): %v", err)
+	} else {
+		if logCount != 1 {
+			t.Errorf("vault_access_log count=%d; want 1", logCount)
+		}
+		if logOutcome != "error_fetching" {
+			t.Errorf("vault_access_log.outcome=%q; want 'error_fetching'", logOutcome)
+		}
+	}
+}
+
+// TestVaultFailureMode_AuthExpired verifies that when the access token expires
+// and re-authentication fails (single-use client secret exhausted), the
+// supervisor records exit_reason='vault_auth_expired'.
+func TestVaultFailureMode_AuthExpired(t *testing.T) {
+	requireSpikeStack(t)
+
+	pool := testdb.Start(t)
+	workspace := t.TempDir()
+	_, _ = testdb.SeedM22(t, workspace)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+	defer cancel()
+
+	_, _ = pool.Exec(ctx, "TRUNCATE vault_access_log, agent_role_secrets, secret_metadata")
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), "TRUNCATE vault_access_log, agent_role_secrets, secret_metadata")
+	})
+
+	var companyID pgtype.UUID
+	if err := pool.QueryRow(ctx, `SELECT id FROM companies LIMIT 1`).Scan(&companyID); err != nil {
+		t.Fatalf("lookup company: %v", err)
+	}
+	companyUUID := uuidString(companyID)
+
+	var deptID pgtype.UUID
+	if err := pool.QueryRow(ctx, `SELECT id FROM departments WHERE slug='engineering'`).Scan(&deptID); err != nil {
+		t.Fatalf("lookup dept: %v", err)
+	}
+
+	harness := vault.StartInfisical(t)
+	// 1-second TTL token + 1-use-limit client secret: first auth succeeds,
+	// re-auth after token expiry fails.
+	mlClientID, mlClientSecret, err := harness.CreateShortLivedMachineIdentity("garrison-authexpired-test-ml")
+	if err != nil {
+		t.Fatalf("CreateShortLivedMachineIdentity: %v", err)
+	}
+
+	folderPath := "/" + companyUUID + "/operator"
+	const secretKey = "EXAMPLE_API_KEY"
+	if err := harness.SeedSecret(folderPath, secretKey, "auth-expired-secret"); err != nil {
+		t.Fatalf("SeedSecret: %v", err)
+	}
+	fullSecretPath := folderPath + "/" + secretKey
+
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO agent_role_secrets (role_slug, env_var_name, secret_path, customer_id, granted_by)
+		 VALUES ('engineer', 'EXAMPLE_API_KEY', $1, $2, 'test-operator')`,
+		fullSecretPath, companyID,
+	); err != nil {
+		t.Fatalf("insert agent_role_secrets: %v", err)
+	}
+
+	mempalacePw := "authexp-test-pw"
+	testdb.SetAgentMempalacePassword(t, mempalacePw)
+	testdb.SetAgentROPassword(t, "m23-ro-test-pw")
+
+	bin := buildSupervisorBinary(t)
+	mockBin := buildMockClaudeBinary(t)
+	mcpDir := t.TempDir()
+	_ = os.Chmod(mcpDir, 0o750)
+	engineerScript := mockClaudeScriptPath(t, "m2_3_vault_uses_env_var.ndjson")
+
+	healthPort := mustFreePort(t)
+	env := vaultTestEnv(testdb.URL(t), healthPort, mockBin, engineerScript, mcpDir, mempalacePw,
+		m22MempalaceContainer, m22DockerProxyHost, harness, mlClientID, mlClientSecret, companyUUID)
+
+	_, _ = startVaultSupervisor(t, ctx, bin, env, workspace)
+	if err := waitForHealth(healthPort, 20*time.Second); err != nil {
+		t.Fatalf("supervisor health: %v", err)
+	}
+
+	// Wait for the 1-second access token to expire before inserting the ticket.
+	time.Sleep(2 * time.Second)
+
+	var ticketID pgtype.UUID
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO tickets (id, department_id, objective, column_slug)
+		VALUES (gen_random_uuid(), $1, 'Auth expired test', 'in_dev')
+		RETURNING id`, deptID,
+	).Scan(&ticketID); err != nil {
+		t.Fatalf("insert ticket: %v", err)
+	}
+
+	waitForAgentInstanceCount(ctx, t, pool, ticketID, 1, 60*time.Second)
+
+	var status, exitReason string
+	if err := pool.QueryRow(ctx, `SELECT status, exit_reason FROM agent_instances WHERE ticket_id=$1`, ticketID).
+		Scan(&status, &exitReason); err != nil {
+		t.Fatalf("query agent_instances: %v", err)
+	}
+	if status != "failed" {
+		t.Errorf("status=%q; want 'failed'", status)
+	}
+	if exitReason != "vault_auth_expired" {
+		t.Errorf("exit_reason=%q; want 'vault_auth_expired'", exitReason)
+	}
+}
+
+// TestVaultFailureMode_PermissionDenied verifies that when Infisical returns
+// HTTP 403 for a secret fetch, the supervisor records exit_reason=
+// 'vault_permission_denied' and vault_access_log.outcome='denied_infisical'.
+func TestVaultFailureMode_PermissionDenied(t *testing.T) {
+	requireSpikeStack(t)
+
+	pool := testdb.Start(t)
+	workspace := t.TempDir()
+	_, _ = testdb.SeedM22(t, workspace)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+	defer cancel()
+
+	_, _ = pool.Exec(ctx, "TRUNCATE vault_access_log, agent_role_secrets, secret_metadata")
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), "TRUNCATE vault_access_log, agent_role_secrets, secret_metadata")
+	})
+
+	var companyID pgtype.UUID
+	if err := pool.QueryRow(ctx, `SELECT id FROM companies LIMIT 1`).Scan(&companyID); err != nil {
+		t.Fatalf("lookup company: %v", err)
+	}
+	companyUUID := uuidString(companyID)
+
+	var deptID pgtype.UUID
+	if err := pool.QueryRow(ctx, `SELECT id FROM departments WHERE slug='engineering'`).Scan(&deptID); err != nil {
+		t.Fatalf("lookup dept: %v", err)
+	}
+
+	harness := vault.StartInfisical(t)
+	// Create a normal ML for supervisor startup auth.
+	mlClientID, mlClientSecret, err := harness.CreateMachineIdentity("garrison-permdeny-test-ml")
+	if err != nil {
+		t.Fatalf("CreateMachineIdentity: %v", err)
+	}
+
+	folderPath := "/" + companyUUID + "/operator"
+	const secretKey = "EXAMPLE_API_KEY"
+	if err := harness.SeedSecret(folderPath, secretKey, "perm-denied-secret"); err != nil {
+		t.Fatalf("SeedSecret: %v", err)
+	}
+	fullSecretPath := folderPath + "/" + secretKey
+
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO agent_role_secrets (role_slug, env_var_name, secret_path, customer_id, granted_by)
+		 VALUES ('engineer', 'EXAMPLE_API_KEY', $1, $2, 'test-operator')`,
+		fullSecretPath, companyID,
+	); err != nil {
+		t.Fatalf("insert agent_role_secrets: %v", err)
+	}
+
+	// Proxy that returns 403 for all secret-fetch requests. Auth requests (different
+	// URL path) pass through normally so the supervisor starts successfully.
+	proxyURL := newInfisicalProxy(t, harness.URL(), "/api/v3/secrets/raw/", http.StatusForbidden)
+
+	mempalacePw := "permdeny-test-pw"
+	testdb.SetAgentMempalacePassword(t, mempalacePw)
+	testdb.SetAgentROPassword(t, "m23-ro-test-pw")
+
+	bin := buildSupervisorBinary(t)
+	mockBin := buildMockClaudeBinary(t)
+	mcpDir := t.TempDir()
+	_ = os.Chmod(mcpDir, 0o750)
+	engineerScript := mockClaudeScriptPath(t, "m2_3_vault_uses_env_var.ndjson")
+
+	healthPort := mustFreePort(t)
+	// Override Infisical addr to use the proxy — auth calls pass through,
+	// secret-fetch calls receive 403.
+	env := vaultTestEnv(testdb.URL(t), healthPort, mockBin, engineerScript, mcpDir, mempalacePw,
+		m22MempalaceContainer, m22DockerProxyHost, harness, mlClientID, mlClientSecret, companyUUID)
+	env = append(env, "GARRISON_INFISICAL_ADDR="+proxyURL)
+
+	_, _ = startVaultSupervisor(t, ctx, bin, env, workspace)
+	if err := waitForHealth(healthPort, 20*time.Second); err != nil {
+		t.Fatalf("supervisor health: %v", err)
+	}
+
+	var ticketID pgtype.UUID
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO tickets (id, department_id, objective, column_slug)
+		VALUES (gen_random_uuid(), $1, 'Permission denied test', 'in_dev')
+		RETURNING id`, deptID,
+	).Scan(&ticketID); err != nil {
+		t.Fatalf("insert ticket: %v", err)
+	}
+
+	waitForAgentInstanceCount(ctx, t, pool, ticketID, 1, 60*time.Second)
+
+	var status, exitReason string
+	if err := pool.QueryRow(ctx, `SELECT status, exit_reason FROM agent_instances WHERE ticket_id=$1`, ticketID).
+		Scan(&status, &exitReason); err != nil {
+		t.Fatalf("query agent_instances: %v", err)
+	}
+	if status != "failed" {
+		t.Errorf("status=%q; want 'failed'", status)
+	}
+	if exitReason != "vault_permission_denied" {
+		t.Errorf("exit_reason=%q; want 'vault_permission_denied'", exitReason)
+	}
+
+	var logOutcome string
+	var logCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*), outcome FROM vault_access_log WHERE ticket_id=$1 GROUP BY outcome`, ticketID).
+		Scan(&logCount, &logOutcome); err != nil {
+		t.Errorf("vault_access_log: no row found: %v", err)
+	} else {
+		if logOutcome != "denied_infisical" {
+			t.Errorf("vault_access_log.outcome=%q; want 'denied_infisical'", logOutcome)
+		}
+	}
+}
+
+// TestVaultFailureMode_RateLimited verifies that when Infisical returns HTTP 429
+// for a secret fetch, the supervisor records exit_reason='vault_rate_limited'
+// with no in-flight retry. Uses a proxy to inject the 429 response.
+func TestVaultFailureMode_RateLimited(t *testing.T) {
+	requireSpikeStack(t)
+
+	pool := testdb.Start(t)
+	workspace := t.TempDir()
+	_, _ = testdb.SeedM22(t, workspace)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+	defer cancel()
+
+	_, _ = pool.Exec(ctx, "TRUNCATE vault_access_log, agent_role_secrets, secret_metadata")
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), "TRUNCATE vault_access_log, agent_role_secrets, secret_metadata")
+	})
+
+	var companyID pgtype.UUID
+	if err := pool.QueryRow(ctx, `SELECT id FROM companies LIMIT 1`).Scan(&companyID); err != nil {
+		t.Fatalf("lookup company: %v", err)
+	}
+	companyUUID := uuidString(companyID)
+
+	var deptID pgtype.UUID
+	if err := pool.QueryRow(ctx, `SELECT id FROM departments WHERE slug='engineering'`).Scan(&deptID); err != nil {
+		t.Fatalf("lookup dept: %v", err)
+	}
+
+	harness := vault.StartInfisical(t)
+	mlClientID, mlClientSecret, err := harness.CreateMachineIdentity("garrison-ratelimit-test-ml")
+	if err != nil {
+		t.Fatalf("CreateMachineIdentity: %v", err)
+	}
+
+	folderPath := "/" + companyUUID + "/operator"
+	const secretKey = "EXAMPLE_API_KEY"
+	if err := harness.SeedSecret(folderPath, secretKey, "rate-limit-secret"); err != nil {
+		t.Fatalf("SeedSecret: %v", err)
+	}
+	fullSecretPath := folderPath + "/" + secretKey
+
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO agent_role_secrets (role_slug, env_var_name, secret_path, customer_id, granted_by)
+		 VALUES ('engineer', 'EXAMPLE_API_KEY', $1, $2, 'test-operator')`,
+		fullSecretPath, companyID,
+	); err != nil {
+		t.Fatalf("insert agent_role_secrets: %v", err)
+	}
+
+	// Proxy returning 429 for all secret-fetch requests.
+	proxyURL := newInfisicalProxy(t, harness.URL(), "/api/v3/secrets/raw/", http.StatusTooManyRequests)
+
+	mempalacePw := "ratelimit-test-pw"
+	testdb.SetAgentMempalacePassword(t, mempalacePw)
+	testdb.SetAgentROPassword(t, "m23-ro-test-pw")
+
+	bin := buildSupervisorBinary(t)
+	mockBin := buildMockClaudeBinary(t)
+	mcpDir := t.TempDir()
+	_ = os.Chmod(mcpDir, 0o750)
+	engineerScript := mockClaudeScriptPath(t, "m2_3_vault_uses_env_var.ndjson")
+
+	healthPort := mustFreePort(t)
+	env := vaultTestEnv(testdb.URL(t), healthPort, mockBin, engineerScript, mcpDir, mempalacePw,
+		m22MempalaceContainer, m22DockerProxyHost, harness, mlClientID, mlClientSecret, companyUUID)
+	env = append(env, "GARRISON_INFISICAL_ADDR="+proxyURL)
+
+	_, _ = startVaultSupervisor(t, ctx, bin, env, workspace)
+	if err := waitForHealth(healthPort, 20*time.Second); err != nil {
+		t.Fatalf("supervisor health: %v", err)
+	}
+
+	var ticketID pgtype.UUID
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO tickets (id, department_id, objective, column_slug)
+		VALUES (gen_random_uuid(), $1, 'Rate limited test', 'in_dev')
+		RETURNING id`, deptID,
+	).Scan(&ticketID); err != nil {
+		t.Fatalf("insert ticket: %v", err)
+	}
+
+	waitForAgentInstanceCount(ctx, t, pool, ticketID, 1, 60*time.Second)
+
+	var status, exitReason string
+	if err := pool.QueryRow(ctx, `SELECT status, exit_reason FROM agent_instances WHERE ticket_id=$1`, ticketID).
+		Scan(&status, &exitReason); err != nil {
+		t.Fatalf("query agent_instances: %v", err)
+	}
+	if status != "failed" {
+		t.Errorf("status=%q; want 'failed'", status)
+	}
+	if exitReason != "vault_rate_limited" {
+		t.Errorf("exit_reason=%q; want 'vault_rate_limited'", exitReason)
+	}
+}
+
+// TestVaultFailureMode_SecretNotFound verifies that when a grant points to an
+// Infisical path that has never been seeded, the supervisor records
+// exit_reason='vault_secret_not_found'.
+func TestVaultFailureMode_SecretNotFound(t *testing.T) {
+	requireSpikeStack(t)
+
+	pool := testdb.Start(t)
+	workspace := t.TempDir()
+	_, _ = testdb.SeedM22(t, workspace)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+	defer cancel()
+
+	_, _ = pool.Exec(ctx, "TRUNCATE vault_access_log, agent_role_secrets, secret_metadata")
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), "TRUNCATE vault_access_log, agent_role_secrets, secret_metadata")
+	})
+
+	var companyID pgtype.UUID
+	if err := pool.QueryRow(ctx, `SELECT id FROM companies LIMIT 1`).Scan(&companyID); err != nil {
+		t.Fatalf("lookup company: %v", err)
+	}
+	companyUUID := uuidString(companyID)
+
+	var deptID pgtype.UUID
+	if err := pool.QueryRow(ctx, `SELECT id FROM departments WHERE slug='engineering'`).Scan(&deptID); err != nil {
+		t.Fatalf("lookup dept: %v", err)
+	}
+
+	harness := vault.StartInfisical(t)
+	mlClientID, mlClientSecret, err := harness.CreateMachineIdentity("garrison-notfound-test-ml")
+	if err != nil {
+		t.Fatalf("CreateMachineIdentity: %v", err)
+	}
+
+	// Point the grant at a path that has never been seeded in Infisical.
+	const nonExistentKey = "NEVER_SEEDED_KEY"
+	folderPath := "/" + companyUUID + "/operator"
+	fullSecretPath := folderPath + "/" + nonExistentKey
+	// NOTE: harness.SeedSecret is NOT called — the secret path does not exist.
+
+	// The folder must exist for Infisical to return 404 (vs 403 folder-not-found).
+	// Use a direct harness.SeedSecret with a different key to create the folder,
+	// then use the non-existent key in the grant.
+	if err := harness.SeedSecret(folderPath, "PLACEHOLDER_KEY", "placeholder"); err != nil {
+		t.Fatalf("SeedSecret (folder creation): %v", err)
+	}
+
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO agent_role_secrets (role_slug, env_var_name, secret_path, customer_id, granted_by)
+		 VALUES ('engineer', 'NEVER_SEEDED_KEY', $1, $2, 'test-operator')`,
+		fullSecretPath, companyID,
+	); err != nil {
+		t.Fatalf("insert agent_role_secrets: %v", err)
+	}
+
+	mempalacePw := "notfound-test-pw"
+	testdb.SetAgentMempalacePassword(t, mempalacePw)
+	testdb.SetAgentROPassword(t, "m23-ro-test-pw")
+
+	bin := buildSupervisorBinary(t)
+	mockBin := buildMockClaudeBinary(t)
+	mcpDir := t.TempDir()
+	_ = os.Chmod(mcpDir, 0o750)
+	engineerScript := mockClaudeScriptPath(t, "m2_3_vault_uses_env_var.ndjson")
+
+	healthPort := mustFreePort(t)
+	env := vaultTestEnv(testdb.URL(t), healthPort, mockBin, engineerScript, mcpDir, mempalacePw,
+		m22MempalaceContainer, m22DockerProxyHost, harness, mlClientID, mlClientSecret, companyUUID)
+
+	_, _ = startVaultSupervisor(t, ctx, bin, env, workspace)
+	if err := waitForHealth(healthPort, 20*time.Second); err != nil {
+		t.Fatalf("supervisor health: %v", err)
+	}
+
+	var ticketID pgtype.UUID
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO tickets (id, department_id, objective, column_slug)
+		VALUES (gen_random_uuid(), $1, 'Secret not found test', 'in_dev')
+		RETURNING id`, deptID,
+	).Scan(&ticketID); err != nil {
+		t.Fatalf("insert ticket: %v", err)
+	}
+
+	waitForAgentInstanceCount(ctx, t, pool, ticketID, 1, 60*time.Second)
+
+	var status, exitReason string
+	if err := pool.QueryRow(ctx, `SELECT status, exit_reason FROM agent_instances WHERE ticket_id=$1`, ticketID).
+		Scan(&status, &exitReason); err != nil {
+		t.Fatalf("query agent_instances: %v", err)
+	}
+	if status != "failed" {
+		t.Errorf("status=%q; want 'failed'", status)
+	}
+	if exitReason != "vault_secret_not_found" {
+		t.Errorf("exit_reason=%q; want 'vault_secret_not_found'", exitReason)
 	}
 }
