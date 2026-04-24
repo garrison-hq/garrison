@@ -27,8 +27,10 @@ CREATE TABLE agent_role_secrets (
     granted_by       TEXT        NOT NULL,
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (role_slug, env_var_name, customer_id),
-    FOREIGN KEY (role_slug) REFERENCES agents(role_slug) ON DELETE RESTRICT
+    PRIMARY KEY (role_slug, env_var_name, customer_id)
+    -- No FK on role_slug: agents.role_slug is unique per-department only
+    -- (UNIQUE(department_id, role_slug)), not globally. Integrity is
+    -- maintained at the application layer via ListGrantsForRole.
 );
 CREATE INDEX idx_agent_role_secrets_secret_path
     ON agent_role_secrets (secret_path, customer_id);
