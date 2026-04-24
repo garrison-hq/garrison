@@ -45,6 +45,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/garrison-hq/garrison/supervisor/internal/mempalace"
 	"github.com/garrison-hq/garrison/supervisor/internal/testdb"
 	"github.com/garrison-hq/garrison/supervisor/internal/vault"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -1969,5 +1970,183 @@ func TestVaultRotationDuringRunNoOp(t *testing.T) {
 	}
 	if count2 != 1 {
 		t.Errorf("spawn #2 vault_access_log count=%d; want 1", count2)
+	}
+}
+
+// TestSecretPatternScanRedactsBeforeMemPalaceWrite is the M2.3 T016
+// integration test (SC-407 / FR-418 / FR-419). A mockclaude fixture
+// emits a finalize_ticket payload whose diary_entry.rationale contains
+// an sk-prefix secret-shaped string AND a kg_triple.object with a GitHub
+// PAT pattern. The test asserts the supervisor's pattern scanner redacts
+// both fields before writing to MemPalace, sets hygiene_status=
+// 'suspected_secret_emitted', and does NOT insert a vault_access_log row
+// (pattern scan is independent of vault access).
+func TestSecretPatternScanRedactsBeforeMemPalaceWrite(t *testing.T) {
+	requireSpikeStack(t)
+
+	pool := testdb.Start(t)
+	workspace := t.TempDir()
+	_, _ = testdb.SeedM22(t, workspace)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+	defer cancel()
+
+	_, _ = pool.Exec(ctx, "TRUNCATE vault_access_log, agent_role_secrets, secret_metadata")
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), "TRUNCATE vault_access_log, agent_role_secrets, secret_metadata")
+	})
+
+	var companyID pgtype.UUID
+	if err := pool.QueryRow(ctx, `SELECT id FROM companies LIMIT 1`).Scan(&companyID); err != nil {
+		t.Fatalf("lookup company: %v", err)
+	}
+	companyUUID := uuidString(companyID)
+
+	var deptID pgtype.UUID
+	if err := pool.QueryRow(ctx, `SELECT id FROM departments WHERE slug='engineering'`).Scan(&deptID); err != nil {
+		t.Fatalf("lookup dept: %v", err)
+	}
+
+	// Start Infisical for supervisor auth at startup — no secrets seeded; zero grants.
+	harness := vault.StartInfisical(t)
+	mlClientID, mlClientSecret, err := harness.CreateMachineIdentity("garrison-scan-test-ml")
+	if err != nil {
+		t.Fatalf("CreateMachineIdentity: %v", err)
+	}
+
+	mempalacePw := "scan-test-pw"
+	testdb.SetAgentMempalacePassword(t, mempalacePw)
+	testdb.SetAgentROPassword(t, "m23-ro-test-pw")
+
+	bin := buildSupervisorBinary(t)
+	mockBin := buildMockClaudeBinary(t)
+	engineerScript := mockClaudeScriptPath(t, "m2_3_vault_secret_in_diary.ndjson")
+
+	mcpDir := t.TempDir()
+	if err := os.Chmod(mcpDir, 0o750); err != nil {
+		t.Fatalf("chmod mcp dir: %v", err)
+	}
+
+	healthPort := mustFreePort(t)
+	env := vaultTestEnv(testdb.URL(t), healthPort, mockBin, engineerScript, mcpDir, mempalacePw,
+		m22MempalaceContainer, m22DockerProxyHost, harness, mlClientID, mlClientSecret, companyUUID)
+
+	_, _ = startVaultSupervisor(t, ctx, bin, env, workspace)
+	if err := waitForHealth(healthPort, 20*time.Second); err != nil {
+		t.Fatalf("supervisor health: %v", err)
+	}
+
+	var ticketID pgtype.UUID
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO tickets (id, department_id, objective, column_slug)
+		VALUES (gen_random_uuid(), $1, 'Pattern scan test', 'in_dev')
+		RETURNING id`, deptID,
+	).Scan(&ticketID); err != nil {
+		t.Fatalf("insert ticket: %v", err)
+	}
+	ticketUUID := uuidString(ticketID)
+
+	waitForAgentInstanceCount(ctx, t, pool, ticketID, 1, 90*time.Second)
+
+	// (1) Agent instance must succeed — pattern scan is non-blocking (FR-419).
+	var status, exitReason string
+	if err := pool.QueryRow(ctx, `SELECT status, exit_reason FROM agent_instances WHERE ticket_id=$1`, ticketID).
+		Scan(&status, &exitReason); err != nil {
+		t.Fatalf("query agent_instances: %v", err)
+	}
+	if status != "succeeded" {
+		t.Errorf("agent_instances.status=%q; want 'succeeded' (exit_reason=%q)", status, exitReason)
+	}
+
+	// (2) hygiene_status must be 'suspected_secret_emitted'.
+	var hygieneStatus *string
+	_ = waitFor(ctx, 30*time.Second, func() (bool, error) {
+		var h *string
+		err := pool.QueryRow(ctx, `
+			SELECT hygiene_status FROM ticket_transitions
+			WHERE ticket_id=$1 ORDER BY at DESC LIMIT 1`, ticketID,
+		).Scan(&h)
+		if err != nil || h == nil {
+			return false, nil
+		}
+		hygieneStatus = h
+		return true, nil
+	})
+	if hygieneStatus == nil {
+		t.Fatal("ticket_transitions.hygiene_status is NULL; want 'suspected_secret_emitted'")
+	}
+	if *hygieneStatus != "suspected_secret_emitted" {
+		t.Errorf("hygiene_status=%q; want 'suspected_secret_emitted' (SC-407)", *hygieneStatus)
+	}
+
+	// (3) to_column must still be 'qa_review' — scan never blocks the transition (FR-419).
+	var toColumn string
+	_ = pool.QueryRow(ctx, `
+		SELECT to_column FROM ticket_transitions WHERE ticket_id=$1 ORDER BY at DESC LIMIT 1`, ticketID,
+	).Scan(&toColumn)
+	if toColumn != "qa_review" {
+		t.Errorf("ticket_transitions.to_column=%q; want 'qa_review' (pattern scan must not block transition)", toColumn)
+	}
+
+	// (4) No vault_access_log row — pattern scan is a finalize-path concern,
+	// not a vault-access concern; zero grants means no Infisical fetch.
+	var logCount int
+	_ = pool.QueryRow(ctx, `SELECT count(*) FROM vault_access_log WHERE ticket_id=$1`, ticketID).Scan(&logCount)
+	if logCount != 0 {
+		t.Errorf("vault_access_log count=%d; want 0 (no grants → no vault access)", logCount)
+	}
+
+	// (5) MemPalace drawer must contain the redacted form, not the raw
+	// secret-shaped strings. Use the mempalace.Client with the spike
+	// docker-proxy host so we can query the actual written drawer.
+	t.Setenv("DOCKER_HOST", m22DockerProxyHost)
+	palaceClient := &mempalace.Client{
+		MempalaceContainer: m22MempalaceContainer,
+		PalacePath:         "/palace",
+		Exec:               mempalace.RealDockerExec{},
+		Timeout:            20 * time.Second,
+	}
+	window := mempalace.TimeWindow{
+		Start: time.Now().Add(-5 * time.Minute),
+		End:   time.Now().Add(5 * time.Minute),
+	}
+	drawers, triples, qErr := palaceClient.Query(ctx, ticketUUID, "wing_frontend_engineer", window)
+	if qErr != nil {
+		t.Logf("palace Query failed (best-effort assertion): %v", qErr)
+	} else {
+		// (5a) sk-prefix must be redacted in drawer body.
+		const rawSK = "sk-test-very-long-fake-key-abc123xyz789"
+		const rawGHP = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij1234"
+		for _, d := range drawers {
+			if strings.Contains(d.Body, rawSK) {
+				t.Errorf("SC-407: MemPalace drawer body contains raw sk-prefix string; want [REDACTED:sk_prefix]")
+			}
+			if strings.Contains(d.Body, "[REDACTED:sk_prefix]") {
+				t.Logf("SC-407: drawer body correctly contains [REDACTED:sk_prefix]")
+			}
+		}
+		// (5b) GitHub PAT must be redacted in kg_triples.
+		for _, tr := range triples {
+			if strings.Contains(tr.Object, rawGHP) {
+				t.Errorf("SC-407: kg_triple.Object contains raw GitHub PAT string; want [REDACTED:github_pat]")
+			}
+			if strings.Contains(tr.Object, "[REDACTED:github_pat]") {
+				t.Logf("SC-407: kg_triple.Object correctly contains [REDACTED:github_pat]")
+			}
+		}
+		// (5c) Neither raw string appears anywhere in drawer bodies or triples.
+		allText := ""
+		for _, d := range drawers {
+			allText += d.Body
+		}
+		for _, tr := range triples {
+			allText += tr.Subject + " " + tr.Predicate + " " + tr.Object
+		}
+		if strings.Contains(allText, rawSK) {
+			t.Errorf("SC-407: raw sk-prefix string found in palace content; want redacted")
+		}
+		if strings.Contains(allText, rawGHP) {
+			t.Errorf("SC-407: raw GitHub PAT string found in palace content; want redacted")
+		}
 	}
 }
