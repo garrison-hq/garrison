@@ -19,6 +19,7 @@ import (
 	"github.com/garrison-hq/garrison/supervisor/internal/pgdb"
 	"github.com/garrison-hq/garrison/supervisor/internal/spawn"
 	"github.com/garrison-hq/garrison/supervisor/internal/store"
+	"github.com/garrison-hq/garrison/supervisor/internal/vault"
 	"github.com/jackc/pgx/v5/pgtype"
 	"golang.org/x/sync/errgroup"
 )
@@ -277,6 +278,25 @@ func runDaemon() int {
 		}
 	}
 
+	// M2.3: construct the vault client from config. Nil on fake-agent paths
+	// (the vault steps are skipped when Vault==nil, preserving M1/M2.1 compat).
+	var vaultClient vault.Fetcher
+	if !cfg.UseFakeAgent {
+		vc, vcErr := vault.NewClient(ctx, vault.ClientConfig{
+			SiteURL:      cfg.InfisicalAddr(),
+			ClientID:     cfg.InfisicalClientID(),
+			ClientSecret: cfg.InfisicalClientSecret(),
+			ProjectID:    cfg.InfisicalProjectID(),
+			Environment:  cfg.InfisicalEnvironment(),
+			Logger:       logger,
+		})
+		if vcErr != nil {
+			logger.Error("vault: failed to create Infisical client; aborting startup", "err", vcErr)
+			return ExitFailure
+		}
+		vaultClient = vc
+	}
+
 	spawnDeps := spawn.Deps{
 		Pool:               pool,
 		Queries:            queries,
@@ -300,6 +320,9 @@ func runDaemon() int {
 		// M2.2.1 — palace + timeout for the atomic finalize writer.
 		Palace:               sharedPalaceClient,
 		FinalizeWriteTimeout: cfg.FinalizeWriteTimeout,
+		// M2.3 — vault client + customer scope for secret injection.
+		Vault:      vaultClient,
+		CustomerID: cfg.CustomerID(),
 	}
 
 	engineerHandler := func(ctx context.Context, eventID pgtype.UUID) error {

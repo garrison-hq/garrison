@@ -31,6 +31,11 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+// ErrVaultMCPBanned is returned by RejectVaultServers (and surfaced by Write)
+// when the composed config contains a banned vault-pattern MCP server name.
+// spawn.go checks for this sentinel to route to ExitVaultMCPInConfig.
+var ErrVaultMCPBanned = errors.New("mcpconfig: vault-pattern server banned")
+
 // bannedMCPNamePatterns lists substring patterns that flag a vault-proxying
 // MCP server in the config (Rule 3 / FR-410 / D2.4). Case-insensitive match.
 var bannedMCPNamePatterns = []string{"vault", "secret", "infisical"}
@@ -44,7 +49,7 @@ func RejectVaultServers(cfg mcpConfig) error {
 		lower := strings.ToLower(name)
 		for _, pattern := range bannedMCPNamePatterns {
 			if strings.Contains(lower, pattern) {
-				return fmt.Errorf("mcpconfig: banned vault-pattern server %q in MCP config", name)
+				return fmt.Errorf("%w: server %q matched pattern %q", ErrVaultMCPBanned, name, pattern)
 			}
 		}
 	}

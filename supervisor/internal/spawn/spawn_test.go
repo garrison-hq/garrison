@@ -1,11 +1,25 @@
 package spawn
 
 import (
+	"context"
+	"errors"
+	"log/slog"
 	"strings"
 	"testing"
 
 	"github.com/garrison-hq/garrison/supervisor/internal/mempalace"
+	"github.com/garrison-hq/garrison/supervisor/internal/vault"
+	"github.com/jackc/pgx/v5/pgtype"
 )
+
+// mockFetcher is a test double for vault.Fetcher.
+type mockFetcher struct {
+	fetch func(ctx context.Context, grants []vault.GrantRow) (map[string]vault.SecretValue, error)
+}
+
+func (m *mockFetcher) Fetch(ctx context.Context, grants []vault.GrantRow) (map[string]vault.SecretValue, error) {
+	return m.fetch(ctx, grants)
+}
 
 // TestTransitionColumnsEngineerM22 — engineer on in_dev → qa_review (M2.2).
 func TestTransitionColumnsEngineerM22(t *testing.T) {
@@ -91,6 +105,132 @@ func TestSpawnDefaultRoleSlug(t *testing.T) {
 	// If this test fails, it means either Spawn's coercion default or
 	// transitionColumns's engineer branch moved — in which case the
 	// M2.2 fake-agent path will land rows on an unexpected column.
+}
+
+// TestSpawnThreadVaultClientThroughDeps — unit-level: verify Fetch is called
+// with the exact GrantRow set returned by GrantsListerFn (T008 / FR-409).
+func TestSpawnThreadVaultClientThroughDeps(t *testing.T) {
+	want := []vault.GrantRow{{EnvVarName: "DB_PASS", SecretPath: "/prod/db"}}
+	var gotGrants []vault.GrantRow
+
+	deps := Deps{
+		Logger: slog.Default(),
+		Vault: &mockFetcher{
+			fetch: func(_ context.Context, grants []vault.GrantRow) (map[string]vault.SecretValue, error) {
+				gotGrants = grants
+				return map[string]vault.SecretValue{"DB_PASS": vault.New([]byte("s3cr3t"))}, nil
+			},
+		},
+		GrantsListerFn: func(_ context.Context, _ string, _ pgtype.UUID) ([]vault.GrantRow, error) {
+			return want, nil
+		},
+		AuditFn: func(_ context.Context, _ vault.AuditRow) error { return nil },
+	}
+
+	fetched, exitReason := vaultOrchestrate(context.Background(), deps, "engineer",
+		pgtype.UUID{}, pgtype.UUID{}, "clean agent md", slog.Default())
+	defer func() {
+		for k := range fetched {
+			sv := fetched[k]
+			sv.Zero()
+		}
+	}()
+
+	if exitReason != "" {
+		t.Fatalf("unexpected exit reason %q; want empty", exitReason)
+	}
+	if len(gotGrants) != 1 || gotGrants[0].EnvVarName != want[0].EnvVarName {
+		t.Errorf("Fetch called with %v; want %v", gotGrants, want)
+	}
+}
+
+// TestSpawnZeroGrantsSkipsFetch — unit-level: when GrantsListerFn returns an
+// empty slice, Fetch must NOT be called (FR-409 zero-grant fast path).
+func TestSpawnZeroGrantsSkipsFetch(t *testing.T) {
+	deps := Deps{
+		Logger: slog.Default(),
+		Vault: &mockFetcher{
+			fetch: func(_ context.Context, _ []vault.GrantRow) (map[string]vault.SecretValue, error) {
+				t.Fatal("Fetch was called but should not have been for zero grants")
+				return nil, nil
+			},
+		},
+		GrantsListerFn: func(_ context.Context, _ string, _ pgtype.UUID) ([]vault.GrantRow, error) {
+			return nil, nil
+		},
+	}
+
+	fetched, exitReason := vaultOrchestrate(context.Background(), deps, "engineer",
+		pgtype.UUID{}, pgtype.UUID{}, "irrelevant", slog.Default())
+	if exitReason != "" {
+		t.Fatalf("unexpected exit reason %q; want empty", exitReason)
+	}
+	if len(fetched) != 0 {
+		t.Errorf("expected empty fetched map; got %v", fetched)
+	}
+}
+
+// TestSpawnLeakScanBlocksSpawn — unit-level: when the fetched secret value
+// appears verbatim in agent.md, vaultOrchestrate returns ExitSecretLeakedInAgentMd
+// and no subprocess is started (no writeFail caller needed here — the non-empty
+// exitReason itself proves the subprocess path would be blocked).
+// Zero is exercised internally (returned map is nil on abort).
+func TestSpawnLeakScanBlocksSpawn(t *testing.T) {
+	const secretVal = "topp-sekrit-value"
+
+	deps := Deps{
+		Logger: slog.Default(),
+		Vault: &mockFetcher{
+			fetch: func(_ context.Context, _ []vault.GrantRow) (map[string]vault.SecretValue, error) {
+				return map[string]vault.SecretValue{"MY_VAR": vault.New([]byte(secretVal))}, nil
+			},
+		},
+		GrantsListerFn: func(_ context.Context, _ string, _ pgtype.UUID) ([]vault.GrantRow, error) {
+			return []vault.GrantRow{{EnvVarName: "MY_VAR", SecretPath: "/prod/my"}}, nil
+		},
+		AuditFn: func(_ context.Context, _ vault.AuditRow) error { return nil },
+	}
+
+	// agentMD deliberately contains the secret value — leak scan should fire.
+	agentMD := "You are an agent. Use token: " + secretVal + " when calling the API."
+
+	fetched, exitReason := vaultOrchestrate(context.Background(), deps, "engineer",
+		pgtype.UUID{}, pgtype.UUID{}, agentMD, slog.Default())
+	if exitReason != ExitSecretLeakedInAgentMd {
+		t.Fatalf("exit reason: got %q; want %q", exitReason, ExitSecretLeakedInAgentMd)
+	}
+	if fetched != nil {
+		t.Error("expected nil fetched map (secrets should be zeroed on abort)")
+	}
+}
+
+// TestSpawnAuditFailureFailsClosed — unit-level: when AuditFn returns
+// ErrVaultAuditFailed, vaultOrchestrate returns ExitVaultAuditFailed and
+// no subprocess is started.
+func TestSpawnAuditFailureFailsClosed(t *testing.T) {
+	deps := Deps{
+		Logger: slog.Default(),
+		Vault: &mockFetcher{
+			fetch: func(_ context.Context, _ []vault.GrantRow) (map[string]vault.SecretValue, error) {
+				return map[string]vault.SecretValue{"API_KEY": vault.New([]byte("key123"))}, nil
+			},
+		},
+		GrantsListerFn: func(_ context.Context, _ string, _ pgtype.UUID) ([]vault.GrantRow, error) {
+			return []vault.GrantRow{{EnvVarName: "API_KEY", SecretPath: "/prod/api"}}, nil
+		},
+		AuditFn: func(_ context.Context, _ vault.AuditRow) error {
+			return errors.New("db full")
+		},
+	}
+
+	fetched, exitReason := vaultOrchestrate(context.Background(), deps, "engineer",
+		pgtype.UUID{}, pgtype.UUID{}, "clean agent md", slog.Default())
+	if exitReason != ExitVaultAuditFailed {
+		t.Fatalf("exit reason: got %q; want %q", exitReason, ExitVaultAuditFailed)
+	}
+	if fetched != nil {
+		t.Error("expected nil fetched map (secrets should be zeroed on audit failure)")
+	}
 }
 
 // TestAcceptanceGateSatisfied — M2.2 engineer@in_dev skips the M1
