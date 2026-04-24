@@ -1,3 +1,5 @@
 /bin/
 /migrations/
 /cmd/supervisor/migrations/
+coverage.out
+int-coverage.out
