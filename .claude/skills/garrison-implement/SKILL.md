@@ -1,5 +1,7 @@
 ---
+name: garrison-implement
 description: Execute a milestone's task list with Garrison's implementation discipline. Usage `/garrison-implement <milestone-id>`, e.g. `/garrison-implement m2-1`.
+user-invocable: true
 ---
 
 Execute the $ARGUMENTS task list. The spec, plan, tasks, and analyze phases are complete. All structural decisions are final. Your job is to produce working code that satisfies the tasks as written, not to revisit the design.

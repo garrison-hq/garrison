@@ -1,5 +1,7 @@
 ---
+name: garrison-tasks
 description: Break the approved milestone plan into executable tasks, following Garrison's task list conventions. Usage `/garrison-tasks <milestone-id>`, e.g. `/garrison-tasks m2-1`.
+user-invocable: true
 ---
 
 Break the approved $ARGUMENTS plan into executable tasks.
