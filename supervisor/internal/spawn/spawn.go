@@ -1284,6 +1284,9 @@ func vaultOrchestrate(
 // auditVaultError writes a best-effort vault_access_log row when Fetch fails.
 // Non-blocking on pool or write errors; caller still fails the spawn.
 func auditVaultError(ctx context.Context, pool *pgxpool.Pool, instanceID, ticketID pgtype.UUID, secretPath string, customerID pgtype.UUID, outcome vault.Outcome, logger *slog.Logger) {
+	if pool == nil {
+		return
+	}
 	auditCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
 	tx, err := pool.Begin(auditCtx)

@@ -441,6 +441,53 @@ func TestRejectVaultServersSubstringMatch(t *testing.T) {
 	}
 }
 
+// TestCheckExtraServersNilAndEmpty — nil and zero-length input are always clean.
+func TestCheckExtraServersNilAndEmpty(t *testing.T) {
+	if err := CheckExtraServers(nil); err != nil {
+		t.Errorf("nil input: want nil error, got %v", err)
+	}
+	if err := CheckExtraServers([]byte{}); err != nil {
+		t.Errorf("empty input: want nil error, got %v", err)
+	}
+}
+
+// TestCheckExtraServersEmptyObject — "{}" is treated as no extra servers.
+func TestCheckExtraServersEmptyObject(t *testing.T) {
+	if err := CheckExtraServers([]byte("{}")); err != nil {
+		t.Errorf(`"{}": want nil error, got %v`, err)
+	}
+}
+
+// TestCheckExtraServersInvalidJSON — malformed JSON returns a wrapped error
+// (not ErrVaultMCPBanned; it's a parse failure).
+func TestCheckExtraServersInvalidJSON(t *testing.T) {
+	err := CheckExtraServers([]byte(`{bad json`))
+	if err == nil {
+		t.Fatal("expected error for invalid JSON, got nil")
+	}
+	if errors.Is(err, ErrVaultMCPBanned) {
+		t.Errorf("expected parse error, not ErrVaultMCPBanned; got %v", err)
+	}
+}
+
+// TestCheckExtraServersBannedName — a server named "vault" triggers
+// ErrVaultMCPBanned.
+func TestCheckExtraServersBannedName(t *testing.T) {
+	raw := []byte(`{"vault":{"command":"/bad/bin"}}`)
+	err := CheckExtraServers(raw)
+	if !errors.Is(err, ErrVaultMCPBanned) {
+		t.Errorf("expected ErrVaultMCPBanned; got %v", err)
+	}
+}
+
+// TestCheckExtraServersCleanName — a server with a non-banned name is allowed.
+func TestCheckExtraServersCleanName(t *testing.T) {
+	raw := []byte(`{"github":{"command":"/usr/bin/gh"}}`)
+	if err := CheckExtraServers(raw); err != nil {
+		t.Errorf("expected nil for clean server name; got %v", err)
+	}
+}
+
 // TestWriteRejectsVaultMCPServer — end-to-end: Write() must return an error
 // and NOT create a file if the composed config contains a banned server.
 func TestWriteRejectsVaultMCPServer(t *testing.T) {

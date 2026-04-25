@@ -233,6 +233,90 @@ func TestSpawnAuditFailureFailsClosed(t *testing.T) {
 	}
 }
 
+// TestVaultOrchestrateNilVault — when deps.Vault is nil, vaultOrchestrate
+// is a no-op: returns nil map and empty exit reason. This preserves
+// M2.1/M2.2 compatibility for supervisors started without vault config.
+func TestVaultOrchestrateNilVault(t *testing.T) {
+	deps := Deps{Logger: slog.Default()} // Vault == nil
+	fetched, exit := vaultOrchestrate(context.Background(), deps, "engineer",
+		pgtype.UUID{}, pgtype.UUID{}, "any agent md", slog.Default())
+	if exit != "" {
+		t.Errorf("exit reason: got %q; want empty", exit)
+	}
+	if fetched != nil {
+		t.Errorf("expected nil fetched map for nil Vault; got %v", fetched)
+	}
+}
+
+// TestVaultOrchestrateGrantsListError — when GrantsListerFn returns an error,
+// vaultOrchestrate exits with ExitSpawnFailed and does not call Fetch.
+func TestVaultOrchestrateGrantsListError(t *testing.T) {
+	deps := Deps{
+		Logger: slog.Default(),
+		Vault: &mockFetcher{
+			fetch: func(_ context.Context, _ []vault.GrantRow) (map[string]vault.SecretValue, error) {
+				t.Fatal("Fetch must not be called when grants list fails")
+				return nil, nil
+			},
+		},
+		GrantsListerFn: func(_ context.Context, _ string, _ pgtype.UUID) ([]vault.GrantRow, error) {
+			return nil, errors.New("db connection refused")
+		},
+	}
+	_, exit := vaultOrchestrate(context.Background(), deps, "engineer",
+		pgtype.UUID{}, pgtype.UUID{}, "irrelevant", slog.Default())
+	if exit != ExitSpawnFailed {
+		t.Errorf("exit reason: got %q; want %q", exit, ExitSpawnFailed)
+	}
+}
+
+// TestVaultOrchestrateFetchError_Unavailable — when Fetch returns
+// ErrVaultUnavailable, vaultOrchestrate returns ExitVaultUnavailable.
+// deps.Pool is nil; auditVaultError returns early on nil pool (best-effort).
+func TestVaultOrchestrateFetchError_Unavailable(t *testing.T) {
+	deps := Deps{
+		Logger: slog.Default(),
+		Vault: &mockFetcher{
+			fetch: func(_ context.Context, _ []vault.GrantRow) (map[string]vault.SecretValue, error) {
+				return nil, vault.ErrVaultUnavailable
+			},
+		},
+		GrantsListerFn: func(_ context.Context, _ string, _ pgtype.UUID) ([]vault.GrantRow, error) {
+			return []vault.GrantRow{{EnvVarName: "API_KEY", SecretPath: "/prod/api"}}, nil
+		},
+	}
+	fetched, exit := vaultOrchestrate(context.Background(), deps, "engineer",
+		pgtype.UUID{}, pgtype.UUID{}, "clean md", slog.Default())
+	if exit != ExitVaultUnavailable {
+		t.Errorf("exit reason: got %q; want %q", exit, ExitVaultUnavailable)
+	}
+	if fetched != nil {
+		t.Errorf("expected nil fetched map on fetch error; got %v", fetched)
+	}
+}
+
+// TestVaultOrchestrateFetchError_PermissionDenied — ErrVaultPermissionDenied
+// maps to OutcomeDeniedInfisical in the audit log and ExitVaultPermissionDenied
+// as the exit reason.
+func TestVaultOrchestrateFetchError_PermissionDenied(t *testing.T) {
+	deps := Deps{
+		Logger: slog.Default(),
+		Vault: &mockFetcher{
+			fetch: func(_ context.Context, _ []vault.GrantRow) (map[string]vault.SecretValue, error) {
+				return nil, vault.ErrVaultPermissionDenied
+			},
+		},
+		GrantsListerFn: func(_ context.Context, _ string, _ pgtype.UUID) ([]vault.GrantRow, error) {
+			return []vault.GrantRow{{EnvVarName: "DB_PASS", SecretPath: "/prod/db"}}, nil
+		},
+	}
+	_, exit := vaultOrchestrate(context.Background(), deps, "engineer",
+		pgtype.UUID{}, pgtype.UUID{}, "clean md", slog.Default())
+	if exit != ExitVaultPermissionDenied {
+		t.Errorf("exit reason: got %q; want %q", exit, ExitVaultPermissionDenied)
+	}
+}
+
 // TestAcceptanceGateSatisfied — M2.2 engineer@in_dev skips the M1
 // hello.txt check; M2.1 engineer@todo still runs it; qa-engineer always
 // skips; unknown roles fall through to the check (M1 safety-net).

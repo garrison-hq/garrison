@@ -123,3 +123,62 @@ func TestScanAndRedact_FalsePositiveShortString(t *testing.T) {
 		}
 	}
 }
+
+// TestScanAllFields_NilFieldSkipped — nil pointer in the fields slice is
+// skipped without panic; non-nil fields are redacted in place.
+func TestScanAllFields_NilFieldSkipped(t *testing.T) {
+	clean := "plain prose"
+	var nilField *string
+	fields := []*string{nilField, &clean}
+	matched := scanAllFields(fields)
+	if matched != nil {
+		t.Errorf("expected nil labels from all-clean input; got %v", matched)
+	}
+	if clean != "plain prose" {
+		t.Errorf("clean field was mutated unexpectedly: %q", clean)
+	}
+}
+
+// TestScanAllFields_RedactsAndAccumulates — secret in a field is redacted
+// in place and the label is returned; a second field with a different
+// pattern accumulates both labels.
+func TestScanAllFields_RedactsAndAccumulates(t *testing.T) {
+	s1 := "key: sk-abcdefghijklmnopqrst123456"
+	s2 := "token: ghp_abcdefghijklmnopqrstuvwxyz0123"
+	fields := []*string{&s1, &s2}
+	matched := scanAllFields(fields)
+	if len(matched) < 2 {
+		t.Fatalf("expected ≥2 labels; got %v", matched)
+	}
+	if !ContainsRedacted(s1) {
+		t.Errorf("s1 not redacted: %q", s1)
+	}
+	if !ContainsRedacted(s2) {
+		t.Errorf("s2 not redacted: %q", s2)
+	}
+}
+
+// TestRedactLabel — RedactLabel formats a label into the [REDACTED:...] shape.
+func TestRedactLabel(t *testing.T) {
+	got := RedactLabel(LabelSKPrefix)
+	if got != "[REDACTED:sk_prefix]" {
+		t.Errorf("RedactLabel = %q; want [REDACTED:sk_prefix]", got)
+	}
+}
+
+// TestContainsRedacted — ContainsRedacted correctly detects and rejects
+// the redaction placeholder regardless of which label is embedded.
+func TestContainsRedacted(t *testing.T) {
+	if !ContainsRedacted("[REDACTED:sk_prefix]") {
+		t.Error("expected ContainsRedacted=true for string containing placeholder")
+	}
+	if !ContainsRedacted("prefix [REDACTED:github_pat] suffix") {
+		t.Error("expected ContainsRedacted=true for embedded placeholder")
+	}
+	if ContainsRedacted("clean prose") {
+		t.Error("expected ContainsRedacted=false for clean string")
+	}
+	if ContainsRedacted("") {
+		t.Error("expected ContainsRedacted=false for empty string")
+	}
+}

@@ -563,6 +563,52 @@ func TestLoadConfigInfisicalClientSecretRequired(t *testing.T) {
 	}
 }
 
+// TestLoadConfigInfisicalProjectIDSet — when GARRISON_INFISICAL_PROJECT_ID
+// is present, InfisicalProjectID() returns it; absent → empty string.
+func TestLoadConfigInfisicalProjectIDSet(t *testing.T) {
+	realAgentEnv(t)
+	t.Setenv("GARRISON_INFISICAL_PROJECT_ID", "proj-abc123")
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load(): unexpected error: %v", err)
+	}
+	if cfg.InfisicalProjectID() != "proj-abc123" {
+		t.Errorf("InfisicalProjectID() = %q; want %q", cfg.InfisicalProjectID(), "proj-abc123")
+	}
+}
+
+// TestLoadConfigInfisicalEnvironmentSet — when GARRISON_INFISICAL_ENVIRONMENT
+// is present, InfisicalEnvironment() returns it; absent → empty string.
+func TestLoadConfigInfisicalEnvironmentSet(t *testing.T) {
+	realAgentEnv(t)
+	t.Setenv("GARRISON_INFISICAL_ENVIRONMENT", "production")
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load(): unexpected error: %v", err)
+	}
+	if cfg.InfisicalEnvironment() != "production" {
+		t.Errorf("InfisicalEnvironment() = %q; want %q", cfg.InfisicalEnvironment(), "production")
+	}
+}
+
+// TestLoadConfigInfisicalOptionalFieldsAbsent — when neither PROJECT_ID nor
+// ENVIRONMENT is set, their accessors return empty strings (both are optional).
+func TestLoadConfigInfisicalOptionalFieldsAbsent(t *testing.T) {
+	realAgentEnv(t)
+	t.Setenv("GARRISON_INFISICAL_PROJECT_ID", "")
+	t.Setenv("GARRISON_INFISICAL_ENVIRONMENT", "")
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load(): unexpected error: %v", err)
+	}
+	if cfg.InfisicalProjectID() != "" {
+		t.Errorf("InfisicalProjectID(): want empty, got %q", cfg.InfisicalProjectID())
+	}
+	if cfg.InfisicalEnvironment() != "" {
+		t.Errorf("InfisicalEnvironment(): want empty, got %q", cfg.InfisicalEnvironment())
+	}
+}
+
 // TestLoadConfigCustomerIDFromEnvOverride — M2.3 T006: GARRISON_CUSTOMER_ID
 // bypasses the DB bootstrap query; accessor returns the parsed UUID.
 func TestLoadConfigCustomerIDFromEnvOverride(t *testing.T) {
