@@ -5,6 +5,10 @@ import (
 	"strings"
 )
 
+// redactedPrefix is the opening token of every redaction placeholder.
+// Defined as a constant to satisfy the S1192 "duplicate string literal" rule.
+const redactedPrefix = "[REDACTED:"
+
 // Label is the pattern name embedded in the [REDACTED:<label>] replacement.
 // Each label uniquely identifies which pattern family matched.
 type Label string
@@ -49,7 +53,7 @@ func ScanAndRedact(s string) (redacted string, matched []Label) {
 	for _, p := range patterns {
 		if p.re.MatchString(redacted) {
 			matched = append(matched, p.label)
-			redacted = p.re.ReplaceAllString(redacted, "[REDACTED:"+string(p.label)+"]")
+			redacted = p.re.ReplaceAllString(redacted, redactedPrefix+string(p.label)+"]")
 		}
 	}
 	return
@@ -78,11 +82,11 @@ func scanAllFields(fields []*string) []Label {
 // so tests can construct expected strings without depending on the private
 // format string.
 func RedactLabel(l Label) string {
-	return "[REDACTED:" + string(l) + "]"
+	return redactedPrefix + string(l) + "]"
 }
 
 // ContainsRedacted reports whether s contains any redaction placeholder,
 // regardless of which label. Useful in tests.
 func ContainsRedacted(s string) bool {
-	return strings.Contains(s, "[REDACTED:")
+	return strings.Contains(s, redactedPrefix)
 }

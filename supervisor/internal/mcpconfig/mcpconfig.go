@@ -140,6 +140,18 @@ func (fp FinalizeParams) enabled() bool {
 	return fp.SupervisorBin != "" && fp.AgentInstanceID != "" && fp.DatabaseURL != ""
 }
 
+// WriteParams bundles all parameters for Write / WriteWithOps so the
+// function signatures stay within SonarQube's S107 parameter-count limit.
+type WriteParams struct {
+	Dir              string
+	InstanceID       pgtype.UUID
+	SupervisorBin    string
+	DSN              string
+	Mempalace        MempalaceParams
+	Finalize         FinalizeParams
+	ExtraServersJSON []byte
+}
+
 // Write creates the per-invocation MCP config file. Returns the absolute
 // path on success. The caller is expected to `defer Remove(path)` against
 // the returned path so every exit path (success, claude error, timeout,
@@ -157,43 +169,43 @@ func (fp FinalizeParams) enabled() bool {
 // internal/mempalace.MCPServerSpec. FR-204 / FR-205 (additive; postgres
 // entry untouched).
 //
-// M2.3 extension (T013): extraServersJSON is the raw JSON from
+// M2.3 extension (T013): ExtraServersJSON is the raw JSON from
 // agents.mcp_config (a JSONB map[name]→mcpServerSpec). If non-nil and
 // non-empty, those entries are merged into the config before Rule 3
 // (RejectVaultServers) runs. This allows the database to hold
 // agent-specific servers; Rule 3 catches any that match vault patterns.
-func Write(ctx context.Context, dir string, instanceID pgtype.UUID, supervisorBin, dsn string, mempalaceParams MempalaceParams, finalizeParams FinalizeParams, extraServersJSON []byte) (string, error) {
-	return WriteWithOps(ctx, DefaultOps, dir, instanceID, supervisorBin, dsn, mempalaceParams, finalizeParams, extraServersJSON)
+func Write(ctx context.Context, p WriteParams) (string, error) {
+	return WriteWithOps(ctx, DefaultOps, p)
 }
 
 // WriteWithOps is the testable form. Production callers use Write.
-func WriteWithOps(_ context.Context, ops fileOps, dir string, instanceID pgtype.UUID, supervisorBin, dsn string, mempalaceParams MempalaceParams, finalizeParams FinalizeParams, extraServersJSON []byte) (string, error) {
-	if dir == "" {
+func WriteWithOps(_ context.Context, ops fileOps, p WriteParams) (string, error) {
+	if p.Dir == "" {
 		return "", errors.New("mcpconfig: dir is empty")
 	}
-	if supervisorBin == "" {
+	if p.SupervisorBin == "" {
 		return "", errors.New("mcpconfig: supervisorBin is empty")
 	}
 	// Canonicalize the UUID to its textual form for the filename.
-	idText, err := formatUUID(instanceID)
+	idText, err := formatUUID(p.InstanceID)
 	if err != nil {
 		return "", fmt.Errorf("mcpconfig: format instanceID: %w", err)
 	}
-	path := filepath.Join(dir, "mcp-config-"+idText+".json")
+	filePath := filepath.Join(p.Dir, "mcp-config-"+idText+".json")
 
 	servers := map[string]mcpServerSpec{
 		"postgres": {
-			Command: supervisorBin,
+			Command: p.SupervisorBin,
 			Args:    []string{"mcp-postgres"},
-			Env:     map[string]string{"GARRISON_PGMCP_DSN": dsn},
+			Env:     map[string]string{"GARRISON_PGMCP_DSN": p.DSN},
 		},
 	}
-	if mempalaceParams.enabled() {
+	if p.Mempalace.enabled() {
 		command, args, env := mempalace.MCPServerSpec(mempalace.SpecConfig{
-			DockerBin:          mempalaceParams.DockerBin,
-			MempalaceContainer: mempalaceParams.MempalaceContainer,
-			PalacePath:         mempalaceParams.PalacePath,
-			DockerHost:         mempalaceParams.DockerHost,
+			DockerBin:          p.Mempalace.DockerBin,
+			MempalaceContainer: p.Mempalace.MempalaceContainer,
+			PalacePath:         p.Mempalace.PalacePath,
+			DockerHost:         p.Mempalace.DockerHost,
 		})
 		servers["mempalace"] = mcpServerSpec{
 			Command: command,
@@ -207,13 +219,13 @@ func WriteWithOps(_ context.Context, ops fileOps, dir string, instanceID pgtype.
 	// can scope its already-committed check and attempt reporting to
 	// this specific spawn. GARRISON_DATABASE_URL lets the handler run
 	// SelectAgentInstanceFinalizedState on every tool call (FR-260).
-	if finalizeParams.enabled() {
+	if p.Finalize.enabled() {
 		servers["finalize"] = mcpServerSpec{
-			Command: finalizeParams.SupervisorBin,
+			Command: p.Finalize.SupervisorBin,
 			Args:    []string{"mcp", "finalize"},
 			Env: map[string]string{
-				"GARRISON_AGENT_INSTANCE_ID": finalizeParams.AgentInstanceID,
-				"GARRISON_DATABASE_URL":      finalizeParams.DatabaseURL,
+				"GARRISON_AGENT_INSTANCE_ID": p.Finalize.AgentInstanceID,
+				"GARRISON_DATABASE_URL":      p.Finalize.DatabaseURL,
 			},
 		}
 	}
@@ -221,9 +233,9 @@ func WriteWithOps(_ context.Context, ops fileOps, dir string, instanceID pgtype.
 	// M2.3 T013: merge agent-specific servers from agents.mcp_config before
 	// Rule 3 runs. An agent may declare additional MCP servers in its DB row;
 	// any vault-pattern name among them triggers ExitVaultMCPInConfig.
-	if len(extraServersJSON) > 0 && string(extraServersJSON) != "{}" {
+	if len(p.ExtraServersJSON) > 0 && string(p.ExtraServersJSON) != "{}" {
 		var extra map[string]mcpServerSpec
-		if err := json.Unmarshal(extraServersJSON, &extra); err != nil {
+		if err := json.Unmarshal(p.ExtraServersJSON, &extra); err != nil {
 			return "", fmt.Errorf("mcpconfig: parse extraServersJSON: %w", err)
 		}
 		for name, spec := range extra {
@@ -247,10 +259,10 @@ func WriteWithOps(_ context.Context, ops fileOps, dir string, instanceID pgtype.
 		return "", fmt.Errorf("mcpconfig: marshal: %w", err)
 	}
 
-	if err := ops.WriteFile(path, data, 0o600); err != nil {
-		return "", fmt.Errorf("mcpconfig: write %s: %w", path, err)
+	if err := ops.WriteFile(filePath, data, 0o600); err != nil {
+		return "", fmt.Errorf("mcpconfig: write %s: %w", filePath, err)
 	}
-	return path, nil
+	return filePath, nil
 }
 
 // Remove deletes the per-invocation config file. Tolerant of

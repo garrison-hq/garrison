@@ -30,7 +30,7 @@ func TestWriteHappyPath(t *testing.T) {
 	dir := t.TempDir()
 	id := mustUUID(t, "11111111-1111-4111-8111-111111111111")
 
-	path, err := Write(context.Background(), dir, id, "/usr/local/bin/supervisor", "postgres://roonly@localhost/garrison", MempalaceParams{}, FinalizeParams{}, nil)
+	path, err := Write(context.Background(), WriteParams{Dir: dir, InstanceID: id, SupervisorBin: "/usr/local/bin/supervisor", DSN: "postgres://roonly@localhost/garrison"})
 	if err != nil {
 		t.Fatalf("Write: %v", err)
 	}
@@ -85,11 +85,11 @@ func TestWriteIsolationAcrossInvocations(t *testing.T) {
 	idA := mustUUID(t, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
 	idB := mustUUID(t, "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
 
-	pathA, err := Write(context.Background(), dir, idA, "/bin/supA", "dsnA", MempalaceParams{}, FinalizeParams{}, nil)
+	pathA, err := Write(context.Background(), WriteParams{Dir: dir, InstanceID: idA, SupervisorBin: "/bin/supA", DSN: "dsnA"})
 	if err != nil {
 		t.Fatalf("write A: %v", err)
 	}
-	pathB, err := Write(context.Background(), dir, idB, "/bin/supB", "dsnB", MempalaceParams{}, FinalizeParams{}, nil)
+	pathB, err := Write(context.Background(), WriteParams{Dir: dir, InstanceID: idB, SupervisorBin: "/bin/supB", DSN: "dsnB"})
 	if err != nil {
 		t.Fatalf("write B: %v", err)
 	}
@@ -129,7 +129,7 @@ func TestRemoveMissingFile(t *testing.T) {
 func TestRemoveRealFile(t *testing.T) {
 	dir := t.TempDir()
 	id := mustUUID(t, "22222222-2222-4222-8222-222222222222")
-	path, err := Write(context.Background(), dir, id, "/bin/sup", "dsn", MempalaceParams{}, FinalizeParams{}, nil)
+	path, err := Write(context.Background(), WriteParams{Dir: dir, InstanceID: id, SupervisorBin: "/bin/sup", DSN: "dsn"})
 	if err != nil {
 		t.Fatalf("Write: %v", err)
 	}
@@ -169,7 +169,7 @@ func TestWriteReturnsErrorOnDiskFull(t *testing.T) {
 	ops := &fakeOps{writeErr: syscall.ENOSPC}
 	id := mustUUID(t, "33333333-3333-4333-8333-333333333333")
 
-	_, err := WriteWithOps(context.Background(), ops, "/var/lib/garrison/mcp", id, "/bin/sup", "dsn", MempalaceParams{}, FinalizeParams{}, nil)
+	_, err := WriteWithOps(context.Background(), ops, WriteParams{Dir: "/var/lib/garrison/mcp", InstanceID: id, SupervisorBin: "/bin/sup", DSN: "dsn"})
 	if err == nil {
 		t.Fatalf("expected error, got nil")
 	}
@@ -190,7 +190,7 @@ func TestWriteReturnsErrorOnDiskFull(t *testing.T) {
 func TestWriteReturnsErrorOnPermissionDenied(t *testing.T) {
 	ops := &fakeOps{writeErr: syscall.EACCES}
 	id := mustUUID(t, "44444444-4444-4444-8444-444444444444")
-	_, err := WriteWithOps(context.Background(), ops, "/var/lib/garrison/mcp", id, "/bin/sup", "dsn", MempalaceParams{}, FinalizeParams{}, nil)
+	_, err := WriteWithOps(context.Background(), ops, WriteParams{Dir: "/var/lib/garrison/mcp", InstanceID: id, SupervisorBin: "/bin/sup", DSN: "dsn"})
 	if err == nil || !errors.Is(err, syscall.EACCES) {
 		t.Fatalf("expected EACCES-wrapped error, got %v", err)
 	}
@@ -223,7 +223,7 @@ func TestWritePostgresPlusMempalace(t *testing.T) {
 		PalacePath:         "/palace",
 		DockerHost:         "tcp://garrison-docker-proxy:2375",
 	}
-	path, err := Write(context.Background(), dir, id, "/bin/sup", "dsn", mp, FinalizeParams{}, nil)
+	path, err := Write(context.Background(), WriteParams{Dir: dir, InstanceID: id, SupervisorBin: "/bin/sup", DSN: "dsn", Mempalace: mp})
 	if err != nil {
 		t.Fatalf("Write: %v", err)
 	}
@@ -278,7 +278,7 @@ func TestWriteMempalaceEnvCarriesDockerHost(t *testing.T) {
 		PalacePath:         "/palace",
 		DockerHost:         "tcp://override:9999",
 	}
-	path, err := Write(context.Background(), dir, id, "/bin/sup", "dsn", mp, FinalizeParams{}, nil)
+	path, err := Write(context.Background(), WriteParams{Dir: dir, InstanceID: id, SupervisorBin: "/bin/sup", DSN: "dsn", Mempalace: mp})
 	if err != nil {
 		t.Fatalf("Write: %v", err)
 	}
@@ -294,7 +294,7 @@ func TestWriteMempalaceEnvCarriesDockerHost(t *testing.T) {
 func TestWriteEmptyMempalaceParamsOmitsEntry(t *testing.T) {
 	dir := t.TempDir()
 	id := mustUUID(t, "77777777-7777-4777-8777-777777777777")
-	path, err := Write(context.Background(), dir, id, "/bin/sup", "dsn", MempalaceParams{}, FinalizeParams{}, nil)
+	path, err := Write(context.Background(), WriteParams{Dir: dir, InstanceID: id, SupervisorBin: "/bin/sup", DSN: "dsn"})
 	if err != nil {
 		t.Fatalf("Write: %v", err)
 	}
@@ -326,7 +326,7 @@ func TestBuildConfigIncludesFinalizeEntry(t *testing.T) {
 		AgentInstanceID: "a1b2c3d4-1111-2222-3333-444455556666",
 		DatabaseURL:     "postgres://garrison_agent_ro:pw@pg/garrison",
 	}
-	path, err := Write(context.Background(), dir, id, "/bin/sup", "dsn", mp, fp, nil)
+	path, err := Write(context.Background(), WriteParams{Dir: dir, InstanceID: id, SupervisorBin: "/bin/sup", DSN: "dsn", Mempalace: mp, Finalize: fp})
 	if err != nil {
 		t.Fatalf("Write: %v", err)
 	}
@@ -365,7 +365,7 @@ func TestBuildConfigIncludesFinalizeEntry(t *testing.T) {
 func TestBuildConfigOmitsFinalizeEntryWhenParamsEmpty(t *testing.T) {
 	dir := t.TempDir()
 	id := mustUUID(t, "99999999-9999-4999-8999-999999999999")
-	path, err := Write(context.Background(), dir, id, "/bin/sup", "dsn", MempalaceParams{}, FinalizeParams{}, nil)
+	path, err := Write(context.Background(), WriteParams{Dir: dir, InstanceID: id, SupervisorBin: "/bin/sup", DSN: "dsn"})
 	if err != nil {
 		t.Fatalf("Write: %v", err)
 	}
@@ -513,4 +513,73 @@ func TestWriteRejectsVaultMCPServer(t *testing.T) {
 	// scenario is covered by the lower-layer test above.)
 	_ = id
 	_ = dir
+}
+
+// TestWriteWithOpsInvalidUUID — WriteWithOps returns an error when the
+// InstanceID is the zero value (Valid == false → formatUUID returns error).
+func TestWriteWithOpsInvalidUUID(t *testing.T) {
+	ops := &fakeOps{}
+	_, err := WriteWithOps(context.Background(), ops, WriteParams{
+		Dir:           "/tmp",
+		InstanceID:    pgtype.UUID{Valid: false},
+		SupervisorBin: "/bin/sup",
+		DSN:           "dsn",
+	})
+	if err == nil {
+		t.Fatal("expected error for invalid UUID, got nil")
+	}
+	if !strings.Contains(err.Error(), "instanceID") {
+		t.Errorf("error %q does not mention instanceID", err.Error())
+	}
+}
+
+// TestWriteWithOpsExtraServersInvalidJSON — WriteWithOps returns a parse error
+// when ExtraServersJSON is malformed (not a vault-ban error).
+func TestWriteWithOpsExtraServersInvalidJSON(t *testing.T) {
+	ops := &fakeOps{}
+	id := mustUUID(t, "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
+	_, err := WriteWithOps(context.Background(), ops, WriteParams{
+		Dir:              "/tmp",
+		InstanceID:       id,
+		SupervisorBin:    "/bin/sup",
+		DSN:              "dsn",
+		ExtraServersJSON: []byte(`{bad json`),
+	})
+	if err == nil {
+		t.Fatal("expected error for invalid ExtraServersJSON, got nil")
+	}
+	if errors.Is(err, ErrVaultMCPBanned) {
+		t.Errorf("expected parse error, not ErrVaultMCPBanned; got %v", err)
+	}
+}
+
+// TestRemoveWithOpsNonExistError — RemoveWithOps surfaces errors that are
+// not fs.ErrNotExist (e.g. EACCES on a locked file).
+func TestRemoveWithOpsNonExistError(t *testing.T) {
+	ops := &fakeOps{removeErr: syscall.EACCES}
+	err := RemoveWithOps(ops, "/some/path")
+	if err == nil {
+		t.Fatal("expected error for EACCES, got nil")
+	}
+	if !errors.Is(err, syscall.EACCES) {
+		t.Errorf("expected EACCES wrapped, got %v", err)
+	}
+}
+
+// TestWriteWithOpsExtraServersBannedName — WriteWithOps returns ErrVaultMCPBanned
+// when ExtraServersJSON contains a server with a banned name (Rule 3 via
+// RejectVaultServers triggered on the merged server map).
+func TestWriteWithOpsExtraServersBannedName(t *testing.T) {
+	ops := &fakeOps{}
+	id := mustUUID(t, "cccccccc-cccc-4ccc-8ccc-cccccccccccc")
+	_, err := WriteWithOps(context.Background(), ops, WriteParams{
+		Dir:              "/tmp",
+		InstanceID:       id,
+		SupervisorBin:    "/bin/sup",
+		DSN:              "dsn",
+		ExtraServersJSON: []byte(`{"infisical":{"command":"/bad/bin"}}`),
+	})
+	if !errors.Is(err, ErrVaultMCPBanned) {
+		t.Errorf("expected ErrVaultMCPBanned for banned server in extra; got %v", err)
+	}
 }

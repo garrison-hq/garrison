@@ -1,11 +1,13 @@
 package spawn
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/garrison-hq/garrison/supervisor/internal/finalize"
+	"github.com/garrison-hq/garrison/supervisor/internal/mempalace"
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
@@ -150,6 +152,96 @@ func TestFinalizeHandlerCleanPayloadUnchanged(t *testing.T) {
 	if payload.KGTriples[0].Object != "ticket_abc" {
 		t.Errorf("kg_triple.object was modified for clean payload: got %q",
 			payload.KGTriples[0].Object)
+	}
+}
+
+// TestToMempalaceTriples — toMempalaceTriples maps finalize.KGTriple fields
+// to mempalace.Triple verbatim.
+func TestToMempalaceTriples(t *testing.T) {
+	ts := time.Date(2026, 4, 25, 10, 0, 0, 0, time.UTC)
+	in := []finalize.KGTriple{
+		{Subject: "agent_a", Predicate: "completed", Object: "ticket_1", ValidFrom: ts},
+		{Subject: "agent_b", Predicate: "created", Object: "file_x", ValidFrom: ts.Add(time.Second)},
+	}
+	out := toMempalaceTriples(in)
+	if len(out) != len(in) {
+		t.Fatalf("len = %d; want %d", len(out), len(in))
+	}
+	for i, got := range out {
+		want := mempalace.Triple{
+			Subject:   in[i].Subject,
+			Predicate: in[i].Predicate,
+			Object:    in[i].Object,
+			ValidFrom: in[i].ValidFrom,
+		}
+		if got != want {
+			t.Errorf("[%d] got %+v; want %+v", i, got, want)
+		}
+	}
+}
+
+// TestToMempalaceTriplesEmpty — empty input produces an empty (non-nil) slice.
+func TestToMempalaceTriplesEmpty(t *testing.T) {
+	out := toMempalaceTriples(nil)
+	if out == nil {
+		t.Fatal("expected non-nil empty slice; got nil")
+	}
+	if len(out) != 0 {
+		t.Fatalf("len = %d; want 0", len(out))
+	}
+}
+
+// TestIsCtxDeadlineExceeded — returns true only when ctx deadline exceeded.
+func TestIsCtxDeadlineExceeded(t *testing.T) {
+	if isCtxDeadlineExceeded(context.Background()) {
+		t.Error("expected false for background context")
+	}
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	if !isCtxDeadlineExceeded(ctx) {
+		t.Error("expected true for already-expired deadline context")
+	}
+}
+
+// TestClassifyCtxErr — returns ExitFinalizeWriteTimeout when deadline exceeded,
+// otherwise the caller-supplied default.
+func TestClassifyCtxErr(t *testing.T) {
+	bgCtx := context.Background()
+	if got := classifyCtxErr(bgCtx, "default_reason"); got != "default_reason" {
+		t.Errorf("got %q; want %q", got, "default_reason")
+	}
+	deadCtx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	if got := classifyCtxErr(deadCtx, "default_reason"); got != ExitFinalizeWriteTimeout {
+		t.Errorf("got %q; want %q", got, ExitFinalizeWriteTimeout)
+	}
+}
+
+// TestScanAndRedactPayloadSubjectPredicate — secret patterns in
+// kg_triple.subject and kg_triple.predicate are redacted in-place.
+func TestScanAndRedactPayloadSubjectPredicate(t *testing.T) {
+	payload := &finalize.FinalizePayload{
+		DiaryEntry: finalize.DiaryEntry{
+			Rationale: "clean rationale",
+		},
+		KGTriples: []finalize.KGTriple{
+			{
+				Subject:   "token=" + testSKToken,
+				Predicate: "used_key=" + testSKToken,
+				Object:    "some_object",
+				ValidFrom: time.Now().UTC(),
+			},
+		},
+	}
+	labels := scanAndRedactPayload(payload)
+	if len(labels) == 0 {
+		t.Fatal("expected labels for secret in subject+predicate; got none")
+	}
+	if strings.Contains(payload.KGTriples[0].Subject, testSKToken) {
+		t.Errorf("raw token still present in kg_triple.subject: %s", payload.KGTriples[0].Subject)
+	}
+	if strings.Contains(payload.KGTriples[0].Predicate, testSKToken) {
+		t.Errorf("raw token still present in kg_triple.predicate: %s", payload.KGTriples[0].Predicate)
 	}
 }
 

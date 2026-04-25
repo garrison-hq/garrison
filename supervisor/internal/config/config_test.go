@@ -609,6 +609,51 @@ func TestLoadConfigInfisicalOptionalFieldsAbsent(t *testing.T) {
 	}
 }
 
+// TestLoadConfigInfisicalClientIDAndSecretAccessors — InfisicalClientID() and
+// InfisicalClientSecret() return the values from env vars when set.
+func TestLoadConfigInfisicalClientIDAndSecretAccessors(t *testing.T) {
+	realAgentEnv(t)
+	t.Setenv("GARRISON_INFISICAL_CLIENT_ID", "my-client-id")
+	t.Setenv("GARRISON_INFISICAL_CLIENT_SECRET", "my-client-secret")
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load(): unexpected error: %v", err)
+	}
+	if cfg.InfisicalClientID() != "my-client-id" {
+		t.Errorf("InfisicalClientID() = %q; want %q", cfg.InfisicalClientID(), "my-client-id")
+	}
+	if cfg.InfisicalClientSecret() != "my-client-secret" {
+		t.Errorf("InfisicalClientSecret() = %q; want %q", cfg.InfisicalClientSecret(), "my-client-secret")
+	}
+}
+
+// TestLoadConfigParseLogLevelWarnErrorDebug — all four valid log levels
+// parse without error; invalid values already tested by TestLoadRejectsInvalidLogLevel.
+func TestLoadConfigParseLogLevelWarnErrorDebug(t *testing.T) {
+	cases := []struct {
+		level string
+		want  slog.Level
+	}{
+		{"warn", slog.LevelWarn},
+		{"error", slog.LevelError},
+		{"debug", slog.LevelDebug},
+	}
+	for _, tc := range cases {
+		t.Run(tc.level, func(t *testing.T) {
+			realAgentEnv(t)
+			t.Setenv("GARRISON_LOG_LEVEL", tc.level)
+			cfg, err := config.Load()
+			if err != nil {
+				t.Fatalf("Load(): unexpected error for level %q: %v", tc.level, err)
+			}
+			if cfg.LogLevel != tc.want {
+				t.Errorf("LogLevel = %v; want %v", cfg.LogLevel, tc.want)
+			}
+		})
+	}
+}
+
 // TestLoadConfigCustomerIDFromEnvOverride — M2.3 T006: GARRISON_CUSTOMER_ID
 // bypasses the DB bootstrap query; accessor returns the parsed UUID.
 func TestLoadConfigCustomerIDFromEnvOverride(t *testing.T) {

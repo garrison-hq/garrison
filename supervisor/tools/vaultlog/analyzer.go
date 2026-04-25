@@ -29,6 +29,8 @@ var Analyzer = &analysis.Analyzer{
 
 const diagMsg = "vault.SecretValue passed to %s; use sv.LogValue() for slog or do not print; see AGENTS.md + threat model Rule 6"
 
+const pkgSlog = "log/slog"
+
 // guardedSlogFuncs are the log/slog package-level functions to watch.
 var guardedSlogFuncs = map[string]bool{
 	"Info": true, "Warn": true, "Error": true, "Debug": true, "Log": true,
@@ -49,9 +51,18 @@ var guardedLogFuncs = map[string]bool{
 
 func run(pass *analysis.Pass) (interface{}, error) {
 	insp := pass.ResultOf[inspect.Analyzer].(*inspector.Inspector)
+	nolintLines := buildNolintLines(pass)
+	nolinted := makeNolintedChecker(pass, nolintLines)
+	insp.Preorder([]ast.Node{(*ast.CallExpr)(nil)}, func(n ast.Node) {
+		checkCallExpr(n, pass, nolinted)
+	})
+	return nil, nil
+}
 
-	// Precompute nolint lines per file.
-	nolintLines := map[token.Pos]map[int]bool{} // file start pos → line set
+// buildNolintLines scans each file's comments and builds a map from file
+// start position to the set of line numbers carrying "nolint:vaultlog".
+func buildNolintLines(pass *analysis.Pass) map[token.Pos]map[int]bool {
+	nolintLines := map[token.Pos]map[int]bool{}
 	for _, f := range pass.Files {
 		lines := map[int]bool{}
 		for _, cg := range f.Comments {
@@ -63,12 +74,16 @@ func run(pass *analysis.Pass) (interface{}, error) {
 		}
 		nolintLines[f.Pos()] = lines
 	}
+	return nolintLines
+}
 
-	nolinted := func(pos token.Pos) bool {
+// makeNolintedChecker returns a function that reports whether a given token
+// position is on a line suppressed by "nolint:vaultlog".
+func makeNolintedChecker(pass *analysis.Pass, nolintLines map[token.Pos]map[int]bool) func(token.Pos) bool {
+	return func(pos token.Pos) bool {
 		p := pass.Fset.Position(pos)
 		for _, f := range pass.Files {
-			fpos := pass.Fset.Position(f.Pos())
-			if fpos.Filename == p.Filename {
+			if pass.Fset.Position(f.Pos()).Filename == p.Filename {
 				if m, ok := nolintLines[f.Pos()]; ok {
 					return m[p.Line]
 				}
@@ -76,30 +91,22 @@ func run(pass *analysis.Pass) (interface{}, error) {
 		}
 		return false
 	}
+}
 
-	insp.Preorder([]ast.Node{(*ast.CallExpr)(nil)}, func(n ast.Node) {
-		call := n.(*ast.CallExpr)
-
-		calleeName, calleePkg := resolveCallee(call, pass)
-		if calleeName == "" {
-			return
+// checkCallExpr inspects a single call expression and reports any argument
+// that is a vault.SecretValue on a non-nolinted line.
+func checkCallExpr(n ast.Node, pass *analysis.Pass, nolinted func(token.Pos) bool) {
+	call := n.(*ast.CallExpr)
+	calleeName, calleePkg := resolveCallee(call, pass)
+	if calleeName == "" || !isGuardedCall(calleePkg, calleeName) {
+		return
+	}
+	displayName := calleePkg + "." + calleeName
+	for _, arg := range call.Args {
+		if isSecretArg(arg, pass) && !nolinted(call.Pos()) {
+			pass.Reportf(arg.Pos(), diagMsg, displayName)
 		}
-		if !isGuardedCall(calleePkg, calleeName) {
-			return
-		}
-
-		displayName := calleePkg + "." + calleeName
-		for _, arg := range call.Args {
-			if isSecretArg(arg, pass) {
-				if nolinted(call.Pos()) {
-					continue
-				}
-				pass.Reportf(arg.Pos(), diagMsg, displayName)
-			}
-		}
-	})
-
-	return nil, nil
+	}
 }
 
 // resolveCallee returns (funcName, pkgPath) for a call expression if the callee
@@ -127,7 +134,7 @@ func resolveCallee(call *ast.CallExpr, pass *analysis.Pass) (name, pkg string) {
 	recvType := pass.TypesInfo.TypeOf(sel.X)
 	if recvType != nil {
 		if isLoggerType(recvType) {
-			return funcName, "log/slog"
+			return funcName, pkgSlog
 		}
 	}
 
@@ -146,13 +153,13 @@ func isLoggerType(typ types.Type) bool {
 		return false
 	}
 	obj := named.Obj()
-	return obj.Name() == "Logger" && obj.Pkg() != nil && obj.Pkg().Path() == "log/slog"
+	return obj.Name() == "Logger" && obj.Pkg() != nil && obj.Pkg().Path() == pkgSlog
 }
 
 // isGuardedCall returns true when (pkgPath, funcName) is in the watched set.
 func isGuardedCall(pkgPath, funcName string) bool {
 	switch pkgPath {
-	case "log/slog":
+	case pkgSlog:
 		return guardedSlogFuncs[funcName]
 	case "fmt":
 		return guardedFmtFuncs[funcName]
@@ -166,8 +173,7 @@ func isGuardedCall(pkgPath, funcName string) bool {
 // .UnsafeBytes() call (which yields []byte but signals raw secret access).
 func isSecretArg(arg ast.Expr, pass *analysis.Pass) bool {
 	// Direct vault.SecretValue value.
-	typ := pass.TypesInfo.TypeOf(arg)
-	if typ != nil && isSecretValueType(typ) {
+	if typ := pass.TypesInfo.TypeOf(arg); typ != nil && isSecretValueType(typ) {
 		return true
 	}
 	// .UnsafeBytes() call — the return type is []byte, but the caller is
@@ -175,9 +181,7 @@ func isSecretArg(arg ast.Expr, pass *analysis.Pass) bool {
 	if call, ok := arg.(*ast.CallExpr); ok {
 		if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
 			if sel.Sel.Name == "UnsafeBytes" {
-				// Confirm the receiver is a SecretValue (or pointer to it).
-				recvTyp := pass.TypesInfo.TypeOf(sel.X)
-				if recvTyp != nil && isSecretValueType(recvTyp) {
+				if rt := pass.TypesInfo.TypeOf(sel.X); rt != nil && isSecretValueType(rt) {
 					return true
 				}
 			}

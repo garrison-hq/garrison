@@ -41,6 +41,15 @@ import (
 // SC-411 dep-pin verification.
 const InfisicalImage = "infisical/infisical:v0.159.22"
 
+// String constants for repeated API path segments and error messages.
+const (
+	uaIdentitiesAPIPath          = "/api/v1/auth/universal-auth/identities/"
+	trustedIPAll                 = "0.0.0.0/0"
+	errMsgCreateIdentity         = "create identity: %w"
+	errMsgConfigureUniversalAuth = "configure universal auth: %w"
+	errMsgCreateClientSecret     = "create client secret: %w"
+)
+
 // network alias constants for intra-container DNS within the shared bridge.
 const (
 	infisicalPGAlias    = "infisical-postgres"
@@ -78,19 +87,19 @@ func (h *InfisicalTestHarness) CreateMachineIdentity(name string) (clientID, cli
 	// Step 1: create identity in the organisation.
 	identityID, err := h.createIdentity(name)
 	if err != nil {
-		return "", "", fmt.Errorf("create identity: %w", err)
+		return "", "", fmt.Errorf(errMsgCreateIdentity, err)
 	}
 
 	// Step 2: configure Universal Auth and get client ID.
 	clientID, err = h.configureUniversalAuth(identityID)
 	if err != nil {
-		return "", "", fmt.Errorf("configure universal auth: %w", err)
+		return "", "", fmt.Errorf(errMsgConfigureUniversalAuth, err)
 	}
 
 	// Step 3: create a client secret.
 	clientSecret, err = h.createClientSecret(identityID)
 	if err != nil {
-		return "", "", fmt.Errorf("create client secret: %w", err)
+		return "", "", fmt.Errorf(errMsgCreateClientSecret, err)
 	}
 
 	// Step 4: add identity to the project with admin role so it can read secrets.
@@ -410,13 +419,13 @@ func (h *InfisicalTestHarness) createIdentity(name string) (string, error) {
 
 func (h *InfisicalTestHarness) configureUniversalAuth(identityID string) (string, error) {
 	body := map[string]interface{}{
-		"clientSecretTrustedIps":  []map[string]string{{"ipAddress": "0.0.0.0/0"}},
-		"accessTokenTrustedIps":   []map[string]string{{"ipAddress": "0.0.0.0/0"}},
+		"clientSecretTrustedIps":  []map[string]string{{"ipAddress": trustedIPAll}},
+		"accessTokenTrustedIps":   []map[string]string{{"ipAddress": trustedIPAll}},
 		"accessTokenTTL":          86400,
 		"accessTokenMaxTTL":       2592000,
 		"accessTokenNumUsesLimit": 0,
 	}
-	resp, err := h.apiCall("POST", "/api/v1/auth/universal-auth/identities/"+identityID, body)
+	resp, err := h.apiCall("POST", uaIdentitiesAPIPath+identityID, body)
 	if err != nil {
 		return "", err
 	}
@@ -442,7 +451,7 @@ func (h *InfisicalTestHarness) createClientSecret(identityID string) (string, er
 		"numUsesLimit": 0,
 		"ttl":          0,
 	}
-	resp, err := h.apiCall("POST", "/api/v1/auth/universal-auth/identities/"+identityID+"/client-secrets", body)
+	resp, err := h.apiCall("POST", uaIdentitiesAPIPath+identityID+"/client-secrets", body)
 	if err != nil {
 		return "", err
 	}
@@ -600,15 +609,15 @@ func (h *InfisicalTestHarness) StopInfisical(ctx context.Context) error {
 func (h *InfisicalTestHarness) CreateMachineIdentityNoProjectAccess(name string) (clientID, clientSecret string, err error) {
 	identityID, err := h.createIdentity(name)
 	if err != nil {
-		return "", "", fmt.Errorf("create identity: %w", err)
+		return "", "", fmt.Errorf(errMsgCreateIdentity, err)
 	}
 	clientID, err = h.configureUniversalAuth(identityID)
 	if err != nil {
-		return "", "", fmt.Errorf("configure universal auth: %w", err)
+		return "", "", fmt.Errorf(errMsgConfigureUniversalAuth, err)
 	}
 	clientSecret, err = h.createClientSecret(identityID)
 	if err != nil {
-		return "", "", fmt.Errorf("create client secret: %w", err)
+		return "", "", fmt.Errorf(errMsgCreateClientSecret, err)
 	}
 	// Intentionally NOT calling addIdentityToProject: the ML has no project access.
 	return clientID, clientSecret, nil
@@ -621,18 +630,18 @@ func (h *InfisicalTestHarness) CreateMachineIdentityNoProjectAccess(name string)
 func (h *InfisicalTestHarness) CreateShortLivedMachineIdentity(name string) (clientID, clientSecret string, err error) {
 	identityID, err := h.createIdentity(name)
 	if err != nil {
-		return "", "", fmt.Errorf("create identity: %w", err)
+		return "", "", fmt.Errorf(errMsgCreateIdentity, err)
 	}
 	// accessTokenTTL=1 means the access token expires after 1 second.
 	clientID, err = h.configureUniversalAuthWithTTL(identityID, 1)
 	if err != nil {
-		return "", "", fmt.Errorf("configure universal auth: %w", err)
+		return "", "", fmt.Errorf(errMsgConfigureUniversalAuth, err)
 	}
 	// numUsesLimit=1: client secret can only authenticate once (the initial
 	// vault.NewClient call). Any subsequent re-auth attempt will be rejected.
 	clientSecret, err = h.createClientSecretWithLimit(identityID, 1)
 	if err != nil {
-		return "", "", fmt.Errorf("create client secret: %w", err)
+		return "", "", fmt.Errorf(errMsgCreateClientSecret, err)
 	}
 	if err := h.addIdentityToProject(identityID); err != nil {
 		return "", "", fmt.Errorf("add identity to project: %w", err)
@@ -642,13 +651,13 @@ func (h *InfisicalTestHarness) CreateShortLivedMachineIdentity(name string) (cli
 
 func (h *InfisicalTestHarness) configureUniversalAuthWithTTL(identityID string, accessTokenTTL int) (string, error) {
 	body := map[string]interface{}{
-		"clientSecretTrustedIps":  []map[string]string{{"ipAddress": "0.0.0.0/0"}},
-		"accessTokenTrustedIps":   []map[string]string{{"ipAddress": "0.0.0.0/0"}},
+		"clientSecretTrustedIps":  []map[string]string{{"ipAddress": trustedIPAll}},
+		"accessTokenTrustedIps":   []map[string]string{{"ipAddress": trustedIPAll}},
 		"accessTokenTTL":          accessTokenTTL,
 		"accessTokenMaxTTL":       2592000,
 		"accessTokenNumUsesLimit": 0,
 	}
-	resp, err := h.apiCall("POST", "/api/v1/auth/universal-auth/identities/"+identityID, body)
+	resp, err := h.apiCall("POST", uaIdentitiesAPIPath+identityID, body)
 	if err != nil {
 		return "", err
 	}
@@ -674,7 +683,7 @@ func (h *InfisicalTestHarness) createClientSecretWithLimit(identityID string, nu
 		"numUsesLimit": numUsesLimit,
 		"ttl":          0,
 	}
-	resp, err := h.apiCall("POST", "/api/v1/auth/universal-auth/identities/"+identityID+"/client-secrets", body)
+	resp, err := h.apiCall("POST", uaIdentitiesAPIPath+identityID+"/client-secrets", body)
 	if err != nil {
 		return "", err
 	}

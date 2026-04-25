@@ -150,36 +150,42 @@ func (c *Client) Fetch(ctx context.Context, req []GrantRow) (map[string]SecretVa
 	if len(req) == 0 {
 		return map[string]SecretValue{}, nil
 	}
-
 	result := make(map[string]SecretValue, len(req))
-
 	c.mu.Lock()
 	defer c.mu.Unlock()
-
 	for _, grant := range req {
-		val, err := c.fetchOneUnderLock(ctx, grant)
+		val, err := c.fetchOneUnderLockWithRetry(ctx, grant)
 		if err != nil {
-			var apiErr *infisicalErrors.APIError
-			if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusUnauthorized {
-				// Re-authenticate once and retry this single grant.
-				if reauthErr := c.reauthenticateUnderLock(ctx); reauthErr != nil {
-					return nil, ErrVaultAuthExpired
-				}
-				val, err = c.fetchOneUnderLock(ctx, grant)
-				if err != nil {
-					var retryErr *infisicalErrors.APIError
-					if errors.As(err, &retryErr) && retryErr.StatusCode == http.StatusUnauthorized {
-						return nil, ErrVaultAuthExpired
-					}
-					return nil, classifySDKError(err)
-				}
-			} else {
-				return nil, classifySDKError(err)
-			}
+			return nil, err
 		}
 		result[grant.EnvVarName] = val
 	}
 	return result, nil
+}
+
+// fetchOneUnderLockWithRetry fetches one grant, re-authenticating once on 401.
+// Must be called with c.mu held.
+func (c *Client) fetchOneUnderLockWithRetry(ctx context.Context, grant GrantRow) (SecretValue, error) {
+	val, err := c.fetchOneUnderLock(ctx, grant)
+	if err == nil {
+		return val, nil
+	}
+	var apiErr *infisicalErrors.APIError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusUnauthorized {
+		return SecretValue{}, classifySDKError(err)
+	}
+	if reauthErr := c.reauthenticateUnderLock(ctx); reauthErr != nil {
+		return SecretValue{}, ErrVaultAuthExpired
+	}
+	val, err = c.fetchOneUnderLock(ctx, grant)
+	if err == nil {
+		return val, nil
+	}
+	var retryErr *infisicalErrors.APIError
+	if errors.As(err, &retryErr) && retryErr.StatusCode == http.StatusUnauthorized {
+		return SecretValue{}, ErrVaultAuthExpired
+	}
+	return SecretValue{}, classifySDKError(err)
 }
 
 // fetchOneUnderLock fetches a single secret. Must be called with c.mu held.
