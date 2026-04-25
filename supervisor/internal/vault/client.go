@@ -28,12 +28,12 @@ type GrantRow struct {
 // ClientConfig holds the configuration for vault.Client. All fields are
 // required unless marked optional.
 type ClientConfig struct {
-	SiteURL      string       // Infisical server URL, e.g. "http://garrison-infisical:8080"
-	ClientID     string       // Machine Identity client_id (GARRISON_INFISICAL_CLIENT_ID)
-	ClientSecret string       // Machine Identity client_secret (GARRISON_INFISICAL_CLIENT_SECRET)
-	CustomerID   string       // Garrison customer UUID string (from companies.id)
-	ProjectID    string       // Infisical project ID (GARRISON_INFISICAL_PROJECT_ID)
-	Environment  string       // Infisical environment slug, e.g. "prod" (GARRISON_INFISICAL_ENVIRONMENT)
+	SiteURL      string // Infisical server URL, e.g. "http://garrison-infisical:8080"
+	ClientID     string // Machine Identity client_id (GARRISON_INFISICAL_CLIENT_ID)
+	ClientSecret string // Machine Identity client_secret (GARRISON_INFISICAL_CLIENT_SECRET)
+	CustomerID   string // Garrison customer UUID string (from companies.id)
+	ProjectID    string // Infisical project ID (GARRISON_INFISICAL_PROJECT_ID)
+	Environment  string // Infisical environment slug, e.g. "prod" (GARRISON_INFISICAL_ENVIRONMENT)
 	Logger       *slog.Logger
 }
 

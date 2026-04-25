@@ -381,9 +381,9 @@ func TestBuildConfigOmitsFinalizeEntryWhenParamsEmpty(t *testing.T) {
 // finalize) must NOT trigger the banned-pattern filter.
 func TestRejectVaultServersNoMatch(t *testing.T) {
 	cfg := mcpConfig{MCPServers: map[string]mcpServerSpec{
-		"postgres":   {Command: "/bin/sup"},
-		"mempalace":  {Command: "/bin/docker"},
-		"finalize":   {Command: "/bin/sup"},
+		"postgres":  {Command: "/bin/sup"},
+		"mempalace": {Command: "/bin/docker"},
+		"finalize":  {Command: "/bin/sup"},
 	}}
 	if err := RejectVaultServers(cfg); err != nil {
 		t.Errorf("baseline servers should not be banned; got: %v", err)

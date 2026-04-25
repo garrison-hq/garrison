@@ -9,7 +9,7 @@ import "log/slog"
 // ("SecretValue") in a package whose path ends with "vault".
 type SecretValue struct{ b []byte }
 
-func New(b []byte) SecretValue        { return SecretValue{b: append([]byte(nil), b...)} }
-func (v SecretValue) UnsafeBytes() []byte { return v.b }
+func New(b []byte) SecretValue             { return SecretValue{b: append([]byte(nil), b...)} }
+func (v SecretValue) UnsafeBytes() []byte  { return v.b }
 func (v SecretValue) LogValue() slog.Value { return slog.StringValue("[REDACTED]") }
-func (v SecretValue) String() string   { return "[REDACTED]" }
+func (v SecretValue) String() string       { return "[REDACTED]" }

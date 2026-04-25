@@ -518,18 +518,20 @@ func TestConfigRejectsNegativeFinalizeTimeout(t *testing.T) {
 	}
 }
 
-// TestLoadConfigInfisicalAddrRequired — M2.3 T006: GARRISON_INFISICAL_ADDR
-// must be set on the real-Claude path.
-func TestLoadConfigInfisicalAddrRequired(t *testing.T) {
+// TestLoadConfigInfisicalAddrOptional — M2.3: when GARRISON_INFISICAL_ADDR is
+// unset the supervisor starts without vault (vault is opt-in, not required).
+// M2.1/M2.2 integration tests rely on this: they run real-Claude mode without
+// vault env vars, so Load() must not fail when addr is absent.
+func TestLoadConfigInfisicalAddrOptional(t *testing.T) {
 	realAgentEnv(t)
 	t.Setenv("GARRISON_INFISICAL_ADDR", "")
 
-	_, err := config.Load()
-	if err == nil {
-		t.Fatal("Load(): want error when GARRISON_INFISICAL_ADDR is unset")
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load(): unexpected error when GARRISON_INFISICAL_ADDR is unset: %v", err)
 	}
-	if !strings.Contains(err.Error(), "GARRISON_INFISICAL_ADDR") {
-		t.Errorf("error = %v; want it to name GARRISON_INFISICAL_ADDR", err)
+	if cfg.InfisicalAddr() != "" {
+		t.Errorf("InfisicalAddr() = %q; want empty string when env var is unset", cfg.InfisicalAddr())
 	}
 }
 

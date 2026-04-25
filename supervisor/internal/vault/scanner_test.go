@@ -26,16 +26,16 @@ var scanNegativeCases = []struct {
 	label Label
 	input string
 }{
-	{LabelSKPrefix, "sk-short"},          // too short (< 20 chars after prefix)
-	{LabelXOXBPrefix, "xoxb-short"},      // too short
-	{LabelAWSAKIA, "AKIAshort"},          // too short (< 16 uppercase+digits)
-	{LabelPEMHeader, "BEGIN RSA KEY"},    // no leading dashes
-	{LabelGitHubPAT, "ghp_tooshort"},     // < 30 chars after prefix
+	{LabelSKPrefix, "sk-short"},       // too short (< 20 chars after prefix)
+	{LabelXOXBPrefix, "xoxb-short"},   // too short
+	{LabelAWSAKIA, "AKIAshort"},       // too short (< 16 uppercase+digits)
+	{LabelPEMHeader, "BEGIN RSA KEY"}, // no leading dashes
+	{LabelGitHubPAT, "ghp_tooshort"},  // < 30 chars after prefix
 	{LabelGitHubApp, "gho_tooshort"},
 	{LabelGitHubUser, "ghu_tooshort"},
 	{LabelGitHubServer, "ghs_tooshort"},
 	{LabelGitHubRefresh, "ghr_tooshort"},
-	{LabelBearerShape, "Bearer token"},   // no "Authorization:" prefix
+	{LabelBearerShape, "Bearer token"}, // no "Authorization:" prefix
 }
 
 func TestScanAndRedact_Positive(t *testing.T) {

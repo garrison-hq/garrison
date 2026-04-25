@@ -123,12 +123,12 @@ type Config struct {
 	agentMempalacePassword string
 
 	// M2.3 Infisical fields — unexported; accessed via accessor methods.
-	infisicalAddr          string
-	infisicalClientID      string
-	infisicalClientSecret  string
-	infisicalProjectID     string
-	infisicalEnvironment   string
-	customerID             pgtype.UUID
+	infisicalAddr         string
+	infisicalClientID     string
+	infisicalClientSecret string
+	infisicalProjectID    string
+	infisicalEnvironment  string
+	customerID            pgtype.UUID
 }
 
 // AgentMempalaceDSN returns the SELECT-only DSN the hygiene checker uses.
@@ -381,47 +381,51 @@ func Load() (*Config, error) {
 	cfg.DockerBin = dockerBin
 
 	// M2.3: Infisical connection settings (D6.3 / FR-402).
-	infisicalAddr := os.Getenv("GARRISON_INFISICAL_ADDR")
-	if infisicalAddr == "" {
-		return nil, fmt.Errorf("config: required env var GARRISON_INFISICAL_ADDR is unset or empty")
-	}
-	cfg.infisicalAddr = infisicalAddr
+	// Vault is optional: when GARRISON_INFISICAL_ADDR is unset the supervisor
+	// starts without a vault client and skips all vault steps (zero-grant
+	// spawns proceed normally). This preserves M2.1/M2.2 integration test
+	// compatibility — those tests use real-Claude mode without vault env vars.
+	// When GARRISON_INFISICAL_ADDR is set, CLIENT_ID and CLIENT_SECRET are
+	// still required (partial config is always an operator error).
+	if infisicalAddr := os.Getenv("GARRISON_INFISICAL_ADDR"); infisicalAddr != "" {
+		cfg.infisicalAddr = infisicalAddr
 
-	infisicalClientID := os.Getenv("GARRISON_INFISICAL_CLIENT_ID")
-	if infisicalClientID == "" {
-		return nil, fmt.Errorf("config: required env var GARRISON_INFISICAL_CLIENT_ID is unset or empty")
-	}
-	cfg.infisicalClientID = infisicalClientID
-
-	infisicalClientSecret := os.Getenv("GARRISON_INFISICAL_CLIENT_SECRET")
-	if infisicalClientSecret == "" {
-		return nil, fmt.Errorf("config: required env var GARRISON_INFISICAL_CLIENT_SECRET is unset or empty")
-	}
-	cfg.infisicalClientSecret = infisicalClientSecret
-
-	if v := os.Getenv("GARRISON_INFISICAL_PROJECT_ID"); v != "" {
-		cfg.infisicalProjectID = v
-	}
-	if v := os.Getenv("GARRISON_INFISICAL_ENVIRONMENT"); v != "" {
-		cfg.infisicalEnvironment = v
-	}
-
-	// Resolve customer_id from companies table once at startup (OQ-2).
-	// GARRISON_CUSTOMER_ID overrides the DB query for environments where
-	// the UUID is known statically (e.g. Coolify env block). When unset,
-	// the one-shot pool is opened and closed before Load returns.
-	if v := os.Getenv("GARRISON_CUSTOMER_ID"); v != "" {
-		var id pgtype.UUID
-		if err := id.Scan(v); err != nil {
-			return nil, fmt.Errorf("config: GARRISON_CUSTOMER_ID %q is not a valid UUID: %w", v, err)
+		infisicalClientID := os.Getenv("GARRISON_INFISICAL_CLIENT_ID")
+		if infisicalClientID == "" {
+			return nil, fmt.Errorf("config: GARRISON_INFISICAL_ADDR is set but GARRISON_INFISICAL_CLIENT_ID is unset or empty")
 		}
-		cfg.customerID = id
-	} else {
-		customerID, err := resolveCustomerID(cfg.DatabaseURL)
-		if err != nil {
-			return nil, err
+		cfg.infisicalClientID = infisicalClientID
+
+		infisicalClientSecret := os.Getenv("GARRISON_INFISICAL_CLIENT_SECRET")
+		if infisicalClientSecret == "" {
+			return nil, fmt.Errorf("config: GARRISON_INFISICAL_ADDR is set but GARRISON_INFISICAL_CLIENT_SECRET is unset or empty")
 		}
-		cfg.customerID = customerID
+		cfg.infisicalClientSecret = infisicalClientSecret
+
+		if v := os.Getenv("GARRISON_INFISICAL_PROJECT_ID"); v != "" {
+			cfg.infisicalProjectID = v
+		}
+		if v := os.Getenv("GARRISON_INFISICAL_ENVIRONMENT"); v != "" {
+			cfg.infisicalEnvironment = v
+		}
+
+		// Resolve customer_id from companies table once at startup (OQ-2).
+		// GARRISON_CUSTOMER_ID overrides the DB query for environments where
+		// the UUID is known statically (e.g. Coolify env block). When unset,
+		// the one-shot pool is opened and closed before Load returns.
+		if v := os.Getenv("GARRISON_CUSTOMER_ID"); v != "" {
+			var id pgtype.UUID
+			if err := id.Scan(v); err != nil {
+				return nil, fmt.Errorf("config: GARRISON_CUSTOMER_ID %q is not a valid UUID: %w", v, err)
+			}
+			cfg.customerID = id
+		} else {
+			customerID, err := resolveCustomerID(cfg.DatabaseURL)
+			if err != nil {
+				return nil, err
+			}
+			cfg.customerID = customerID
+		}
 	}
 
 	return cfg, nil

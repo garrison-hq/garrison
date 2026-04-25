@@ -21,7 +21,7 @@ type mockSDK struct {
 	secrets *mockSecrets
 }
 
-func (m *mockSDK) Auth() infisical.AuthInterface    { return m.auth }
+func (m *mockSDK) Auth() infisical.AuthInterface       { return m.auth }
 func (m *mockSDK) Secrets() infisical.SecretsInterface { return m.secrets }
 
 // --- mockAuth ---
@@ -39,9 +39,9 @@ func (a *mockAuth) UniversalAuthLogin(_, _ string) (infisical.MachineIdentityCre
 	}
 	return infisical.MachineIdentityCredential{AccessToken: a.token}, nil
 }
-func (a *mockAuth) SetAccessToken(_ string)                    {}
-func (a *mockAuth) GetAccessToken() string                     { return a.token }
-func (a *mockAuth) GetOrganizationSlug() string                { return "" }
+func (a *mockAuth) SetAccessToken(_ string)                               {}
+func (a *mockAuth) GetAccessToken() string                                { return a.token }
+func (a *mockAuth) GetOrganizationSlug() string                           { return "" }
 func (a *mockAuth) WithOrganizationSlug(_ string) infisical.AuthInterface { return a }
 func (a *mockAuth) JwtAuthLogin(_, _ string) (infisical.MachineIdentityCredential, error) {
 	return infisical.MachineIdentityCredential{}, nil
@@ -78,8 +78,8 @@ func (a *mockAuth) RevokeAccessToken() error { return nil }
 // --- mockSecrets ---
 
 type mockSecrets struct {
-	mu       sync.Mutex
-	calls    int
+	mu        sync.Mutex
+	calls     int
 	responses []mockRetrieveResponse
 }
 
@@ -239,8 +239,8 @@ func TestClientFetchConcurrentSafe(t *testing.T) {
 
 func TestClientFetchClassifiesAllFailureModes(t *testing.T) {
 	cases := []struct {
-		name    string
-		err     error
+		name     string
+		err      error
 		sentinel error
 	}{
 		{"403_permission_denied", apiErr(http.StatusForbidden), ErrVaultPermissionDenied},

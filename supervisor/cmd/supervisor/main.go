@@ -278,10 +278,11 @@ func runDaemon() int {
 		}
 	}
 
-	// M2.3: construct the vault client from config. Nil on fake-agent paths
-	// (the vault steps are skipped when Vault==nil, preserving M1/M2.1 compat).
+	// M2.3: construct the vault client from config. Nil when vault is not
+	// configured (fake-agent path, or real-Claude path without vault env vars).
+	// The vault steps in spawn.go are skipped when Vault==nil.
 	var vaultClient vault.Fetcher
-	if !cfg.UseFakeAgent {
+	if !cfg.UseFakeAgent && cfg.InfisicalAddr() != "" {
 		cid := cfg.CustomerID()
 		cidStr := fmt.Sprintf("%x-%x-%x-%x-%x",
 			cid.Bytes[0:4], cid.Bytes[4:6], cid.Bytes[6:8], cid.Bytes[8:10], cid.Bytes[10:16])

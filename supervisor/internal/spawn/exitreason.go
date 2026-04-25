@@ -45,14 +45,14 @@ const (
 	// M2.3 additions (D7.1 / FR-405 / FR-407 / FR-410). Vault-path
 	// failure modes; each corresponds to a vault sentinel error or a
 	// threat-model rule enforcement point.
-	ExitSecretLeakedInAgentMd    = "secret_leaked_in_agent_md"    // FR-407 Rule 1: literal secret value found in agent.md pre-spawn.
-	ExitVaultMCPInConfig         = "vault_mcp_in_config"          // FR-410 Rule 3: banned vault/secret/infisical MCP server in config.
-	ExitVaultUnavailable         = "vault_unavailable"            // FR-405: Infisical unreachable or transport error.
-	ExitVaultAuthExpired         = "vault_auth_expired"           // FR-405: token expired after auto-reauth retry.
-	ExitVaultPermissionDenied    = "vault_permission_denied"      // FR-405: Infisical returned 403 Forbidden.
-	ExitVaultRateLimited         = "vault_rate_limited"           // FR-405: Infisical returned 429 Too Many Requests.
-	ExitVaultSecretNotFound      = "vault_secret_not_found"       // FR-405: secret path does not exist in Infisical.
-	ExitVaultAuditFailed         = "vault_audit_failed"           // FR-412 Q9 fail-closed: vault_access_log INSERT failed.
+	ExitSecretLeakedInAgentMd = "secret_leaked_in_agent_md" // FR-407 Rule 1: literal secret value found in agent.md pre-spawn.
+	ExitVaultMCPInConfig      = "vault_mcp_in_config"       // FR-410 Rule 3: banned vault/secret/infisical MCP server in config.
+	ExitVaultUnavailable      = "vault_unavailable"         // FR-405: Infisical unreachable or transport error.
+	ExitVaultAuthExpired      = "vault_auth_expired"        // FR-405: token expired after auto-reauth retry.
+	ExitVaultPermissionDenied = "vault_permission_denied"   // FR-405: Infisical returned 403 Forbidden.
+	ExitVaultRateLimited      = "vault_rate_limited"        // FR-405: Infisical returned 429 Too Many Requests.
+	ExitVaultSecretNotFound   = "vault_secret_not_found"    // FR-405: secret path does not exist in Infisical.
+	ExitVaultAuditFailed      = "vault_audit_failed"        // FR-412 Q9 fail-closed: vault_access_log INSERT failed.
 
 	// M1-inherited values; preserved for the fake-agent path and recovery.
 	ExitSupervisorRestart = "supervisor_restarted" // M1 recovery query.
