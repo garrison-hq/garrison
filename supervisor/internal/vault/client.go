@@ -174,7 +174,7 @@ func (c *Client) fetchOneUnderLockWithRetry(ctx context.Context, grant GrantRow)
 	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusUnauthorized {
 		return SecretValue{}, classifySDKError(err)
 	}
-	if reauthErr := c.reauthenticateUnderLock(ctx); reauthErr != nil {
+	if c.reauthenticateUnderLock(ctx) != nil {
 		return SecretValue{}, ErrVaultAuthExpired
 	}
 	val, err = c.fetchOneUnderLock(ctx, grant)
