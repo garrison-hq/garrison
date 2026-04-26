@@ -46,23 +46,24 @@ The supervisor does not reason. It is a process manager.
 **Missed-event handling**: LISTEN is the fast path, but notifications are lost during reconnects. The event tables include a `processed_at` column, and the supervisor runs a fallback poll (`SELECT ... WHERE processed_at IS NULL LIMIT N`) every N seconds as a safety net.
 
 ### Postgres MCP server (`internal/pgmcp`)
-An in-tree Go MCP server that runs as `supervisor mcp postgres` subcommand. ~300 LOC plus tests. Stdio JSON-RPC. Exposes two tools: `query` and `explain`. Read-only enforced via two layers: a Postgres role (`garrison_agent_ro`) with SELECT-only grants on the M2.1 read surface, plus a protocol-layer SELECT filter for defense-in-depth.
+An in-tree Go MCP server that runs as `supervisor mcp postgres` subcommand. ~300 LOC plus tests. Stdio JSON-RPC. Exposes two tools: `query` and `explain`. Read-only enforced via two layers: a Postgres role (`garrison_agent_ro`) with SELECT-only grants on the M2.1 read surface **plus `agent_instances`** (added at M2.3 commit `59fc977` for the finalize-tool precheck — see `docs/forensics/pgmcp-three-bug-chain.md`), plus a protocol-layer SELECT filter for defense-in-depth.
 
-First-party component added in M2.1. Agents reach Postgres through this server; the supervisor never exposes Postgres credentials directly to Claude subprocesses.
+First-party component added in M2.1. Agents reach Postgres through this server; the supervisor never exposes Postgres credentials directly to Claude subprocesses. **The role explicitly has NO grants on the vault tables** (`agent_role_secrets`, `vault_access_log`, `secret_metadata`) — vault is opaque to agents per the M2.3 threat model. Returns use the MCP-spec-compliant `CallToolResult` envelope shape (`{"content":[{"type":"text","text":<payload>}],"isError":false}`); UUID columns are encoded as 36-char hex strings (not `[16]byte` integer arrays — both fixes landed in `59fc977` after the post-M2.2.2 pgmcp investigation).
 
 ### Agent processes
 Each agent is a Claude Code subprocess started by the supervisor. It receives:
 
 - Its `agent.md` as the system prompt
-- A scoped working directory (the department's workspace)
+- A scoped working directory (the department's workspace; **post-M2 work will replace this with a per-agent Docker container — see Target-state architecture below**)
 - A set of installed skills (from that department's `.claude/skills/`)
-- MCP tools: Postgres (always, from M2.1), MemPalace (always, from M2.2), plus whatever the agent's config declares
+- MCP tools: Postgres (always, from M2.1), MemPalace (always, from M2.2), `finalize_ticket` (always, from M2.2.1 — the only path that commits a transition), plus whatever the agent's config declares via the `agents.mcp_config` JSONB column. Any MCP server entry in `agents.mcp_config` that references the vault is rejected at spawn time by `mcpconfig.CheckExtraServers` (M2.3 Rule 3); vault is opaque to agents
 - A wake-up context injection from `mempalace wake-up --wing <role_wing>` (~170 tokens, from M2.2)
+- Vault-fetched secrets injected as environment variables (M2.3) — see Target-state architecture for the seven-step spawn ordering. Secrets never enter `agent.md` or any context window
 - A specific event payload: the ticket it's acting on, the transition that triggered it
 
-It runs until it has either completed the work (moved the ticket and written to the palace) or hit a timeout. Then the process exits.
+It runs until it has either committed a transition via `finalize_ticket` or hit a timeout / budget cap / non-finalize exit. Then the process exits.
 
-**Real-world cost baseline**: a trivial agent invocation (hello-world file write, ~8 Claude turns) observed at ~$0.04 per run in M2.1 (vs. $0.003 in mockclaude fixtures — 13× delta). Cost captured on `agent_instances.total_cost_usd` from the terminal `result` event's `total_cost_usd` field.
+**Real-world cost baseline**: a trivial agent invocation (hello-world file write, ~8 Claude turns) observed at ~$0.04 per run in M2.1 (vs. $0.003 in mockclaude fixtures — 13× delta). Cost captured on `agent_instances.total_cost_usd` from the terminal `result` event's `total_cost_usd` field. **Caveat**: clean-finalize runs currently record `$0.00` because the supervisor signal-kills before claude's `result` event lands — see `docs/issues/cost-telemetry-blind-spot.md`. Failure-mode exits (`finalize_never_called`, `budget_exceeded`, `claude_error`) record cost correctly.
 
 ### CEO
 Not a daemon. When you send a message in the CEO chat:
@@ -80,6 +81,61 @@ Next.js 16 + React 19. Reads from Postgres, writes to Postgres. WebSocket feed f
 
 ### MemPalace
 Runs as an MCP server. Shared across every agent. The memory of the entire organization. Bootstrapped at a dedicated path (`~/.garrison/palace/` or an operator-configured path) outside any git-tracked directory. Wing and room creation is on-write via MCP `add_drawer`; init-time scanning defines only defaults.
+
+---
+
+## Target-state architecture
+
+The communication contract that emerges from M1 → M2.3 and the post-M2 Docker-per-agent work. This section is the single answer to "who is allowed to talk to whom, and what mediates each edge?"
+
+### Communication contract
+
+```
+Supervisor ──► Vault (Infisical)            ✓  Universal Auth, secret fetch
+Supervisor ──► Postgres                     ✓  full read+write (sqlc, migrations, triggers)
+Supervisor ──► MemPalace                    ✓  out-of-band (hygiene checker via short-lived
+                                                 docker-exec'd MCP client)
+Supervisor ──► Agent container (spawn)      ✓  env-var injection only (vault secrets;
+                                                 NEVER prompt content)
+
+Agent      ──► Postgres (via pgmcp)         ✓  read-only, garrison_agent_ro role
+Agent      ──► MemPalace (via MCP)          ✓  read + write, wing-scoped
+Agent      ──► finalize_ticket MCP          ✓  single tool, transactional, only commit path
+Agent      ──► Vault                        ✗  FORBIDDEN — vault is opaque to agents
+                                                 (Rule 3: mcpconfig.CheckExtraServers blocks
+                                                  any agent.mcp_config referencing the vault)
+Agent      ──► Host filesystem outside      ✗  FORBIDDEN — enforced by per-agent Docker
+              /workspace                         container (planned post-M3; tracked in
+                                                 docs/issues/agent-workspace-sandboxing.md)
+Agent      ──► Inter-agent direct           ✗  FORBIDDEN by construction — agents are
+                                                 ephemeral and stateless; coordination
+                                                 happens through Postgres + MemPalace
+```
+
+### Seven-step spawn ordering (M2.3, FR-416 / D4.5)
+
+Every agent spawn executes in this order. Each step's failure mode has a distinct `exit_reason`:
+
+```
+1. ListGrantsForRole                        → grants_lookup_failed
+2. mcpconfig.CheckExtraServers (Rule 3)     → vault_in_agent_mcp_config
+3. vault.Fetch (Infisical Universal Auth)   → vault_unavailable | vault_auth_failed |
+                                                vault_permission_denied | vault_rate_limited
+4. RuleOneLeakScan (raw secret in agent.md) → vault_value_leaked_in_prompt
+5. WriteAuditRow (in spawn tx, fail-closed) → vault_audit_write_failed
+6. cmd.Start (env-injected) + defer Zero()  → spawn_failed
+7. M2.2.x subprocess pipeline → finalize    → existing M2.2.x exit_reason vocabulary
+```
+
+Steps 1–6 happen synchronously before the subprocess is started. Step 7 is the existing M2.2 / M2.2.1 / M2.2.2 pipeline unchanged. The spawn transaction wraps steps 1–6 plus the final `agent_instances` row insert; rolling back the tx undoes the audit row write so partial spawns leave no false-audit history.
+
+### Sandboxing — planned post-M3
+
+The current spawn machinery does not `chdir` the claude subprocess into the workspace tempdir; agents inherit the operator's shell cwd. Haiku has demonstrated this leak by writing to `~/changes/` instead of the workspace `changes/` directory (see `experiment-results/post-uuid-fix-haiku-run.md`). Forward path: **per-agent Docker containers** with `/workspace` as the cwd, host filesystem hidden, network policy controlling which external APIs the agent can reach, and vault-injected secrets entering through container env (not host env). The two threat models (vault opacity + workspace sandbox) compose into "agent has credentials AND cannot exfiltrate them"; neither alone is sufficient. Tracking doc: `docs/issues/agent-workspace-sandboxing.md`.
+
+### Decision provenance
+
+The Supervisor↔Vault (not Agent↔Vault) commitment, the SkillHub-as-target-state-skill-registry decision (M7), and the MCPJungle-as-target-state-MCP-server-registry decision (M8) were made in the 2026-04-24 architecture session. Frozen snapshot: `docs/architecture-reconciliation-2026-04-24.md`.
 
 ---
 
@@ -114,6 +170,9 @@ CREATE TABLE agents (
   model TEXT NOT NULL DEFAULT 'claude-opus-4-7',
   skills JSONB NOT NULL,          -- array of skills.sh repo refs installed for this agent
   mcp_tools JSONB NOT NULL,       -- extras beyond the baseline
+  mcp_config JSONB,               -- per-agent extra MCP server specs (M2.3); validated by
+                                  -- mcpconfig.CheckExtraServers — Rule 3 rejects any entry
+                                  -- referencing the vault MCP at spawn time
   listens_for JSONB NOT NULL,     -- event patterns this agent wakes on
   palace_wing TEXT NOT NULL,      -- 'wing_frontend_engineer'
   status TEXT NOT NULL            -- 'active', 'archived'
@@ -127,8 +186,17 @@ CREATE TABLE agent_instances (
   started_at TIMESTAMPTZ,
   finished_at TIMESTAMPTZ,
   status TEXT,                    -- 'running', 'succeeded', 'failed', 'timeout'
-  exit_reason TEXT,               -- canonical vocabulary from internal/spawn/exitreason.go (M2.1)
-  total_cost_usd NUMERIC(10,6)    -- from result event in stream-json (M2.1)
+  exit_reason TEXT,               -- canonical vocabulary in internal/spawn/exitreason.go;
+                                  -- extended by M2.2 (budget_exceeded), M2.2.1 (finalize_*),
+                                  -- M2.3 (vault_unavailable, vault_auth_failed,
+                                  -- vault_permission_denied, vault_rate_limited,
+                                  -- vault_value_leaked_in_prompt, vault_audit_write_failed,
+                                  -- vault_in_agent_mcp_config, grants_lookup_failed)
+  total_cost_usd NUMERIC(10,6),   -- from result event in stream-json (M2.1); reads $0.00
+                                  -- on clean-finalize runs — see
+                                  -- docs/issues/cost-telemetry-blind-spot.md
+  wake_up_status TEXT,            -- mempalace wake-up outcome (M2.2): 'ok' | 'failed' | NULL
+  role_slug TEXT                  -- denormalised from agents (M2.2) for dispatch routing
 );
 
 -- Schema: work
@@ -157,7 +225,16 @@ CREATE TABLE ticket_transitions (
   triggered_by_agent_instance_id UUID,
   triggered_by_user BOOLEAN DEFAULT FALSE,
   at TIMESTAMPTZ NOT NULL,
-  hygiene_status TEXT             -- 'clean', 'missing_diary', 'missing_kg', 'thin' (from M2.2)
+  hygiene_status TEXT             -- vocabulary, accumulated across milestones:
+                                  --   M2.2:    'clean', 'pending', 'missing_diary',
+                                  --            'missing_kg', 'thin'
+                                  --   M2.2.1:  'finalize_failed', 'finalize_partial', 'stuck'
+                                  --   M2.3:    'suspected_secret_emitted'
+                                  -- No CHECK constraint — vocabularies coexist during the
+                                  -- M2.2 → M2.2.1 transition window. Listener routes by
+                                  -- agent_instances.exit_reason: finalize-shaped rows go
+                                  -- through pure-Go EvaluateFinalizeOutcome; legacy M2.2
+                                  -- rows go through palace-query Evaluate.
 );
 
 CREATE TABLE hiring_requests (
@@ -181,7 +258,42 @@ CREATE TABLE ceo_conversations (
   tool_calls JSONB,
   created_at TIMESTAMPTZ
 );
+
+-- Schema: vault (M2.3 — Infisical integration)
+
+CREATE TABLE agent_role_secrets (   -- links a role slug to an Infisical secret path +
+  id UUID PRIMARY KEY,              -- env var name; the data source for the vault grant
+  role_slug TEXT NOT NULL,          -- query at spawn time
+  customer_id UUID,
+  secret_path TEXT NOT NULL,
+  env_var_name TEXT NOT NULL,
+  created_at TIMESTAMPTZ
+);
+
+CREATE TABLE vault_access_log (     -- per-spawn audit record (M2.3, FR-415); never stores
+  id UUID PRIMARY KEY,              -- the secret value (enforced at the schema layer)
+  agent_instance_id UUID,
+  role_slug TEXT NOT NULL,
+  secret_path TEXT NOT NULL,
+  outcome TEXT NOT NULL,            -- 'granted' | 'denied' | 'error'
+  error_class TEXT,
+  at TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE secret_metadata (      -- per-path metadata; allowed_role_slugs is a denorm
+  secret_path TEXT PRIMARY KEY,     -- column rebuilt by trigger on agent_role_secrets writes
+  provenance TEXT,
+  rotation_cadence INTERVAL,
+  last_accessed_at TIMESTAMPTZ,     -- updated inside the spawn tx on OutcomeGranted
+  allowed_role_slugs TEXT[]         -- denorm; rebuilt by rebuild_secret_metadata_role_slugs()
+);
 ```
+
+**Triggers** (production schema):
+
+- `emit_ticket_created` (M2.1) — fires `work.ticket.created.<dept>.<column>` after INSERT on `tickets`.
+- `emit_ticket_transitioned` (M2.2) — fires `work.ticket.transitioned.<dept>.<from>.<to>` after INSERT on `ticket_transitions`. Resolves `department_id` via subquery on `tickets`.
+- `rebuild_secret_metadata_role_slugs` (M2.3) — Garrison's first PL/pgSQL trigger. AFTER INSERT/DELETE on `agent_role_secrets`, rebuilds `secret_metadata.allowed_role_slugs` for the affected path. Pattern recommended for denorm columns where the rebuild is cheap (array aggregation); avoid for cross-schema joins or expensive computation.
 
 Every INSERT / UPDATE on `tickets`, `hiring_requests`, `ceo_conversations`, `ticket_transitions` fires `pg_notify` on a channel derived from the event, e.g. `work.ticket.transitioned.engineering.in_dev.qa_review`.
 
@@ -356,6 +468,13 @@ completed_at: <iso timestamp>
 - Thin writes (e.g. diary body < 100 chars) flagged as `hygiene_status = 'thin'`
 - Results stored on `ticket_transitions.hygiene_status`, surfaced in the dashboard
 
+**Hygiene status vocabulary** (accumulated across milestones; full set documented on the schema column above):
+- **M2.2 (palace-query path)**: `clean`, `pending`, `missing_diary`, `missing_kg`, `thin`
+- **M2.2.1 (finalize-shaped path)**: `finalize_failed`, `finalize_partial`, `stuck` — evaluated by pure-Go `EvaluateFinalizeOutcome` against the finalize-tool outcome rather than by querying the palace
+- **M2.3 (vault-path scanner)**: `suspected_secret_emitted` — set when `scanAndRedactPayload` matches any of 10 secret-shape patterns in the diary rationale or KG triples, before the MemPalace write. Non-blocking (the value is redacted in-place, not rejected)
+
+The two M2.2 / M2.2.1 evaluation paths coexist on the column. Routing is by `agent_instances.exit_reason`: finalize-shaped exit reasons go through the M2.2.1 path; the rest go through the original M2.2 palace-query path. No CHECK constraint, no retroactive UPDATE during the transition window.
+
 ---
 
 ## The bootstrap YAML
@@ -426,23 +545,29 @@ agents:
 
 ## Build plan — milestones
 
-Specs first, code second. Each milestone is scoped to a single specify-cli spec that produces an implementable, end-to-end-functional chunk. No milestone ships half-built scaffolding; each one must be usable on a real workstream before moving to the next. The discipline: each milestone ends with a retro — M1 and M2.1 retros live in `docs/retros/m{N}.md` as plain markdown; from M2.2 onwards retros write to `wing_company / hall_events` in MemPalace, because that is the milestone that makes writing-to-MemPalace possible.
+Specs first, code second. Each milestone is scoped to a single specify-cli spec that produces an implementable, end-to-end-functional chunk. No milestone ships half-built scaffolding; each one must be usable on a real workstream before moving to the next. The discipline: each milestone ends with a retro. **Policy from M3 onwards**: retros land as both `docs/retros/m{N}.md` markdown (canonical) AND a MemPalace `wing_company / hall_events` drawer mirror via the wired-in `mempalace_add_drawer` MCP tool. Markdown is the source of truth on disagreement; the drawer keeps retro content in the same memory layer agents read from for context. M1, M2.1, and the M2.x arc retros (M2.2, M2.2.1, M2.2.2, M2.3, plus the closing arc retro) are markdown-only by historical decision — see AGENTS.md §Retros for the rationale.
 
 Some milestones carry genuine external unknowns — how a tool actually behaves in practice, rather than how the docs describe it. Those milestones begin with a research spike (see RATIONALE §13). The spike produces a `docs/research/m{N}-spike.md` that becomes binding input to the milestone's context file. Spikes are exploratory and time-boxed; they do not produce production code. M2's spike delivered a 5:1 prevention-to-discovery ratio in M2.1 — discipline validated.
 
 **M1 — Event bus + supervisor core.** ✅ Shipped 2026-04-22. Retro: `docs/retros/m1.md`.
 
-**M2 — First real agent loop.** Split into M2.1 and M2.2.
+**M2 — First real agent loop.** ✅ Shipped 2026-04-22 → 2026-04-24 across five sub-milestones (M2.1, M2.2, M2.2.1, M2.2.2, M2.3). The arc retro at `docs/retros/m2-2-x-compliance-retro.md` synthesises the M2.2.x compliance work and is essential reading before any code in this area.
 
 **M2.1 — Claude Code invocation.** ✅ Shipped 2026-04-22. Retro: `docs/retros/m2-1.md`. Real per-invocation cost observed: ~$0.04 for trivial runs.
 
-**M2.2 — MemPalace MCP wiring.** Wire MemPalace into every spawn — MCP tool always available, wake-up context injection, the completion protocol writes from `agent.md` become real. The palace is bootstrapped at a dedicated path outside any git-tracked directory. The hygiene dashboard concept appears first here as a read-only query; the full hygiene UI waits for M3.
+**M2.2 — MemPalace MCP wiring.** ✅ Shipped 2026-04-23. Retro: `docs/retros/m2-2.md`. MemPalace wired into every spawn — MCP tool always available, wake-up context injection, the completion protocol writes from `agent.md` become real. Three-container deployment topology (supervisor + mempalace sidecar + socket-proxy). New `garrison_agent_mempalace` Postgres role. `emit_ticket_transitioned` trigger added. The hygiene dashboard concept appears first here as a read-only query; the full hygiene UI waits for M3.
 
-After M2.2 ships, the architecture's memory thesis is validated or falsified. If agents reliably write useful diaries and the palace makes future agents smarter, the rest of the roadmap is extension. If the write contract produces thin or useless entries, everything downstream has to be reconsidered before it's built.
+  The memory thesis from RATIONALE §3 became testable here. M2.2's live run revealed the soft-gate failure mode RATIONALE §5 anticipated: real haiku skipped MANDATORY palace writes despite the prompt. That observation drove M2.2.1.
 
-**M2.3 — Secret vault (Infisical).** Agents need API keys and credentials to do real work. Self-hosted Infisical with Garrison-native UI (operator never sees Infisical's UI directly); secrets injected as environment variables at spawn time; never enter agent prompts or context windows. Design input at `docs/security/vault-threat-model.md`.
+**M2.2.1 — Structured completion via `finalize_ticket` tool.** ✅ Shipped 2026-04-23. Retro: `docs/retros/m2-2-1.md`. Re-architected completion around a mechanism instead of a prompt. New in-tree MCP server (`internal/finalize`) exposing a single `finalize_ticket` tool; the agent cannot exit with a successful transition any other way. Hygiene-status vocabulary extended (`finalize_failed`, `finalize_partial`, `stuck`).
 
-**M3 — Dashboard read-only.** Next.js 16 + React 19 app reading from Postgres, showing department Kanban, ticket detail, agent activity feed. No mutations yet. Read-only-first forces you to actually watch the system behave for a few days before giving yourself (and agents) the ability to change state — which is when you catch the "oh, the event payload shape is wrong" class of bugs cheaply. **Note from M2.1**: real Claude Code emits 5-10 `assistant` events per run (vs. 2 in test fixtures). M3's activity feed UI must render high-volume event streams without visual bloat.
+**M2.2.2 — Compliance calibration.** ✅ Shipped 2026-04-24. Retro: `docs/retros/m2-2-2.md`. Richer structured error responses (line/column/excerpt/constraint/expected/actual/hint), Adjudicate precedence fix (budget-cap events no longer masked as `claude_error`), seed agent.md rewritten with front-loaded goal + palace-search calibration + example payload + retry framing. The original retro read the calibration thesis as falsified on live models; the post-ship pgmcp investigation revised that read — see arc retro.
+
+  **Post-M2.2.2 investigation** (closes the arc): a three-bug chain in `internal/pgmcp` (missing `agent_instances` SELECT grant, wrong `CallToolResult` envelope shape, UUID encoded as `[16]byte` integer array) had been silently contaminating compliance signal across M2.2 / M2.2.1 / M2.2.2 retros. Fixed in commit `59fc977` plus migration `20260424000007_agent_ro_agent_instances_grant.sql`. Forensic at `docs/forensics/pgmcp-three-bug-chain.md`. Post-fix matrix: 4 clean / 6 partial / 2 fail under strict scoring; 10/12 mechanism-compliant if the orthogonal workspace-sandbox-escape is separated out.
+
+**M2.3 — Secret vault (Infisical).** ✅ Shipped 2026-04-24. Retro: `docs/retros/m2-3.md`. Self-hosted Infisical with Garrison-native UI (operator never sees Infisical's UI directly); secrets injected as environment variables at spawn time; never enter agent prompts or context windows. Four vault rules (no-leaked-values, zero-grants-zero-secrets, vault-opaque-to-agents, fail-closed-audit). Custom `tools/vaultlog` go vet analyzer rejects slog/fmt/log calls with `vault.SecretValue` arguments at build time. Garrison's first PL/pgSQL trigger (`rebuild_secret_metadata_role_slugs`) shipped here. Design input at `docs/security/vault-threat-model.md`. **Locked-deps streak (M1 → M2.2.2: zero new deps) intentionally broken with two principled additions**: `infisical/go-sdk v0.7.1` and `golang.org/x/tools v0.44.0`.
+
+**M3 — Dashboard read-only. Active.** Next.js 16 + React 19 app reading from Postgres, showing department Kanban, ticket detail, agent activity feed. No mutations yet. Read-only-first forces you to actually watch the system behave for a few days before giving yourself (and agents) the ability to change state — which is when you catch the "oh, the event payload shape is wrong" class of bugs cheaply. **Notes carried forward from M2**: (a) real Claude Code emits 5-10 `assistant` events per run (vs. 2 in test fixtures) — the activity feed must render high-volume streams without visual bloat; (b) M3 must surface the cost-telemetry blind spot (`agent_instances.total_cost_usd` reads $0.00 on clean finalizes — see `docs/issues/cost-telemetry-blind-spot.md`); (c) M3 must surface the hygiene-status vocabulary including the M2.3-era `suspected_secret_emitted`; (d) workspace-sandbox-escape ("artifact claimed vs artifact on disk") is a real failure mode operator triage will see — tracked at `docs/issues/agent-workspace-sandboxing.md`, fix lands as Docker-per-agent post-M3.
 
 **M4 — Dashboard mutations.** Create tickets in UI, drag between columns, edit agent configs. Everything the operator does daily.
 
@@ -450,9 +575,11 @@ After M2.2 ships, the architecture's memory thesis is validated or falsified. If
 
 **M6 — CEO ticket decomposition + hygiene checks.** CEO writes tickets from conversation. Hygiene dashboard shows thin/missing writes. Rate-limit back-off and cost-based throttling land here (M2.1 observes cost and rate-limit events; M6 acts on them).
 
-**M7 — Hiring flow.** skills.sh integration, proposal UI, approval writes agents + installs skills.
+**M7 — Hiring flow.** skills.sh integration plus **SkillHub (iflytek)** as the target-state private-skills registry alongside the public skills.sh feed (decision committed 2026-04-24; see `docs/skill-registry-candidates.md`). Proposal UI, approval writes agents + installs skills.
 
-**M8 — Agent-spawned tickets, cross-department dependencies.** The last piece of the zero-human loop. Includes runaway control (per-department weekly ticket-creation budget).
+**M8 — Agent-spawned tickets, cross-department dependencies, MCP-server registry.** The last piece of the zero-human loop. Includes runaway control (per-department weekly ticket-creation budget) and an MCP-server registry — leading candidate **MCPJungle** (self-hosted, Go-based, Postgres-backed, combines registry + runtime proxy; maturity re-check at M7 kickoff). See `docs/mcp-registry-candidates.md`.
+
+> **Decision provenance for the target-state items above** (Supervisor↔Vault rather than Agent↔Vault, SkillHub at M7, MCPJungle at M8, workspace-sandbox tracked separately): `docs/architecture-reconciliation-2026-04-24.md`. That file is a frozen snapshot of the 2026-04-24 architecture session — kept as committed history, not edited. Any future architecture-reconciliation pass gets its own dated file (`docs/architecture-reconciliation-YYYY-MM-DD.md`) following the same shape.
 
 ---
 
@@ -484,29 +611,48 @@ The project is at `github.com/garrison-hq/garrison`. The specs are the primary c
 **Repo layout:**
 ```
 garrison/
-├── specs/              # specify-cli output, one dir per milestone
-│   ├── 001-m1-event-bus/
+├── specs/                                 # specify-cli output, one dir per milestone
+│   ├── m1-event-bus/                      # M1 (un-numbered, predates 00N scheme)
 │   ├── 003-m2-1-claude-invocation/
 │   ├── 004-m2-2-mempalace/
-│   └── _context/
+│   ├── 005-m2-2-1-finalize-ticket/
+│   ├── 006-m2-2-2-compliance-calibration/
+│   ├── 007-m2-3-infisical-vault/
+│   └── _context/                          # filenames mix dots/hyphens (historical)
 │       ├── m1-context.md
-│       ├── m2-1-context.md
-│       ├── m2-2-context.md
-│       └── m2-3-context.md       ← future (vault)
+│       ├── m2.1-context.md
+│       ├── m2.2-context.md
+│       ├── m2-2-1-context.md
+│       ├── m2.2.2-context.md
+│       └── m2.3-context.md
 ├── docs/
-│   ├── research/       # spike outputs feeding later milestones
-│   │   └── m2-spike.md
-│   ├── security/
-│   │   └── vault-threat-model.md
-│   ├── ops-checklist.md          # post-migrate and post-deploy steps
-│   └── retros/
-│       ├── m1.md
-│       └── m2-1.md
-├── supervisor/         # Go binary
-├── dashboard/          # Next.js 16 app (M3)
-├── migrations/         # SQL, consumed by both Go (sqlc) and TS (Drizzle)
-├── examples/           # toy company YAML, example agent.md files
-├── ARCHITECTURE.md     # this file
+│   ├── architecture-reconciliation-2026-04-24.md   # frozen decision-provenance snapshot
+│   ├── mcp-registry-candidates.md         # M8 input: MCPJungle commitment
+│   ├── skill-registry-candidates.md       # M7 input: SkillHub commitment
+│   ├── ops-checklist.md                   # post-migrate and post-deploy steps
+│   ├── getting-started.md
+│   ├── research/m2-spike.md               # spike outputs feeding later milestones
+│   ├── security/vault-threat-model.md
+│   ├── forensics/
+│   │   └── pgmcp-three-bug-chain.md       # post-M2.2.2 root-cause investigation
+│   ├── issues/
+│   │   ├── agent-workspace-sandboxing.md  # Docker-per-agent fix planned post-M3
+│   │   └── cost-telemetry-blind-spot.md   # supervisor signal-handling fix
+│   └── retros/                            # m1, m1-retro-addendum, m2-1, m2-2,
+│                                          # m2-2-1, m2-2-2, m2-2-x-compliance-retro, m2-3
+├── supervisor/                            # Go binary
+│   ├── internal/                          # 19 packages (claudeproto, mcpconfig, pgmcp,
+│   │                                      # agents, spawn/, mempalace, hygiene, finalize,
+│   │                                      # vault, config, store, events, pgdb, recovery,
+│   │                                      # health, concurrency, testdb, ...)
+│   └── tools/vaultlog/                    # M2.3 custom go vet analyzer
+├── dashboard/                             # Next.js 16 app (M3 — active)
+├── migrations/                            # SQL, consumed by both Go (sqlc) and TS (Drizzle)
+│   └── seed/                              # engineer.md, qa-engineer.md (embedded via
+│                                          # +embed-agent-md markers into M2.2 / M2.2.2 migrations)
+├── experiment-results/                    # exploratory matrices, not production
+├── examples/                              # toy company YAML, example agent.md files
+├── ARCHITECTURE.md                        # this file
 ├── RATIONALE.md
 ├── AGENTS.md
 ├── CONTRIBUTING.md
@@ -541,7 +687,7 @@ The UI is the product. Views to build across M3 and M4:
 
 - **Runaway control**: agent-spawned tickets can fan out. A per-department weekly ticket-creation budget, visible in the dashboard, covered in M8.
 - **Cost accounting**: per-ticket and per-agent-instance token burn captured in M2.1 (`agent_instances.total_cost_usd`). Real baseline observed at ~$0.04 per trivial run. The aggregated view across tickets and agents comes in M6 alongside hygiene.
-- **Cost cross-check with Anthropic billing dashboard**: M2.1 retro flagged this as unverified. Do 5-10 supervisor runs, compare aggregate `total_cost_usd` to what the Anthropic dashboard reports. Any discrepancy is a cost-capture bug. Worth doing before M2.2 starts.
+- **Cost cross-check with Anthropic billing dashboard**: M2.1 retro flagged this as unverified. The cross-check is currently blocked by the **cost-telemetry blind spot** (`docs/issues/cost-telemetry-blind-spot.md`) — clean-finalize runs record `$0.00` because the supervisor signal-kills before claude's `result` event lands. Once that fix lands (a supervisor-side signal-handling change letting `result` arrive before kill), do 5–10 supervisor runs and compare aggregate `total_cost_usd` to the Anthropic dashboard. Any discrepancy beyond the fix is a separate cost-capture bug.
 - **Cross-department notification**: when the CTO sets a ticket to `needs_review` because it needs design input, who knows? A simple "needs_review" view in org overview is enough — the CEO doesn't need pushed alerts, you check the dashboard.
 - **Model override per spawn**: skip for early milestones. All agents use their configured model. Add per-spawn overrides only when a specific task demonstrates a need.
 - **Multi-company**: the schema has `companies` as a top-level entity but the initial build is single-company. Don't build multi-tenant until you need it.
