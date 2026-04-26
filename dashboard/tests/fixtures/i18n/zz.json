@@ -21,6 +21,17 @@
   "hygiene": {
     "empty": "zz_hygiene_empty"
   },
+  "vault": {
+    "secretsHeading": "zz_vault_secretsHeading",
+    "auditHeading": "zz_vault_auditHeading",
+    "matrixHeading": "zz_vault_matrixHeading",
+    "secretsTab": "zz_vault_secretsTab",
+    "auditTab": "zz_vault_auditTab",
+    "matrixTab": "zz_vault_matrixTab",
+    "emptySecrets": "zz_vault_emptySecrets",
+    "emptyAudit": "zz_vault_emptyAudit",
+    "emptyMatrix": "zz_vault_emptyMatrix"
+  },
   "ticketDetail": {
     "history": "zz_td_history",
     "noHistory": "zz_td_noHistory",

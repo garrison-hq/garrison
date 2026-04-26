@@ -21,6 +21,17 @@
   "hygiene": {
     "empty": "No hygiene issues to triage. Rows appear here when transitions land with a non-clean hygiene_status."
   },
+  "vault": {
+    "secretsHeading": "Secrets",
+    "auditHeading": "Vault audit log",
+    "matrixHeading": "Role × secret grants",
+    "secretsTab": "secrets",
+    "auditTab": "audit",
+    "matrixTab": "matrix",
+    "emptySecrets": "No secrets registered.",
+    "emptyAudit": "No vault access events recorded.",
+    "emptyMatrix": "No agent-role-to-secret grants configured."
+  },
   "ticketDetail": {
     "history": "Transition history",
     "noHistory": "No transitions yet.",
