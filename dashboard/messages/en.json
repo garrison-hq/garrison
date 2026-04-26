@@ -69,6 +69,21 @@
     "secretsCount": "secrets",
     "grantsCount": "grants"
   },
+  "activityMeta": {
+    "live": "live",
+    "reconnecting": "reconnecting",
+    "connecting": "connecting",
+    "events": "events",
+    "runs": "runs",
+    "filterAll": "all",
+    "filterCreated": "ticket.created",
+    "filterTransitioned": "ticket.transitioned",
+    "feedHeader": "live feed",
+    "empty": "No activity yet — events will stream in as agents transition tickets.",
+    "unattributed": "unattributed",
+    "ticketActivity": "ticket activity",
+    "emptyRun": "empty run"
+  },
   "hygieneMeta": {
     "open": "open",
     "newToday": "new today",

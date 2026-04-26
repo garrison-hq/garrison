@@ -1,14 +1,23 @@
 'use client';
 
+import { useTranslations } from 'next-intl';
 import { useRouter, useSearchParams, usePathname } from 'next/navigation';
 
 const KINDS = ['all', 'ticket.created', 'ticket.transitioned'] as const;
 type Kind = (typeof KINDS)[number];
 
+const KIND_LABELS: Record<Kind, 'filterAll' | 'filterCreated' | 'filterTransitioned'> = {
+  all: 'filterAll',
+  'ticket.created': 'filterCreated',
+  'ticket.transitioned': 'filterTransitioned',
+};
+
 // FR-063: per-event-type filter chips persist in URL query params
-// for shareability + back/forward navigation.
+// for shareability + back/forward navigation. Same segmented-chip
+// shape as FailureModeFilter on /hygiene.
 
 export function FilterChips() {
+  const t = useTranslations('activityMeta');
   const router = useRouter();
   const pathname = usePathname();
   const search = useSearchParams();
@@ -25,22 +34,32 @@ export function FilterChips() {
   }
 
   return (
-    <div className="flex gap-1.5 flex-wrap" data-testid="event-kind-filter">
-      {KINDS.map((k) => (
-        <button
-          key={k}
-          type="button"
-          onClick={() => setKind(k)}
-          data-testid={`kind-${k}`}
-          className={`text-xs px-2 py-1 rounded border ${
-            active === k
-              ? 'bg-surface-3 text-text-1 border-border-2'
-              : 'bg-surface-1 text-text-3 border-border-1 hover:text-text-2'
-          }`}
-        >
-          {k}
-        </button>
-      ))}
+    <div
+      role="radiogroup"
+      aria-label={t('filterAll')}
+      className="flex gap-1.5 flex-wrap"
+      data-testid="event-kind-filter"
+    >
+      {KINDS.map((k) => {
+        const selected = active === k;
+        return (
+          <button
+            key={k}
+            type="button"
+            role="radio"
+            aria-checked={selected}
+            onClick={() => setKind(k)}
+            data-testid={`kind-${k}`}
+            className={`inline-flex items-center px-2.5 py-1 rounded text-[12px] border transition-colors font-mono ${
+              selected
+                ? 'bg-accent/10 text-accent border-accent/30'
+                : 'bg-surface-1 text-text-3 border-border-1 hover:text-text-2 hover:border-border-2'
+            }`}
+          >
+            {t(KIND_LABELS[k])}
+          </button>
+        );
+      })}
     </div>
   );
 }

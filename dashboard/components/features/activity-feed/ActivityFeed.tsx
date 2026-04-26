@@ -57,7 +57,7 @@ function bucketEvent(buckets: Map<string, RunBucket>, ev: ActivityEvent): Map<st
 }
 
 export function ActivityFeed() {
-  const t = useTranslations('activity');
+  const t = useTranslations('activityMeta');
   const search = useSearchParams();
   const [buckets, setBuckets] = useState<Map<string, RunBucket>>(new Map());
   const [status, setStatus] = useState<'connecting' | 'live' | 'reconnecting'>('connecting');
@@ -108,32 +108,56 @@ export function ActivityFeed() {
     overscan: 5,
   });
 
-  let statusClass: string;
-  if (status === 'live') statusClass = 'text-ok';
-  else if (status === 'reconnecting') statusClass = 'text-warn';
-  else statusClass = 'text-text-3';
+  // Status indicator classes — three states.
+  const statusToneClass =
+    status === 'live'
+      ? 'text-ok'
+      : status === 'reconnecting'
+        ? 'text-warn'
+        : 'text-text-3';
+  const statusDotClass =
+    status === 'live'
+      ? 'bg-ok animate-pulse'
+      : status === 'reconnecting'
+        ? 'bg-warn'
+        : 'bg-text-3';
+  const statusLabel = t.has(status) ? t(status) : status;
 
-  let statusLabel: string;
-  if (status === 'live') statusLabel = '● live';
-  else if (status === 'reconnecting') statusLabel = '↻ reconnecting…';
-  else statusLabel = 'connecting…';
+  const totalEvents = filteredRuns.reduce(
+    (acc, r) => acc + r.events.length,
+    0,
+  );
 
   return (
-    <div className="space-y-3">
-      <div className="flex items-center gap-3 text-xs">
-        <span data-testid="sse-status" className={statusClass}>
-          {statusLabel}
+    <section className="bg-surface-1 border border-border-1 rounded h-full flex flex-col min-h-0 overflow-hidden">
+      <header className="px-4 py-2.5 border-b border-border-1 flex items-center gap-3">
+        <span className="text-text-3 text-[10.5px] uppercase tracking-[0.08em] font-medium">
+          {t('feedHeader')}
         </span>
-        <span className="text-text-3">
-          {filteredRuns.reduce((acc, r) => acc + r.events.length, 0)} events
+        <span className="text-text-3 text-[11px] font-mono font-tabular">
+          <span className="text-text-1">{totalEvents}</span> {t('events')}
         </span>
-      </div>
+        <span className="ml-auto inline-flex items-center gap-1.5 text-[11px]">
+          <span
+            className={`inline-block w-1.5 h-1.5 rounded-full ${statusDotClass}`}
+            aria-hidden
+          />
+          <span data-testid="sse-status" className={`${statusToneClass} font-mono`}>
+            {statusLabel}
+          </span>
+        </span>
+      </header>
       {filteredRuns.length === 0 ? (
-        <EmptyState description={t('empty')} />
+        <div className="flex-1 grid place-items-center px-6 py-12 text-text-3 text-[12.5px] text-center">
+          {t('empty')}
+        </div>
       ) : (
-        <div ref={parentRef} className="h-[70vh] overflow-y-auto">
+        <div ref={parentRef} className="flex-1 overflow-y-auto">
           <div
-            style={{ height: `${virtualizer.getTotalSize()}px`, position: 'relative' }}
+            style={{
+              height: `${virtualizer.getTotalSize()}px`,
+              position: 'relative',
+            }}
             data-testid="activity-feed-list"
           >
             {virtualizer.getVirtualItems().map((virtualItem) => {
@@ -150,7 +174,6 @@ export function ActivityFeed() {
                     width: '100%',
                     transform: `translateY(${virtualItem.start}px)`,
                   }}
-                  className="pb-2"
                 >
                   <RunGroup runId={run.runId} events={run.events} />
                 </div>
@@ -159,6 +182,6 @@ export function ActivityFeed() {
           </div>
         </div>
       )}
-    </div>
+    </section>
   );
 }
