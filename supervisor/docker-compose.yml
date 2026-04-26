@@ -143,6 +143,31 @@ services:
       GARRISON_INFISICAL_CLIENT_SECRET: ${GARRISON_INFISICAL_CLIENT_SECRET:?GARRISON_INFISICAL_CLIENT_SECRET required}
     restart: unless-stopped
 
+  # M3 — operator dashboard (Next.js 16 + React 19; standalone build).
+  # Reads M2-arc data through two Postgres roles created by the T001
+  # cross-boundary migration:
+  #   garrison_dashboard_app  — operational reads + better-auth tables
+  #   garrison_dashboard_ro   — vault sub-views ONLY
+  # See docs/ops-checklist.md M3 section for role-password setup +
+  # BETTER_AUTH_SECRET generation.
+  dashboard:
+    build:
+      context: ../dashboard
+      dockerfile: Dockerfile
+    container_name: garrison-dashboard
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DASHBOARD_APP_DSN: ${DASHBOARD_APP_DSN:?DASHBOARD_APP_DSN required}
+      DASHBOARD_RO_DSN: ${DASHBOARD_RO_DSN:?DASHBOARD_RO_DSN required}
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?BETTER_AUTH_SECRET required}
+      BETTER_AUTH_URL: ${BETTER_AUTH_URL:-http://localhost:3000}
+      PORT: "3000"
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+
 volumes:
   postgres-data:
   mempalace-palace:

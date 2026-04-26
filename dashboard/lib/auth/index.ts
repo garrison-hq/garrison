@@ -24,10 +24,22 @@ import { drizzleAdapter } from 'better-auth/adapters/drizzle';
 import { appDb } from '@/lib/db/appClient';
 import * as dashboardSchema from '@/drizzle/schema.dashboard';
 
-const secret = process.env.BETTER_AUTH_SECRET;
-if (!secret) {
+// Build-time tolerant: if BETTER_AUTH_SECRET isn't set during the
+// Docker build's static prerender, fall back to a deterministic
+// placeholder. Production deploys MUST set this env var (the
+// startup health check in app/api/auth/[...all]/route.ts logs a
+// warning when the placeholder is detected).
+const PLACEHOLDER_SECRET = '__BETTER_AUTH_SECRET_NOT_SET_AT_BUILD_TIME__';
+const secret = process.env.BETTER_AUTH_SECRET ?? PLACEHOLDER_SECRET;
+if (
+  process.env.NODE_ENV === 'production' &&
+  process.env.GARRISON_TEST_MODE !== '1' &&
+  secret === PLACEHOLDER_SECRET &&
+  typeof globalThis.process !== 'undefined' &&
+  process.env.NEXT_PHASE !== 'phase-production-build'
+) {
   throw new Error(
-    'BETTER_AUTH_SECRET is unset. Generate one with `openssl rand -hex 32` ' +
+    'BETTER_AUTH_SECRET is unset at runtime. Generate one with `openssl rand -hex 32` ' +
       'and persist it via your secret store (see ops-checklist M3 section, T020).',
   );
 }
