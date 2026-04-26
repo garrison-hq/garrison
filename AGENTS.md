@@ -262,6 +262,10 @@ The retro includes:
 
 This repo uses GitHub Spec Kit (`specify-cli`) with Garrison-flavored slash commands at `.agents/commands/garrison-*.md` (symlinked via `.claude`). The canonical workflow per milestone:
 
+**Step 0 (precondition, non-optional)**: create the milestone feature branch via `/speckit-git-feature` (or `git checkout -b NNN-mN-name` directly — e.g. `008-m3-dashboard`). Every milestone gets its own branch; the convention is one PR per milestone, merged to `main` before the next milestone's branch is cut. Made explicit here because M2.3's work landed on M2.2.2's branch when this step was implicit — the `007-m2-3-infisical-vault` branch was never created and the convention drifted. Do not repeat that pattern.
+
+Then:
+
 1. If the milestone requires a spike (RATIONALE §13): run the spike, produce `docs/research/m{N}-spike.md`, then continue.
 2. Write `specs/_context/m{N}-context.md` using the spike findings (if any) plus the architecture doc as binding inputs.
 3. `/speckit.constitution` — populate `.specify/memory/constitution.md` (first milestone only; reused thereafter; amend only when RATIONALE amends)

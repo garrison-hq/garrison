@@ -67,6 +67,8 @@ Read this before proposing changes. Most "wouldn't it be better if..." questions
 
 **Status**: thesis, not yet validated. M2.2 is the milestone where this thesis becomes testable. If M2.2 ships and the palace produces useful cross-agent memory under real work, the architecture's core bet is validated. If not, the entire downstream roadmap is reconsidered.
 
+**Note (post-M2.3)**: the compliance *mechanism* that supports this thesis — `finalize_ticket` as the only commit path, supervisor-writes-from-tool-payload, atomic transaction bracketing the MemPalace writes — was validated in the M2.2.x arc on clean plumbing (see `docs/retros/m2-2-x-compliance-retro.md`). Whether the resulting writes accumulate into *useful cross-agent memory* over time is a longer-horizon test that M3+ operator usage will surface. The mechanism-level validation does not retire the thesis status; it confirms the architecture can carry the thesis if writes are useful.
+
 ---
 
 ## 4. Why Postgres as state store instead of a filesystem
@@ -186,6 +188,8 @@ Read this before proposing changes. Most "wouldn't it be better if..." questions
 
 **Validated by M1**: M1 shipped an 18MB static binary from a 10-line Dockerfile, concurrency bugs were caught at compile time, and the locked dependency list held with one honest exception (`github.com/google/shlex` for POSIX-like argv splitting, justified in the M1 retro).
 
+**Reaffirmed through M2.2.2**: the locked-deps streak held across five consecutive milestones (M1, M2.1, M2.2, M2.2.1, M2.2.2) — zero new Go dependencies. **Broken intentionally at M2.3** with two principled additions: `github.com/infisical/go-sdk v0.7.1` (no stdlib alternative for Universal Auth + the secret-fetch loop) and `golang.org/x/tools v0.44.0` (no stdlib alternative for the `tools/vaultlog` go vet analyzer that prevents `vault.SecretValue` from reaching log calls at build time). Both are justified in `docs/retros/m2-3.md` and represent the load-bearing minimum for vault integration. The streak fact is itself part of the validation: the discipline holds when stdlib is enough and bends only when an external service requires it.
+
 ---
 
 ## 10. Why specs-first instead of code-first
@@ -206,6 +210,8 @@ Read this before proposing changes. Most "wouldn't it be better if..." questions
 **Trade-off accepted**: Spec-writing adds time at the start of each milestone. We accept this because the alternative is correcting misaligned implementations after the fact, which is more expensive. If a spec is producing too much paralysis, the remedy is to narrow the spec further, not to abandon spec-first.
 
 **Validated by M1**: the M1 retro's "what the spec got wrong" section contained six items; none were architectural drift, all were edge cases below the spec's level of abstraction. The spec landed at the right grain. Chaos tests caught the gaps before ship.
+
+**Reaffirmed through the M2.2.x arc**: the M2.2 → M2.2.1 → M2.2.2 sequence shipped three narrow specs in three days, each driven by the prior milestone's retro findings. The arc retro at `docs/retros/m2-2-x-compliance-retro.md` demonstrates the recovery shape when interpretations turn out to have been drawn from contaminated data — three milestones' retros revised in light of a post-ship pgmcp investigation, but the milestones themselves did not need to be re-shipped because each was scoped narrowly enough that the contaminated interpretation was the only thing wrong, not the architecture. Monolithic-spec equivalents would have required reopening the entire spec; narrow-spec arcs let you revise interpretations without rewriting code.
 
 ---
 
