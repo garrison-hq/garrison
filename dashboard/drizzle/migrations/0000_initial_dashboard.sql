@@ -34,7 +34,7 @@ CREATE TABLE "sessions" (
 	"token" text NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"ip_address" "inet",
+	"ip_address" text,
 	"user_agent" text,
 	CONSTRAINT "sessions_token_unique" UNIQUE("token")
 );

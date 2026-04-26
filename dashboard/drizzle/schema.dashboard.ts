@@ -23,7 +23,6 @@ import {
   text,
   boolean,
   timestamp,
-  inet,
   unique,
   index,
   check,
@@ -76,7 +75,11 @@ export const sessions = pgTable(
     updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' })
       .defaultNow()
       .notNull(),
-    ipAddress: inet('ip_address'),
+    // text rather than inet: better-auth passes an empty string when
+    // it cannot parse a request IP, and inet rejects '' with
+    // "invalid input syntax". text matches better-auth's reference
+    // schema and is forgiving of empty/invalid values.
+    ipAddress: text('ip_address'),
     userAgent: text('user_agent'),
   },
   (t) => [
