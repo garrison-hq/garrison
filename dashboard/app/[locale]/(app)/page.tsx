@@ -1,7 +1,14 @@
 import { getTranslations } from 'next-intl/server';
-import { fetchOrgKPIs, fetchDepartmentRows } from '@/lib/queries/orgOverview';
+import {
+  fetchOrgKPIs,
+  fetchDepartmentRows,
+  fetchRecentTransitions,
+  fetchLiveSpawns,
+} from '@/lib/queries/orgOverview';
 import { KPIStrip } from '@/components/features/org-overview/KPIStrip';
 import { DepartmentRow } from '@/components/features/org-overview/DepartmentRow';
+import { RecentTransitions } from '@/components/features/org-overview/RecentTransitions';
+import { LiveSpawns } from '@/components/features/org-overview/LiveSpawns';
 import { RefreshButton } from '@/components/features/org-overview/RefreshButton';
 import { SoftPoll } from '@/components/features/org-overview/SoftPoll';
 import { EmptyState } from '@/components/ui/EmptyState';
@@ -17,12 +24,16 @@ import { EmptyState } from '@/components/ui/EmptyState';
 export const dynamic = 'force-dynamic';
 
 export default async function Home() {
-  const [kpis, departments, navT, ovT] = await Promise.all([
+  const [kpis, departments, recentTransitions, liveSpawns, navT, ovT] = await Promise.all([
     fetchOrgKPIs(),
     fetchDepartmentRows(),
+    fetchRecentTransitions(10),
+    fetchLiveSpawns(),
     getTranslations('nav'),
     getTranslations('orgOverview'),
   ]);
+
+  const totalCapacity = departments.reduce((acc, d) => acc + d.agentCap, 0);
 
   return (
     <main className="p-6 space-y-6">
@@ -52,6 +63,15 @@ export default async function Home() {
           </div>
         )}
       </section>
+
+      <div className="grid gap-3 grid-cols-1 lg:grid-cols-3">
+        <div className="lg:col-span-2">
+          <RecentTransitions rows={recentTransitions} />
+        </div>
+        <div className="lg:col-span-1">
+          <LiveSpawns rows={liveSpawns} totalCapacity={totalCapacity} />
+        </div>
+      </div>
 
       <SoftPoll intervalMs={60_000} />
     </main>

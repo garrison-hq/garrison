@@ -112,3 +112,92 @@ export async function fetchDepartmentRows(): Promise<DeptRow[]> {
     hygieneWarnings: Number(row.hygiene_warnings ?? 0),
   }));
 }
+
+export interface RecentTransitionRow {
+  id: string;
+  ticketId: string;
+  ticketObjective: string;
+  departmentSlug: string;
+  fromColumn: string | null;
+  toColumn: string;
+  hygieneStatus: string | null;
+  at: Date;
+}
+
+export async function fetchRecentTransitions(limit = 10): Promise<RecentTransitionRow[]> {
+  const cap = Math.max(1, Math.min(50, limit));
+  const rows = await appDb.execute<{
+    id: string;
+    ticket_id: string;
+    ticket_objective: string;
+    department_slug: string;
+    from_column: string | null;
+    to_column: string;
+    hygiene_status: string | null;
+    at: Date;
+  }>(sql`
+    SELECT
+      tt.id,
+      tt.from_column,
+      tt.to_column,
+      tt.hygiene_status,
+      tt.at,
+      t.id AS ticket_id,
+      t.objective AS ticket_objective,
+      d.slug AS department_slug
+    FROM ticket_transitions tt
+    JOIN tickets t      ON t.id = tt.ticket_id
+    JOIN departments d  ON d.id = t.department_id
+    ORDER BY tt.at DESC
+    LIMIT ${cap}
+  `);
+  return rows.map((r) => ({
+    id: r.id,
+    ticketId: r.ticket_id,
+    ticketObjective: r.ticket_objective,
+    departmentSlug: r.department_slug,
+    fromColumn: r.from_column,
+    toColumn: r.to_column,
+    hygieneStatus: r.hygiene_status,
+    at: r.at,
+  }));
+}
+
+export interface LiveSpawnRow {
+  id: string;
+  roleSlug: string;
+  ticketId: string | null;
+  ticketIdShort: string | null;
+  departmentSlug: string;
+  startedAt: Date;
+}
+
+export async function fetchLiveSpawns(): Promise<LiveSpawnRow[]> {
+  const rows = await appDb.execute<{
+    id: string;
+    role_slug: string;
+    ticket_id: string | null;
+    department_slug: string;
+    started_at: Date;
+  }>(sql`
+    SELECT
+      ai.id,
+      ai.role_slug,
+      ai.ticket_id,
+      ai.started_at,
+      d.slug AS department_slug
+    FROM agent_instances ai
+    JOIN departments d ON d.id = ai.department_id
+    WHERE ai.status = 'running'
+    ORDER BY ai.started_at ASC
+    LIMIT 50
+  `);
+  return rows.map((r) => ({
+    id: r.id,
+    roleSlug: r.role_slug,
+    ticketId: r.ticket_id,
+    ticketIdShort: r.ticket_id ? r.ticket_id.slice(0, 8) : null,
+    departmentSlug: r.department_slug,
+    startedAt: r.started_at,
+  }));
+}

@@ -177,7 +177,22 @@ VALUES
    '00000000-0000-0000-0000-00000000d001', '00000000-0000-0000-0000-aaaa00000003',
    'engineer', 'completed',
    now() - interval '14 hours', now() - interval '14 hours' + interval '3 minutes',
-   'sandbox_escape', 0.012000, 'normal')
+   'sandbox_escape', 0.012000, 'normal'),
+  -- Two currently-running spawns so the org-overview "Live spawns"
+  -- card has something to show. NULL finished_at + status='running'
+  -- is the predicate the dashboard's Sidebar + Live spawns query
+  -- both filter on. Started a couple minutes ago so the elapsed
+  -- column reads "2m 14s" / "47s" rather than "0s".
+  ('00000000-0000-0000-0000-bbbb00000006',
+   '00000000-0000-0000-0000-00000000d001', '00000000-0000-0000-0000-aaaa00000002',
+   'engineer', 'running',
+   now() - interval '2 minutes 14 seconds', NULL,
+   NULL, NULL, 'normal'),
+  ('00000000-0000-0000-0000-bbbb00000007',
+   '00000000-0000-0000-0000-00000000d002', '00000000-0000-0000-0000-aaaa00010001',
+   'qa-engineer', 'running',
+   now() - interval '47 seconds', NULL,
+   NULL, NULL, 'normal')
 ON CONFLICT (id) DO NOTHING;
 
 -- =========================================================================
