@@ -72,6 +72,14 @@ function statusesForFailureMode(mode: FailureMode): string[] {
   }
 }
 
+function quoteSqlLiteral(value: string): string {
+  return `'${value.replaceAll("'", "''")}'`;
+}
+
+function buildQuotedInList(values: string[]): string {
+  return `(${values.map(quoteSqlLiteral).join(', ')})`;
+}
+
 export async function fetchHygieneRows(
   filter: HygieneFilter = {},
 ): Promise<{ rows: HygieneRow[]; total: number }> {
@@ -86,6 +94,9 @@ export async function fetchHygieneRows(
   // they are never user-controlled. We still escape single quotes
   // defensively so a future code edit that introduces an apostrophe
   // doesn't open a SQL injection seam.
+  const statusInClause = statusList
+    ? sql`AND tt.hygiene_status IN ${sql.raw(buildQuotedInList(statusList))}`
+    : sql``;
   const rowsResult = await appDb.execute<{
     transition_id: string;
     ticket_id: string;
@@ -111,7 +122,7 @@ export async function fetchHygieneRows(
     LEFT JOIN agent_instances ai ON ai.id = tt.triggered_by_agent_instance_id
     WHERE tt.hygiene_status IS NOT NULL
       AND tt.hygiene_status NOT IN ('clean', '')
-      ${statusList ? sql`AND tt.hygiene_status IN ${sql.raw(`(${statusList.map((s) => `'${s.replace(/'/g, "''")}'`).join(', ')})`)}` : sql``}
+      ${statusInClause}
       ${filter.departmentSlug ? sql`AND d.slug = ${filter.departmentSlug}` : sql``}
     ORDER BY tt.at DESC
     LIMIT ${pageSize} OFFSET ${offset}
@@ -124,7 +135,7 @@ export async function fetchHygieneRows(
     JOIN departments d ON d.id = t.department_id
     WHERE tt.hygiene_status IS NOT NULL
       AND tt.hygiene_status NOT IN ('clean', '')
-      ${statusList ? sql`AND tt.hygiene_status IN ${sql.raw(`(${statusList.map((s) => `'${s.replace(/'/g, "''")}'`).join(', ')})`)}` : sql``}
+      ${statusInClause}
       ${filter.departmentSlug ? sql`AND d.slug = ${filter.departmentSlug}` : sql``}
   `);
 

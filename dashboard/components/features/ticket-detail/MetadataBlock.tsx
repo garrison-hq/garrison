@@ -1,7 +1,7 @@
 import { Chip } from '@/components/ui/Chip';
 import type { TicketDetailMetadata } from '@/lib/queries/ticketDetail';
 
-export function MetadataBlock({ metadata }: { metadata: TicketDetailMetadata }) {
+export function MetadataBlock({ metadata }: Readonly<{ metadata: TicketDetailMetadata }>) {
   return (
     <section className="bg-surface-1 border border-border-1 rounded p-4 space-y-2">
       <div className="flex items-center justify-between">

@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { Chip } from '@/components/ui/Chip';
 import type { DeptRow } from '@/lib/queries/orgOverview';
 
-export function DepartmentRow({ row }: { row: DeptRow }) {
+export function DepartmentRow({ row }: Readonly<{ row: DeptRow }>) {
   const lastTs = row.lastTransitionAt
     ? new Date(row.lastTransitionAt).toISOString().slice(0, 16) + 'Z'
     : '—';

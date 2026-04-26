@@ -18,7 +18,7 @@ function formatDuration(start: Date, end: Date | null): string {
   return `${min}m${sec % 60}s`;
 }
 
-export async function AgentInstancesBlock({ instances }: { instances: AgentInstanceRow[] }) {
+export async function AgentInstancesBlock({ instances }: Readonly<{ instances: AgentInstanceRow[] }>) {
   const t = await getTranslations('ticketDetail');
   return (
     <section className="space-y-2">

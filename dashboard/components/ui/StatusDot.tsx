@@ -12,6 +12,6 @@ const toneClass: Record<Tone, string> = {
   ok: 'bg-ok',
 };
 
-export function StatusDot({ tone = 'neutral' }: { tone?: Tone }) {
+export function StatusDot({ tone = 'neutral' }: Readonly<{ tone?: Tone }>) {
   return <span className={`inline-block w-1.5 h-1.5 rounded-full ${toneClass[tone]}`} />;
 }

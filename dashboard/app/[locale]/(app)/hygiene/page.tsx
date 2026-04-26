@@ -19,9 +19,9 @@ function parseMode(raw: string | string[] | undefined): FailureMode | undefined 
 
 export default async function HygienePage({
   searchParams,
-}: {
+}: Readonly<{
   searchParams: Promise<Record<string, string | string[] | undefined>>;
-}) {
+}>) {
   const sp = await searchParams;
   const failureMode = parseMode(sp.mode);
   const dept = typeof sp.dept === 'string' ? sp.dept : undefined;

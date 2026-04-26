@@ -2,7 +2,7 @@ import { getTranslations } from 'next-intl/server';
 import { HistoryRow } from './HistoryRow';
 import type { TransitionRow } from '@/lib/queries/ticketDetail';
 
-export async function HistoryBlock({ history }: { history: TransitionRow[] }) {
+export async function HistoryBlock({ history }: Readonly<{ history: TransitionRow[] }>) {
   const t = await getTranslations('ticketDetail');
   return (
     <section className="space-y-2">

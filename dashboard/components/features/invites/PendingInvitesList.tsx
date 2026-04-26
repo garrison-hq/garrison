@@ -12,7 +12,7 @@ interface Props {
 // Renders the pending-invites table. Each row shows the share-able
 // link, the expiration timestamp, and a revoke button. Revoke calls
 // the API and refreshes the page.
-export function PendingInvitesList({ invites, baseUrl }: Props) {
+export function PendingInvitesList({ invites, baseUrl }: Readonly<Props>) {
   const t = useTranslations('auth.admin');
   const [busyId, setBusyId] = useState<string | null>(null);
 
@@ -25,7 +25,7 @@ export function PendingInvitesList({ invites, baseUrl }: Props) {
       });
       // Force a server-component refresh of the parent route so the
       // newly-revoked invite drops out of the list.
-      window.location.reload();
+      globalThis.location.reload();
     } finally {
       setBusyId(null);
     }

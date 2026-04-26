@@ -8,11 +8,11 @@ export function EmptyState({
   icon,
   description,
   caption,
-}: {
+}: Readonly<{
   icon?: ReactNode;
   description: ReactNode;
   caption?: ReactNode;
-}) {
+}>) {
   return (
     <div className="flex flex-col items-center justify-center text-center gap-2 py-10 text-text-3">
       {icon ? <div className="text-text-4 text-2xl">{icon}</div> : null}

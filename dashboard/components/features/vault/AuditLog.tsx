@@ -9,7 +9,7 @@ function outcomeTone(outcome: string): 'ok' | 'err' | 'warn' | 'neutral' {
   return 'neutral';
 }
 
-export function AuditLog({ rows }: { rows: VaultAuditRow[] }) {
+export function AuditLog({ rows }: Readonly<{ rows: VaultAuditRow[] }>) {
   return (
     <Tbl>
       <thead>

@@ -4,11 +4,11 @@ export function RoleSecretMatrix({
   roles,
   secrets,
   cells,
-}: {
+}: Readonly<{
   roles: string[];
   secrets: string[];
   cells: MatrixCell[];
-}) {
+}>) {
   const grants = new Set(cells.map((c) => `${c.roleSlug}:${c.secretPath}`));
   return (
     <div className="overflow-x-auto border border-border-1 rounded">

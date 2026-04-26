@@ -3,7 +3,7 @@
 import { Chip } from '@/components/ui/Chip';
 import type { ActivityEvent } from '@/lib/sse/events';
 
-export function EventRow({ event }: { event: ActivityEvent }) {
+export function EventRow({ event }: Readonly<{ event: ActivityEvent }>) {
   const ts = new Date(event.at).toISOString().slice(11, 19) + 'Z';
   return (
     <div className="grid grid-cols-12 gap-2 px-3 py-1 items-center text-xs" data-testid="event-row">

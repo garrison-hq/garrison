@@ -3,6 +3,7 @@
 import { Suspense, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useTranslations } from 'next-intl';
+import { formField } from '@/lib/forms/formField';
 
 // Login form. Posts to better-auth's sign-in/email endpoint via
 // fetch (NOT Server Action) so the cookie set in the response
@@ -40,8 +41,8 @@ function LoginForm() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          email: String(fd.get('email') ?? ''),
-          password: String(fd.get('password') ?? ''),
+          email: formField(fd, 'email'),
+          password: formField(fd, 'password'),
         }),
         credentials: 'include',
       });

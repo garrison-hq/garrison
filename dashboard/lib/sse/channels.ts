@@ -46,12 +46,19 @@ export interface OutboxRow {
  * generic shape so the operator never sees the surface mute
  * unexpected events silently.
  */
+function pickString(...candidates: unknown[]): string {
+  for (const c of candidates) {
+    if (typeof c === 'string') return c;
+  }
+  return '';
+}
+
 export function parseChannel(row: OutboxRow): ActivityEvent {
   const at = row.createdAt instanceof Date
     ? row.createdAt.toISOString()
     : new Date(row.createdAt).toISOString();
   const payload = row.payload ?? {};
-  const ticketId = String(payload.ticket_id ?? payload.ticketId ?? '');
+  const ticketId = pickString(payload.ticket_id, payload.ticketId);
 
   if (row.channel === 'work.ticket.created') {
     return { kind: 'ticket.created', eventId: row.id, at, ticketId };

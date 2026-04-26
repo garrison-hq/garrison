@@ -3,6 +3,7 @@
 import { use, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useTranslations } from 'next-intl';
+import { formField } from '@/lib/forms/formField';
 
 // Invite-redemption form. Public route (allow-listed in middleware).
 // Posts to /api/invites/redeem; on success, the response carries a
@@ -15,9 +16,9 @@ import { useTranslations } from 'next-intl';
 
 export default function RedeemInvitePage({
   params,
-}: {
+}: Readonly<{
   params: Promise<{ token: string }>;
-}) {
+}>) {
   const { token } = use(params);
   const t = useTranslations('auth.invite');
   const router = useRouter();
@@ -36,9 +37,9 @@ export default function RedeemInvitePage({
         credentials: 'include',
         body: JSON.stringify({
           token,
-          name: String(fd.get('name') ?? ''),
-          email: String(fd.get('email') ?? ''),
-          password: String(fd.get('password') ?? ''),
+          name: formField(fd, 'name'),
+          email: formField(fd, 'email'),
+          password: formField(fd, 'password'),
         }),
       });
       if (!res.ok) {

@@ -8,9 +8,9 @@ export const dynamic = 'force-dynamic';
 
 export default async function VaultAuditPage({
   searchParams,
-}: {
+}: Readonly<{
   searchParams: Promise<Record<string, string | string[] | undefined>>;
-}) {
+}>) {
   const sp = await searchParams;
   const roleSlug = typeof sp.role === 'string' ? sp.role : undefined;
   const ticketId = typeof sp.ticket === 'string' ? sp.ticket : undefined;

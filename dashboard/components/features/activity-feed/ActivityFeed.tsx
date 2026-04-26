@@ -100,13 +100,21 @@ export function ActivityFeed() {
     overscan: 5,
   });
 
+  let statusClass: string;
+  if (status === 'live') statusClass = 'text-ok';
+  else if (status === 'reconnecting') statusClass = 'text-warn';
+  else statusClass = 'text-text-3';
+
+  let statusLabel: string;
+  if (status === 'live') statusLabel = '● live';
+  else if (status === 'reconnecting') statusLabel = '↻ reconnecting…';
+  else statusLabel = 'connecting…';
+
   return (
     <div className="space-y-3">
       <div className="flex items-center gap-3 text-xs">
-        <span data-testid="sse-status" className={
-          status === 'live' ? 'text-ok' : status === 'reconnecting' ? 'text-warn' : 'text-text-3'
-        }>
-          {status === 'live' ? '● live' : status === 'reconnecting' ? '↻ reconnecting…' : 'connecting…'}
+        <span data-testid="sse-status" className={statusClass}>
+          {statusLabel}
         </span>
         <span className="text-text-3">
           {filteredRuns.reduce((acc, r) => acc + r.events.length, 0)} events

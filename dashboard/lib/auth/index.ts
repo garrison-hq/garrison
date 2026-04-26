@@ -35,7 +35,7 @@ if (
   process.env.NODE_ENV === 'production' &&
   process.env.GARRISON_TEST_MODE !== '1' &&
   secret === PLACEHOLDER_SECRET &&
-  typeof globalThis.process !== 'undefined' &&
+  globalThis.process !== undefined &&
   process.env.NEXT_PHASE !== 'phase-production-build'
 ) {
   throw new Error(

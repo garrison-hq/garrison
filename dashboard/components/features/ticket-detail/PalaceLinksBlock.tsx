@@ -6,7 +6,7 @@ import { getTranslations } from 'next-intl/server';
 // ticket id" rather than embedding the diary excerpt inline. M5+
 // wires the read references.
 
-export async function PalaceLinksBlock({ ticketId }: { ticketId: string }) {
+export async function PalaceLinksBlock({ ticketId }: Readonly<{ ticketId: string }>) {
   const t = await getTranslations('ticketDetail');
   return (
     <section className="space-y-2">

@@ -5,10 +5,10 @@ import type { HygieneRow as Row } from '@/lib/queries/hygiene';
 export function HygieneTable({
   rows,
   emptyDescription,
-}: {
+}: Readonly<{
   rows: Row[];
   emptyDescription: string;
-}) {
+}>) {
   if (rows.length === 0) {
     return <EmptyState description={emptyDescription} />;
   }

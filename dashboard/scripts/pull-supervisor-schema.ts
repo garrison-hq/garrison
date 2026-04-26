@@ -31,7 +31,7 @@ const GOOSE_DSN = `host=localhost port=${PG_PORT} user=test password=test dbname
 function run(cmd: string, args: string[], opts: { env?: Record<string, string> } = {}): void {
   const result = spawnSync(cmd, args, {
     stdio: 'inherit',
-    env: { ...process.env, ...(opts.env ?? {}) },
+    env: { ...process.env, ...opts.env },
   });
   if (result.status !== 0) {
     throw new Error(`${cmd} ${args.join(' ')} failed with status ${result.status}`);
@@ -112,7 +112,9 @@ async function main() {
   }
 }
 
-main().catch((err) => {
+try {
+  await main();
+} catch (err) {
   console.error(err);
   process.exit(1);
-});
+}

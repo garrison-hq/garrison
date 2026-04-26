@@ -9,7 +9,7 @@ import { Topbar } from '@/components/layout/Topbar';
 // the data-theme attribute on <html>; that layout reads the
 // operator's saved preference from the session.
 
-export default function AppLayout({ children }: { children: React.ReactNode }) {
+export default function AppLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
     <div className="min-h-screen flex flex-col">
       <div className="flex flex-1 min-h-0">

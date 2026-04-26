@@ -1,4 +1,4 @@
-import type { ReactNode, HTMLAttributes } from 'react';
+import type { HTMLAttributes } from 'react';
 
 // Thin <table> wrapper that ships with the dashboard's row density
 // + border treatment. Used by the hygiene table, audit log, agents

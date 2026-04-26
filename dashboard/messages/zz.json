@@ -1,0 +1,118 @@
+{
+  "common": {
+    "loading": "zz_loading",
+    "refresh": "zz_refresh",
+    "expand": "zz_expand",
+    "collapse": "zz_collapse",
+    "logOut": "zz_logOut"
+  },
+  "orgOverview": {
+    "openTickets": "zz_openTickets",
+    "activeAgents": "zz_activeAgents",
+    "transitions24h": "zz_transitions24h",
+    "hygieneWarnings": "zz_hygieneWarnings",
+    "departmentsHeading": "zz_departmentsHeading",
+    "noDepartments": "zz_noDepartments"
+  },
+  "kanban": {
+    "noTickets": "zz_kanban_noTickets",
+    "departmentNotFound": "zz_kanban_departmentNotFound"
+  },
+  "hygiene": {
+    "empty": "zz_hygiene_empty"
+  },
+  "agents": {
+    "empty": "zz_agents_empty"
+  },
+  "activity": {
+    "empty": "zz_activity_empty"
+  },
+  "vault": {
+    "secretsHeading": "zz_vault_secretsHeading",
+    "auditHeading": "zz_vault_auditHeading",
+    "matrixHeading": "zz_vault_matrixHeading",
+    "secretsTab": "zz_vault_secretsTab",
+    "auditTab": "zz_vault_auditTab",
+    "matrixTab": "zz_vault_matrixTab",
+    "emptySecrets": "zz_vault_emptySecrets",
+    "emptyAudit": "zz_vault_emptyAudit",
+    "emptyMatrix": "zz_vault_emptyMatrix"
+  },
+  "ticketDetail": {
+    "history": "zz_td_history",
+    "noHistory": "zz_td_noHistory",
+    "agentInstances": "zz_td_agentInstances",
+    "noInstances": "zz_td_noInstances",
+    "palaceLinks": "zz_td_palaceLinks",
+    "palaceLinksHint": "zz_td_palaceLinksHint",
+    "role": "zz_td_role",
+    "startedAt": "zz_td_startedAt",
+    "duration": "zz_td_duration",
+    "exitReason": "zz_td_exitReason",
+    "cost": "zz_td_cost",
+    "sandboxEscape": "zz_td_sandboxEscape"
+  },
+  "nav": {
+    "orgOverview": "zz_orgOverview",
+    "departments": "zz_departments",
+    "tickets": "zz_tickets",
+    "activity": "zz_activity",
+    "hygiene": "zz_hygiene",
+    "vault": "zz_vault",
+    "agents": "zz_agents",
+    "admin": "zz_admin"
+  },
+  "auth": {
+    "signIn": {
+      "heading": "zz_signIn_heading",
+      "email": "zz_signIn_email",
+      "password": "zz_signIn_password",
+      "submit": "zz_signIn_submit",
+      "submitting": "zz_signIn_submitting"
+    },
+    "setup": {
+      "heading": "zz_setup_heading",
+      "description": "zz_setup_description",
+      "name": "zz_setup_name",
+      "email": "zz_setup_email",
+      "password": "zz_setup_password",
+      "submit": "zz_setup_submit"
+    },
+    "invite": {
+      "heading": "zz_invite_heading",
+      "description": "zz_invite_description",
+      "name": "zz_invite_name",
+      "email": "zz_invite_email",
+      "password": "zz_invite_password",
+      "submit": "zz_invite_submit",
+      "submitting": "zz_invite_submitting"
+    },
+    "admin": {
+      "heading": "zz_admin_heading",
+      "description": "zz_admin_description",
+      "generate": "zz_admin_generate",
+      "generating": "zz_admin_generating",
+      "noPending": "zz_admin_noPending",
+      "expires": "zz_admin_expires {when}",
+      "revoke": "zz_admin_revoke",
+      "revoking": "zz_admin_revoking"
+    }
+  },
+  "errors": {
+    "auth": {
+      "no_session": "zz_err_no_session",
+      "invite_not_found": "zz_err_invite_not_found",
+      "invite_expired": "zz_err_invite_expired",
+      "invite_revoked": "zz_err_invite_revoked",
+      "invite_already_redeemed": "zz_err_invite_already_redeemed",
+      "first_run_locked": "zz_err_first_run_locked",
+      "email_already_exists": "zz_err_email_already_exists"
+    },
+    "cost_blind_spot": {
+      "tooltip": "zz_err_cost_blind_spot_tooltip"
+    },
+    "sandbox_escape": {
+      "tooltip": "zz_err_sandbox_escape_tooltip"
+    }
+  }
+}

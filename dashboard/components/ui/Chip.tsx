@@ -16,7 +16,7 @@ const toneClass: Record<Tone, string> = {
   ok: 'bg-ok/10 text-ok border-ok/30',
 };
 
-export function Chip({ children, tone = 'neutral' }: { children: ReactNode; tone?: Tone }) {
+export function Chip({ children, tone = 'neutral' }: Readonly<{ children: ReactNode; tone?: Tone }>) {
   return (
     <span
       className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium border ${toneClass[tone]}`}

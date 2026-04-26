@@ -8,7 +8,7 @@ import { useRouter } from 'next/navigation';
 // only consumer) but in its own file so the Topbar Server
 // Component doesn't need 'use client'.
 
-export function LogOutButton({ label }: { label: string }) {
+export function LogOutButton({ label }: Readonly<{ label: string }>) {
   const router = useRouter();
   const [pending, start] = useTransition();
   return (

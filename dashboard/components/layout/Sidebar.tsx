@@ -39,7 +39,7 @@ export async function Sidebar() {
   );
 }
 
-function NavLink({ href, label }: { href: string; label: string }) {
+function NavLink({ href, label }: Readonly<{ href: string; label: string }>) {
   return (
     <Link
       href={href}
@@ -51,7 +51,7 @@ function NavLink({ href, label }: { href: string; label: string }) {
   );
 }
 
-function NavGroup({ label, children }: { label: string; children: React.ReactNode }) {
+function NavGroup({ label, children }: Readonly<{ label: string; children: React.ReactNode }>) {
   return (
     <div className="mt-3 mb-1">
       <div className="px-3 py-1 text-[10px] uppercase tracking-wider text-text-3 font-medium">
@@ -62,7 +62,7 @@ function NavGroup({ label, children }: { label: string; children: React.ReactNod
   );
 }
 
-function NavSubLink({ href, label }: { href: string; label: string }) {
+function NavSubLink({ href, label }: Readonly<{ href: string; label: string }>) {
   return (
     <Link
       href={href}

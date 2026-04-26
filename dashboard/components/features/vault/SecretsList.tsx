@@ -15,7 +15,7 @@ function rotationTone(status: SecretMetadataRow['rotationStatus']): 'ok' | 'warn
   }
 }
 
-export function SecretsList({ rows }: { rows: SecretMetadataRow[] }) {
+export function SecretsList({ rows }: Readonly<{ rows: SecretMetadataRow[] }>) {
   return (
     <Tbl>
       <thead>

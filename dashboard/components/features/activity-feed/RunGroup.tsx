@@ -18,22 +18,26 @@ import type { ActivityEvent } from '@/lib/sse/events';
 export function RunGroup({
   runId,
   events,
-}: {
+}: Readonly<{
   runId: string | null;
   events: ActivityEvent[];
-}) {
+}>) {
   const t = useTranslations('common');
   const [open, setOpen] = useState(runId === null);
   const sorted = [...events].sort(
     (a, b) => new Date(a.at).getTime() - new Date(b.at).getTime(),
   );
   const first = sorted[0];
-  const last = sorted[sorted.length - 1];
-  const summaryDescription = first
-    ? first.kind === 'ticket.transitioned'
-      ? `${first.department}: ${first.from} → ${last.kind === 'ticket.transitioned' ? last.to : '?'}`
-      : 'ticket activity'
-    : 'empty run';
+  const last = sorted.at(-1);
+  let summaryDescription: string;
+  if (!first) {
+    summaryDescription = 'empty run';
+  } else if (first.kind === 'ticket.transitioned') {
+    const lastTo = last?.kind === 'ticket.transitioned' ? last.to : '?';
+    summaryDescription = `${first.department}: ${first.from} → ${lastTo}`;
+  } else {
+    summaryDescription = 'ticket activity';
+  }
 
   return (
     <div className="border border-border-1 rounded bg-surface-1" data-testid="run-group">

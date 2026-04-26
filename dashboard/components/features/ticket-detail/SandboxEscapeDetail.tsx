@@ -6,10 +6,10 @@
 export function SandboxEscapeDetail({
   claimedPath,
   onDiskPath,
-}: {
+}: Readonly<{
   claimedPath: string;
   onDiskPath: string;
-}) {
+}>) {
   return (
     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs" data-testid="sandbox-escape-detail">
       <div>

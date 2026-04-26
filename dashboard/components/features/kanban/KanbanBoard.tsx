@@ -4,10 +4,10 @@ import type { DeptInfo, TicketCardRow } from '@/lib/queries/kanban';
 export function KanbanBoard({
   dept,
   tickets,
-}: {
+}: Readonly<{
   dept: DeptInfo;
   tickets: TicketCardRow[];
-}) {
+}>) {
   // Group tickets into columns by column_slug. Empty columns are
   // still rendered so the four-column visual cadence is stable
   // regardless of where tickets currently live.

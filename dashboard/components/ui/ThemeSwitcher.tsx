@@ -11,7 +11,7 @@ import type { ThemePreference } from '@/lib/theme/resolve';
 
 const PREFERENCES: ThemePreference[] = ['dark', 'light', 'system'];
 
-export function ThemeSwitcher({ initial }: { initial: ThemePreference }) {
+export function ThemeSwitcher({ initial }: Readonly<{ initial: ThemePreference }>) {
   const router = useRouter();
   const [preference, setPreference] = useState<ThemePreference>(initial);
   const [pending, setPending] = useState(false);
@@ -27,11 +27,11 @@ export function ThemeSwitcher({ initial }: { initial: ThemePreference }) {
     // state to the captured `previous` value (NOT the stale
     // `preference` closure-captured at render time, which would
     // still hold the new value after setPreference).
-    if (next !== 'system') {
-      document.documentElement.dataset.theme = next;
-    } else {
-      const sys = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    if (next === 'system') {
+      const sys = globalThis.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
       document.documentElement.dataset.theme = sys;
+    } else {
+      document.documentElement.dataset.theme = next;
     }
     try {
       const res = await fetch('/api/theme', {

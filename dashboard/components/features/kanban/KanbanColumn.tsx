@@ -5,11 +5,11 @@ export function KanbanColumn({
   slug,
   label,
   tickets,
-}: {
+}: Readonly<{
   slug: string;
   label: string;
   tickets: TicketCardRow[];
-}) {
+}>) {
   return (
     <div className="flex-1 min-w-[200px] bg-surface-1 border border-border-1 rounded flex flex-col">
       <div className="px-3 py-2 border-b border-border-1 flex items-center justify-between">

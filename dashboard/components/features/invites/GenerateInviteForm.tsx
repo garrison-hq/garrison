@@ -22,7 +22,7 @@ export function GenerateInviteForm() {
       if (!res.ok) {
         throw new Error(`generate failed (HTTP ${res.status})`);
       }
-      window.location.reload();
+      globalThis.location.reload();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {

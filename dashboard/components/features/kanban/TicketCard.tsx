@@ -8,7 +8,7 @@ import type { TicketCardRow } from '@/lib/queries/kanban';
 // is a constant accent color (M3 doesn't ship a priority field;
 // the visual is reserved for M4 when priority enters the schema).
 
-export function TicketCard({ ticket }: { ticket: TicketCardRow }) {
+export function TicketCard({ ticket }: Readonly<{ ticket: TicketCardRow }>) {
   const ageDays = Math.floor(
     (Date.now() - new Date(ticket.createdAt).getTime()) / (1000 * 60 * 60 * 24),
   );

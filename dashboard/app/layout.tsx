@@ -18,7 +18,7 @@ function isThemePref(v: unknown): v is ThemePreference {
   return v === 'dark' || v === 'light' || v === 'system';
 }
 
-export default async function RootLayout({ children }: { children: React.ReactNode }) {
+export default async function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   const session = await getSession();
   const stored = (session?.user as { themePreference?: unknown } | undefined)?.themePreference;
   const operatorPref: ThemePreference = isThemePref(stored) ? stored : 'system';

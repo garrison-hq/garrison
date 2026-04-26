@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import Link from 'next/link';
 import { Chip } from '@/components/ui/Chip';
 import type { HygieneRow as Row } from '@/lib/queries/hygiene';
@@ -7,8 +8,16 @@ function statusTone(failureMode: Row['failureMode']): 'warn' | 'err' {
   return 'warn';
 }
 
-export function HygieneRowItem({ row }: { row: Row }) {
+export function HygieneRowItem({ row }: Readonly<{ row: Row }>) {
   const ts = new Date(row.at).toISOString().slice(0, 16) + 'Z';
+  let detailCell: ReactNode;
+  if (row.failureMode === 'suspected_secret_emitted' && row.patternCategory) {
+    detailCell = <span data-testid="pattern-category">{row.patternCategory}</span>;
+  } else if (row.exitReason) {
+    detailCell = <span>{row.exitReason}</span>;
+  } else {
+    detailCell = <span className="text-text-3">—</span>;
+  }
   return (
     <Link
       href={`/tickets/${row.ticketId}`}
@@ -24,13 +33,7 @@ export function HygieneRowItem({ row }: { row: Row }) {
         <Chip tone={statusTone(row.failureMode)}>{row.hygieneStatus}</Chip>
       </span>
       <span className="col-span-2 text-text-2 font-mono">
-        {row.failureMode === 'suspected_secret_emitted' && row.patternCategory ? (
-          <span data-testid="pattern-category">{row.patternCategory}</span>
-        ) : row.exitReason ? (
-          <span>{row.exitReason}</span>
-        ) : (
-          <span className="text-text-3">—</span>
-        )}
+        {detailCell}
       </span>
       <span className="col-span-1 text-right text-text-3 font-mono">
         {row.ticketId.slice(0, 8)}

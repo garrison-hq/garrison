@@ -19,7 +19,7 @@ function formatListensFor(value: unknown): string {
   return JSON.stringify(value);
 }
 
-export function AgentsTable({ rows }: { rows: AgentRow[] }) {
+export function AgentsTable({ rows }: Readonly<{ rows: AgentRow[] }>) {
   return (
     <Tbl>
       <thead>

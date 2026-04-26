@@ -19,7 +19,7 @@ function statusTone(status: string | null): 'neutral' | 'warn' | 'err' | 'ok' {
   return 'warn';
 }
 
-export function HistoryRow({ row }: { row: TransitionRow }) {
+export function HistoryRow({ row }: Readonly<{ row: TransitionRow }>) {
   const t = useTranslations('ticketDetail');
   const errT = useTranslations('errors');
   const summary = (

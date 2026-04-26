@@ -8,7 +8,7 @@ import { useTranslations } from 'next-intl';
 // Hover tooltip names the issue and links to the open issue under
 // docs/issues/cost-telemetry-blind-spot.md.
 
-export function CostCaveatIcon({ matched }: { matched: boolean }) {
+export function CostCaveatIcon({ matched }: Readonly<{ matched: boolean }>) {
   const t = useTranslations('errors');
   if (!matched) return null;
   // The tooltip key (errors.cost_blind_spot.tooltip) is added in

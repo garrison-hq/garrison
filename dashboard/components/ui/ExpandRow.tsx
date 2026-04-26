@@ -14,11 +14,11 @@ export function ExpandRow({
   summary,
   detail,
   defaultExpanded = false,
-}: {
+}: Readonly<{
   summary: ReactNode;
   detail: ReactNode;
   defaultExpanded?: boolean;
-}) {
+}>) {
   const t = useTranslations('common');
   const [open, setOpen] = useState(defaultExpanded);
   return (

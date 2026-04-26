@@ -1,7 +1,6 @@
 'use client';
 
 import { useRouter, useSearchParams, usePathname } from 'next/navigation';
-import { Chip } from '@/components/ui/Chip';
 import type { FailureMode } from '@/lib/queries/hygiene';
 
 const MODES: { mode: FailureMode | 'all'; label: string }[] = [

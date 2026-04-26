@@ -4,6 +4,7 @@ import { getTranslations } from 'next-intl/server';
 import { appDb } from '@/lib/db/appClient';
 import { users } from '@/drizzle/schema.dashboard';
 import { auth } from '@/lib/auth';
+import { formField } from '@/lib/forms/formField';
 
 // The empty-table check must run at request time, not build time —
 // otherwise the static prerender attempts a Postgres connection
@@ -20,9 +21,9 @@ async function createInauguralOperator(formData: FormData) {
     notFound();
   }
 
-  const email = String(formData.get('email') ?? '').trim();
-  const name = String(formData.get('name') ?? '').trim();
-  const password = String(formData.get('password') ?? '');
+  const email = formField(formData, 'email').trim();
+  const name = formField(formData, 'name').trim();
+  const password = formField(formData, 'password');
 
   if (!email || !name || password.length < 8) {
     throw new Error('email, name, and an 8+ character password are required');

@@ -136,7 +136,7 @@ export function makeListener(options: ListenerOptions = {}) {
       // gates the surface
     }
     const event = parseChannel({
-      id: String(payload.event_id ?? ''),
+      id: typeof payload.event_id === 'string' ? payload.event_id : '',
       channel,
       payload,
       createdAt: new Date(),
