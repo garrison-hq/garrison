@@ -14,6 +14,41 @@
     "departmentsHeading": "Departments",
     "noDepartments": "No departments configured."
   },
+  "kanban": {
+    "noTickets": "No open tickets in this department.",
+    "departmentNotFound": "Department not found."
+  },
+  "ticketDetail": {
+    "history": "Transition history",
+    "noHistory": "No transitions yet.",
+    "agentInstances": "Agent instances",
+    "noInstances": "No agent instances have run for this ticket.",
+    "palaceLinks": "Palace links",
+    "palaceLinksHint": "Use the ticket id below as a search term in MemPalace to surface diary entries and KG triples written for this ticket.",
+    "role": "role",
+    "startedAt": "started at",
+    "duration": "duration",
+    "exitReason": "exit reason",
+    "cost": "cost",
+    "sandboxEscape": "sandbox-escape (artifact claimed vs on disk)"
+  },
+  "errors": {
+    "auth": {
+      "no_session": "You're not signed in.",
+      "invite_not_found": "Invite link does not exist.",
+      "invite_expired": "Invite link has expired.",
+      "invite_revoked": "Invite link was revoked.",
+      "invite_already_redeemed": "Invite link has already been used.",
+      "first_run_locked": "First-run setup is no longer available.",
+      "email_already_exists": "An account with this email already exists."
+    },
+    "cost_blind_spot": {
+      "tooltip": "Cost telemetry blind spot: clean-finalize runs report $0.00. See docs/issues/cost-telemetry-blind-spot.md."
+    },
+    "sandbox_escape": {
+      "tooltip": "Sandbox escape: the agent's claimed artifact path differs from what's on disk. See docs/issues/agent-workspace-sandboxing.md."
+    }
+  },
   "nav": {
     "orgOverview": "Org overview",
     "departments": "Departments",
@@ -58,17 +93,6 @@
       "expires": "expires {when}",
       "revoke": "revoke",
       "revoking": "revoking…"
-    }
-  },
-  "errors": {
-    "auth": {
-      "no_session": "You're not signed in.",
-      "invite_not_found": "Invite link does not exist.",
-      "invite_expired": "Invite link has expired.",
-      "invite_revoked": "Invite link was revoked.",
-      "invite_already_redeemed": "Invite link has already been used.",
-      "first_run_locked": "First-run setup is no longer available.",
-      "email_already_exists": "An account with this email already exists."
     }
   }
 }

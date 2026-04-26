@@ -1,3 +1,5 @@
+import { rmSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { bootDb, stopHarness } from './_harness';
 
 // Vitest globalSetup hook. Boots the Postgres testcontainer +
@@ -10,7 +12,16 @@ import { bootDb, stopHarness } from './_harness';
 // Playwright's concern. We use bootDb (DB-only) rather than
 // bootHarness (DB + dashboard).
 
+const HARNESS_DIR = join(import.meta.dirname);
+const ENV_FILE = join(HARNESS_DIR, '.harness', 'env.json');
+
 export async function setup() {
+  // Stale env file from a previous run points at a dead testcontainer
+  // (Ryuk killed it when the prior vitest process exited). Nuke it
+  // so bootDb starts fresh and writes a new one.
+  if (existsSync(ENV_FILE)) {
+    rmSync(ENV_FILE);
+  }
   await bootDb();
 }
 

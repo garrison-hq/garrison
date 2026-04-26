@@ -231,10 +231,19 @@ export async function truncateDashboardState(env: HarnessEnv): Promise<void> {
   // Connect as the test superuser — TRUNCATE is not in the
   // app role's grant set, and we don't want test infrastructure to
   // weaken the production grant matrix.
+  //
+  // Truncates BOTH dashboard-owned tables and M2-arc tables that
+  // integration tests seed (departments / tickets / etc). The
+  // M2-arc seed rows from migrations re-appear via TRUNCATE only
+  // if the migration's seed step is re-run; we leave them gone for
+  // the duration of the test (each test re-seeds what it needs).
   const sql = (await import('postgres')).default;
   const client = sql(env.TEST_SUPERUSER_DSN, { max: 1 });
   try {
-    await client`TRUNCATE users, sessions, accounts, verifications, operator_invites RESTART IDENTITY CASCADE`;
+    await client`TRUNCATE users, sessions, accounts, verifications, operator_invites,
+                          companies, departments, tickets, ticket_transitions,
+                          agent_instances, agents
+                 RESTART IDENTITY CASCADE`;
   } finally {
     await client.end();
   }
