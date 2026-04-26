@@ -48,8 +48,34 @@ function stripLocale(pathname: string): string {
   return pathname;
 }
 
+// Static-asset paths bypass both next-intl AND the auth gate. Doing
+// this inside the function (rather than the matcher regex) is more
+// robust: Next's matcher syntax has subtle interactions with regex
+// escapes (\\d, \\.) and lookaheads that have produced false-negatives
+// on /_next/static/... in past dev-server builds. Belt-and-braces:
+// keep the matcher narrow AND short-circuit static paths here.
+const STATIC_PREFIXES = ['/_next/', '/brand/'];
+const STATIC_FILES = new Set([
+  '/favicon.ico',
+  '/favicon.svg',
+  '/favicon-dark.svg',
+  '/favicon-light.svg',
+  '/favicon-16.png',
+  '/favicon-32.png',
+  '/apple-touch-icon.png',
+]);
+
+function isStaticAsset(pathname: string): boolean {
+  if (STATIC_FILES.has(pathname)) return true;
+  return STATIC_PREFIXES.some((p) => pathname.startsWith(p));
+}
+
 export function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
+
+  if (isStaticAsset(pathname)) {
+    return NextResponse.next();
+  }
 
   // /api/* paths are locale-agnostic — never run them through
   // next-intl's middleware (which would otherwise try to inject a
@@ -94,13 +120,9 @@ export function middleware(req: NextRequest) {
 }
 
 export const config = {
-  // Run on every request except static-asset paths. Excluding them
-  // here (rather than allow-listing in PUBLIC_PREFIXES) is important:
-  // next-intl's middleware otherwise rewrites e.g. /favicon.svg to
-  // /en/favicon.svg, which 404s; and the auth gate would 307 brand
-  // assets to /login. Both produce broken-looking favicons + missing
-  // sidebar logos.
-  matcher: [
-    '/((?!_next/static|_next/image|favicon\\.ico|favicon\\.svg|favicon-dark\\.svg|favicon-light\\.svg|favicon-\\d+\\.png|apple-touch-icon\\.png|brand/).*)',
-  ],
+  // Match every path; per-path bypassing happens in
+  // middleware() via isStaticAsset(). The matcher excludes only the
+  // root-level files Next.js serves internally that should never be
+  // observed by user code (no business logic should look at these).
+  matcher: ['/((?!_next/static|_next/image).*)'],
 };
