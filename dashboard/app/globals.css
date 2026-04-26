@@ -34,7 +34,7 @@
   --border-2: #333333;
   --text-1: #EDEDED;
   --text-2: #A1A1A1;
-  --text-3: #666666;
+  --text-3: #9A9A9A;
   --text-4: #444444;
   --accent: oklch(0.78 0.14 160);
   --accent-dim: oklch(0.78 0.14 160 / 0.14);
@@ -56,7 +56,7 @@
   --border-2: #333333;
   --text-1: #EDEDED;
   --text-2: #A1A1A1;
-  --text-3: #666666;
+  --text-3: #9A9A9A;
   --text-4: #444444;
 
   --accent: oklch(0.78 0.14 160);
@@ -109,9 +109,18 @@ html, body {
   background: var(--bg);
   color: var(--text-1);
   font-family: var(--sans);
-  font-size: 13px;
-  line-height: 1.45;
+  font-size: 14px;
+  line-height: 1.5;
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/*
+ * Numeric columns + KPI values use tabular figures so digits in
+ * stacked rows align column-wise (1.0  vs  1.1, 100 vs 99).
+ */
+.font-tabular {
+  font-variant-numeric: tabular-nums;
 }
 
 /*

@@ -58,7 +58,7 @@ export function ThemeSwitcher({ initial }: Readonly<{ initial: ThemePreference }
     <div
       role="radiogroup"
       aria-label="Theme"
-      className="inline-flex items-center bg-surface-2 border border-border-1 rounded text-xs"
+      className="inline-flex items-center bg-surface-2 border border-border-1 rounded p-0.5 text-[11px]"
     >
       {PREFERENCES.map((pref) => {
         const selected = pref === preference;
@@ -71,8 +71,10 @@ export function ThemeSwitcher({ initial }: Readonly<{ initial: ThemePreference }
             disabled={pending}
             onClick={() => setPref(pref)}
             data-testid={`theme-${pref}`}
-            className={`px-2 py-1 font-mono ${
-              selected ? 'bg-surface-3 text-text-1' : 'text-text-3 hover:text-text-2'
+            className={`px-2 py-0.5 rounded font-mono transition-colors ${
+              selected
+                ? 'bg-surface-3 text-text-1 shadow-sm'
+                : 'text-text-3 hover:text-text-2'
             }`}
           >
             {pref}

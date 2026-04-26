@@ -60,7 +60,7 @@ export async function Sidebar() {
         />
       </Link>
 
-      <nav className="flex-1 flex flex-col gap-0.5 px-2">
+      <nav aria-label={t('primaryNavigationLabel')} className="flex-1 flex flex-col gap-0.5 px-2">
         <NavLink href="/" label={t('orgOverview')} icon={<HomeIcon />} />
         <NavGroup label={t('departments')} icon={<DeptIcon />}>
           <NavSubLink href="/departments/engineering" label="engineering" />
@@ -76,14 +76,17 @@ export async function Sidebar() {
       </nav>
 
       <div className="px-3 pt-3">
-        <div className="border border-border-1 rounded bg-surface-2 px-2.5 py-2 text-[11px] text-text-2 leading-snug">
-          <div className="flex items-center gap-1.5 text-text-1">
-            <StatusDot tone="ok" pulse />
-            <span className="font-medium">{stats.liveAgents} agents live</span>
-          </div>
-          <div className="text-text-3 font-mono text-[10px] mt-0.5">
-            {stats.liveAgents} / {stats.totalCapacity} capacity
-          </div>
+        <div className="flex items-center gap-2 px-2.5 py-1.5 bg-surface-2 border border-border-1 rounded">
+          <StatusDot
+            tone={stats.liveAgents > 0 ? 'ok' : 'neutral'}
+            pulse={stats.liveAgents > 0}
+          />
+          <span className="text-text-1 text-[11px] font-medium">
+            {stats.liveAgents} live
+          </span>
+          <span className="ml-auto text-text-3 text-[10px] font-mono font-tabular">
+            {stats.liveAgents} / {stats.totalCapacity}
+          </span>
         </div>
       </div>
 

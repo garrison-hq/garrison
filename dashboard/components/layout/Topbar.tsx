@@ -24,12 +24,21 @@ export async function Topbar() {
   const email = session?.user.email ?? '';
 
   return (
-    <header className="h-12 bg-surface-1 border-b border-border-1 flex items-center px-4 gap-3 text-sm">
+    <header className="h-12 bg-surface-1 border-b border-border-1 flex items-center px-4 gap-3">
       <div className="flex-1" />
-      <ThemeSwitcher initial={themePref} />
-      <LocaleSwitcher />
-      {email ? <span className="text-text-2 text-xs font-mono">{email}</span> : null}
-      <LogOutButton label={t('logOut')} />
+      <div className="flex items-center gap-2">
+        <ThemeSwitcher initial={themePref} />
+        <LocaleSwitcher />
+      </div>
+      <div className="h-5 w-px bg-border-1" aria-hidden />
+      <div className="flex items-center gap-2">
+        {email ? (
+          <span className="text-text-2 text-[11px] font-mono px-2 py-0.5 bg-surface-2 border border-border-1 rounded">
+            {email}
+          </span>
+        ) : null}
+        <LogOutButton label={t('logOut')} />
+      </div>
     </header>
   );
 }

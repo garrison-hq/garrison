@@ -36,9 +36,11 @@ export default async function Home() {
   const totalCapacity = departments.reduce((acc, d) => acc + d.agentCap, 0);
 
   return (
-    <main className="p-6 space-y-6">
+    <div className="px-6 py-5 space-y-7 max-w-[1600px] mx-auto">
       <div className="flex items-center justify-between">
-        <h1 className="text-text-1 text-lg font-semibold">{navT('orgOverview')}</h1>
+        <h1 className="text-text-1 text-2xl font-semibold tracking-tight">
+          {navT('orgOverview')}
+        </h1>
         <RefreshButton />
       </div>
 
@@ -46,10 +48,10 @@ export default async function Home() {
 
       <section className="space-y-3">
         <div className="flex items-baseline gap-3">
-          <h2 className="text-text-1 text-sm font-semibold">
+          <h2 className="text-text-1 text-base font-semibold tracking-tight">
             {ovT('departmentsHeading')}
           </h2>
-          <span className="text-text-3 text-xs">
+          <span className="text-text-3 text-xs font-tabular">
             {departments.length} configured
           </span>
         </div>
@@ -74,6 +76,6 @@ export default async function Home() {
       </div>
 
       <SoftPoll intervalMs={60_000} />
-    </main>
+    </div>
   );
 }

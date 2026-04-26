@@ -22,7 +22,7 @@ export function LogOutButton({ label }: Readonly<{ label: string }>) {
           router.refresh();
         })
       }
-      className="text-text-2 text-xs px-2 py-1 hover:text-text-1 disabled:opacity-60"
+      className="text-text-2 hover:text-text-1 hover:bg-surface-3 border border-border-1 hover:border-border-2 rounded text-[11px] font-medium px-2.5 py-1 transition-colors disabled:opacity-60"
     >
       {label}
     </button>

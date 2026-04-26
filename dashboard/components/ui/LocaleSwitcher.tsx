@@ -39,20 +39,31 @@ export function LocaleSwitcher() {
   }
 
   return (
-    <div className="inline-flex items-center gap-1 text-xs font-mono">
-      {routing.locales.map((locale) => (
-        <button
-          key={locale}
-          type="button"
-          disabled={pending || locale === active}
-          onClick={() => setLocale(locale)}
-          className={`px-2 py-1 rounded ${
-            locale === active ? 'text-text-1 bg-surface-3' : 'text-text-3 hover:text-text-2'
-          }`}
-        >
-          {locale}
-        </button>
-      ))}
+    <div
+      role="radiogroup"
+      aria-label="Locale"
+      className="inline-flex items-center bg-surface-2 border border-border-1 rounded p-0.5 text-[11px]"
+    >
+      {routing.locales.map((locale) => {
+        const selected = locale === active;
+        return (
+          <button
+            key={locale}
+            type="button"
+            role="radio"
+            aria-checked={selected}
+            disabled={pending || selected}
+            onClick={() => setLocale(locale)}
+            className={`px-2 py-0.5 rounded font-mono transition-colors ${
+              selected
+                ? 'bg-surface-3 text-text-1 shadow-sm'
+                : 'text-text-3 hover:text-text-2'
+            }`}
+          >
+            {locale}
+          </button>
+        );
+      })}
     </div>
   );
 }
