@@ -82,7 +82,15 @@
     "empty": "No activity yet — events will stream in as agents transition tickets.",
     "unattributed": "unattributed",
     "ticketActivity": "ticket activity",
-    "emptyRun": "empty run"
+    "emptyRun": "empty run",
+    "heartbeat": "heartbeat",
+    "lastHourLabel": "events in last hour",
+    "kpi": {
+      "events": "events",
+      "lastHour": "last hour",
+      "transitions": "transitions",
+      "creates": "creates"
+    }
   },
   "hygieneMeta": {
     "open": "open",

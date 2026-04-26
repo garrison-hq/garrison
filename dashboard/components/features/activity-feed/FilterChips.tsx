@@ -12,6 +12,18 @@ const KIND_LABELS: Record<Kind, 'filterAll' | 'filterCreated' | 'filterTransitio
   'ticket.transitioned': 'filterTransitioned',
 };
 
+// Disabled-future placeholders so the filter strip lays out the way
+// the production surface will once the supervisor starts emitting
+// these channels. They render as muted chips with pointer-events
+// disabled — the operator gets visual continuity but can't click
+// into a filter that has no data yet.
+const FUTURE_KINDS = [
+  'ticket.commented',
+  'agent.spawned',
+  'agent.completed',
+  'hygiene.flagged',
+] as const;
+
 // FR-063: per-event-type filter chips persist in URL query params
 // for shareability + back/forward navigation. Same segmented-chip
 // shape as FailureModeFilter on /hygiene.
@@ -60,6 +72,16 @@ export function FilterChips() {
           </button>
         );
       })}
+      {FUTURE_KINDS.map((k) => (
+        <span
+          key={k}
+          aria-disabled="true"
+          className="inline-flex items-center px-2.5 py-1 rounded text-[12px] border border-border-1 bg-surface-1 text-text-4 font-mono opacity-50 select-none cursor-not-allowed"
+          title="Available once the supervisor emits this channel (M4+)"
+        >
+          {k}
+        </span>
+      ))}
     </div>
   );
 }

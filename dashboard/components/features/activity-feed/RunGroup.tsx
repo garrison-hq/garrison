@@ -3,7 +3,6 @@
 import { useState } from 'react';
 import { useTranslations } from 'next-intl';
 import { EventRow } from './EventRow';
-import { columnTextClass } from '@/lib/format/columnTone';
 import { relativeTime, formatIsoFull } from '@/lib/format/relativeTime';
 import type { ActivityEvent } from '@/lib/sse/events';
 
@@ -12,9 +11,29 @@ import type { ActivityEvent } from '@/lib/sse/events';
 // each run renders as a one-line collapsed summary by default;
 // expanding it reveals every event in chronological order.
 //
-// Events without an agent_instance_id (manual SQL transitions,
-// ticket-created events) render under a synthetic "unattributed"
-// run that's expanded by default.
+// Two visual treatments:
+//
+//   - **Rollup row** (this component): chevron + "<n> events" mono
+//     count + dept / src → dst transition + relative time + short
+//     run id. 32px tall, hover-tints the surface. Click toggles.
+//   - **Individual event row** (EventRow): status dot + HH:MM:SS +
+//     event-type chip + transition + ticket link. Renders below
+//     the rollup row when expanded.
+//
+// Self-loops (first.from === last.to over 2+ events): the agent
+// re-attempted the same column move and ended where it started.
+// Don't render as a transition arrow — show a "heartbeat" label
+// in muted text-3 + idle dot. Operator can still click to expand.
+
+const SHORT_ID_LEN = 8;
+
+function shortId(id: string): string {
+  // Real production agent_instance ids are gen_random_uuid()
+  // strings; the seed uses fixed ids whose first 8 chars are
+  // all '0'. Slicing from the END gives meaningful identifiers
+  // for both ('aaaa00000001' → 'aaa00001' rather than '00000000').
+  return id.slice(-SHORT_ID_LEN);
+}
 
 export function RunGroup({
   runId,
@@ -40,6 +59,12 @@ export function RunGroup({
     toCol = last?.kind === 'ticket.transitioned' ? last.to : first.to;
   }
 
+  const heartbeat =
+    department !== null &&
+    fromCol !== null &&
+    toCol !== null &&
+    fromCol === toCol;
+
   const latestAt = last?.at ?? first?.at;
 
   return (
@@ -47,30 +72,40 @@ export function RunGroup({
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="w-full grid items-center gap-3 px-4 py-2.5 text-left hover:bg-surface-2/60 transition-colors"
-        style={{ gridTemplateColumns: 'auto 100px 1fr auto auto' }}
+        className="w-full grid items-center gap-3 px-4 h-8 text-left hover:bg-surface-2/60 transition-colors"
+        style={{ gridTemplateColumns: 'auto 84px 1fr auto auto' }}
         aria-expanded={open}
       >
         <span
-          className="text-text-3 text-[10px] font-mono w-4 inline-block transition-transform"
+          className="text-text-3 text-[10px] font-mono w-3 inline-block transition-transform"
           style={{ transform: open ? 'rotate(90deg)' : 'rotate(0deg)' }}
           aria-hidden
         >
           ▸
         </span>
-        <span className="text-text-3 text-[10.5px] font-mono font-tabular">
+        <span className="text-text-3 text-[11px] font-mono font-tabular border-r border-border-1 pr-3">
           {events.length} {events.length === 1 ? 'event' : 'events'}
         </span>
-        {department && fromCol && toCol ? (
-          <span className="font-mono text-[12px] flex items-center gap-1.5 truncate">
+        {heartbeat ? (
+          <span className="font-mono text-[11.5px] flex items-center gap-1.5 truncate">
+            <span className="inline-block w-1.5 h-1.5 rounded-full bg-text-4" aria-hidden />
             <span className="text-text-2">{department}</span>
-            <span className="text-text-4">·</span>
-            <span className={columnTextClass(fromCol)}>{fromCol}</span>
-            <span className="text-text-4" aria-hidden>→</span>
-            <span className={columnTextClass(toCol)}>{toCol}</span>
+            <span className="text-text-4">/</span>
+            <span className="text-text-3">{toCol}</span>
+            <span className="text-text-3 text-[10.5px] uppercase tracking-[0.08em] ml-2">
+              {t('heartbeat')}
+            </span>
+          </span>
+        ) : department && fromCol && toCol ? (
+          <span className="font-mono text-[11.5px] flex items-center gap-2 truncate">
+            <span className="text-text-2">{department}</span>
+            <span className="text-text-4">/</span>
+            <span className="text-text-3">{fromCol}</span>
+            <span className="text-text-4 mx-0.5" aria-hidden>→</span>
+            <span className="text-text-1">{toCol}</span>
           </span>
         ) : (
-          <span className="font-mono text-[12px] text-text-3 truncate">
+          <span className="font-mono text-[11.5px] text-text-3 truncate">
             {runId === null ? t('unattributed') : t('ticketActivity')}
           </span>
         )}
@@ -80,8 +115,8 @@ export function RunGroup({
         >
           {latestAt ? relativeTime(latestAt) : ''}
         </span>
-        <span className="text-text-3 text-[10.5px] font-mono">
-          {runId ? runId.slice(0, 8) : ''}
+        <span className="text-text-4 text-[10.5px] font-mono">
+          {runId ? shortId(runId) : '—'}
         </span>
       </button>
       {open ? (

@@ -3,17 +3,19 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { useTranslations } from 'next-intl';
-import { useVirtualizer } from '@tanstack/react-virtual';
 import { RunGroup } from './RunGroup';
-import { EmptyState } from '@/components/ui/EmptyState';
+import { ActivityKPIStrip } from './ActivityKPIStrip';
 import type { ActivityEvent } from '@/lib/sse/events';
 
 // Live activity feed (FR-061 → FR-065).
 //
 // Opens an EventSource to /api/sse/activity. Buckets incoming
-// events by agent_instance_id into RunGroups; rows are
-// virtualized via @tanstack/react-virtual so render cost stays
-// bounded as event volume grows.
+// events by agent_instance_id into RunGroups; rows render as a
+// flat list with day separators between days. Virtualization was
+// removed in the polish round — at expected event volume (a few
+// dozen runs in the operator's session-active window) the layout
+// cost is negligible and dropping the virtualizer simplifies the
+// day-separator logic.
 //
 // FR-064: the EventSource auto-reconnects on disconnect. The SSE
 // route's catch-up flow uses Last-Event-ID, which the browser
@@ -54,6 +56,24 @@ function bucketEvent(buckets: Map<string, RunBucket>, ev: ActivityEvent): Map<st
     });
   }
   return next;
+}
+
+function dayKey(ms: number): string {
+  // YYYY-MM-DD in UTC, used both as the React key for the day
+  // separator and as the visible label after relabel-today.
+  return new Date(ms).toISOString().slice(0, 10);
+}
+
+const DAY_LABEL_FORMATTER_MONTHS = [
+  'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+];
+function formatDayLabel(key: string, today: string): string {
+  if (key === today) return 'Today';
+  const yest = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
+  if (key === yest) return 'Yesterday';
+  const d = new Date(`${key}T00:00:00Z`);
+  return `${DAY_LABEL_FORMATTER_MONTHS[d.getUTCMonth()]} ${String(d.getUTCDate()).padStart(2, '0')}`;
 }
 
 export function ActivityFeed() {
@@ -100,13 +120,19 @@ export function ActivityFeed() {
     return filtered.sort((a, b) => b.latestAt - a.latestAt);
   }, [buckets, filterKind]);
 
-  const parentRef = useRef<HTMLDivElement | null>(null);
-  const virtualizer = useVirtualizer({
-    count: filteredRuns.length,
-    getScrollElement: () => parentRef.current,
-    estimateSize: () => 80,
-    overscan: 5,
-  });
+  // KPI counts across the visible filtered window.
+  const counts = useMemo(() => {
+    const all = filteredRuns.flatMap((r) => r.events);
+    const lastHourMs = Date.now() - 60 * 60 * 1000;
+    return {
+      events: all.length,
+      transitions: all.filter((e) => e.kind === 'ticket.transitioned').length,
+      creates: all.filter((e) => e.kind === 'ticket.created').length,
+      lastHour: all.filter((e) => new Date(e.at).getTime() >= lastHourMs).length,
+    };
+  }, [filteredRuns]);
+
+  const today = dayKey(Date.now());
 
   // Status indicator classes — three states.
   const statusToneClass =
@@ -123,65 +149,76 @@ export function ActivityFeed() {
         : 'bg-text-3';
   const statusLabel = t.has(status) ? t(status) : status;
 
-  const totalEvents = filteredRuns.reduce(
-    (acc, r) => acc + r.events.length,
-    0,
-  );
-
   return (
-    <section className="bg-surface-1 border border-border-1 rounded h-full flex flex-col min-h-0 overflow-hidden">
-      <header className="px-4 py-2.5 border-b border-border-1 flex items-center gap-3">
-        <span className="text-text-3 text-[10.5px] uppercase tracking-[0.08em] font-medium">
-          {t('feedHeader')}
-        </span>
-        <span className="text-text-3 text-[11px] font-mono font-tabular">
-          <span className="text-text-1">{totalEvents}</span> {t('events')}
-        </span>
-        <span className="ml-auto inline-flex items-center gap-1.5 text-[11px]">
-          <span
-            className={`inline-block w-1.5 h-1.5 rounded-full ${statusDotClass}`}
-            aria-hidden
-          />
-          <span data-testid="sse-status" className={`${statusToneClass} font-mono`}>
-            {statusLabel}
+    <div className="h-full flex flex-col min-h-0 gap-4">
+      <ActivityKPIStrip
+        events={counts.events}
+        transitions={counts.transitions}
+        creates={counts.creates}
+        lastHour={counts.lastHour}
+      />
+      <section className="bg-surface-1 border border-border-1 rounded flex-1 flex flex-col min-h-0 overflow-hidden">
+        <header className="px-4 py-2.5 border-b border-border-1 flex items-center gap-3">
+          <span className="text-text-3 text-[10.5px] uppercase tracking-[0.08em] font-medium">
+            {t('feedHeader')}
           </span>
-        </span>
-      </header>
-      {filteredRuns.length === 0 ? (
-        <div className="flex-1 grid place-items-center px-6 py-12 text-text-3 text-[12.5px] text-center">
-          {t('empty')}
-        </div>
-      ) : (
-        <div ref={parentRef} className="flex-1 overflow-y-auto">
-          <div
-            style={{
-              height: `${virtualizer.getTotalSize()}px`,
-              position: 'relative',
-            }}
-            data-testid="activity-feed-list"
-          >
-            {virtualizer.getVirtualItems().map((virtualItem) => {
-              const run = filteredRuns[virtualItem.index];
-              return (
-                <div
-                  key={run.runId ?? `un_${run.events[0].eventId}`}
-                  ref={virtualizer.measureElement}
-                  data-index={virtualItem.index}
-                  style={{
-                    position: 'absolute',
-                    top: 0,
-                    left: 0,
-                    width: '100%',
-                    transform: `translateY(${virtualItem.start}px)`,
-                  }}
-                >
-                  <RunGroup runId={run.runId} events={run.events} />
-                </div>
-              );
-            })}
+          <span className="text-text-3 text-[11px] font-mono font-tabular">
+            <span className="text-text-1">{counts.events}</span> {t('events')}
+          </span>
+          <span className="ml-auto inline-flex items-center gap-1.5 text-[11px]">
+            <span
+              className={`inline-block w-1.5 h-1.5 rounded-full ${statusDotClass}`}
+              aria-hidden
+            />
+            <span data-testid="sse-status" className={`${statusToneClass} font-mono uppercase tracking-[0.08em] text-[10.5px]`}>
+              {statusLabel}
+            </span>
+          </span>
+        </header>
+        {filteredRuns.length === 0 ? (
+          <div className="flex-1 grid place-items-center px-6 py-12 text-text-3 text-[12.5px] text-center">
+            {t('empty')}
           </div>
-        </div>
-      )}
-    </section>
+        ) : (
+          <div className="flex-1 overflow-y-auto" data-testid="activity-feed-list">
+            {(() => {
+              // Walk the sorted runs and emit a day separator each
+              // time the latestAt's day changes. The list is in
+              // reverse-chronological order (newest first).
+              const out: React.ReactNode[] = [];
+              let lastDay: string | null = null;
+              for (const run of filteredRuns) {
+                const d = dayKey(run.latestAt);
+                if (d !== lastDay) {
+                  out.push(
+                    <DaySeparator
+                      key={`day-${d}`}
+                      label={formatDayLabel(d, today)}
+                    />,
+                  );
+                  lastDay = d;
+                }
+                out.push(
+                  <RunGroup
+                    key={run.runId ?? `un_${run.events[0].eventId}`}
+                    runId={run.runId}
+                    events={run.events}
+                  />,
+                );
+              }
+              return out;
+            })()}
+          </div>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function DaySeparator({ label }: Readonly<{ label: string }>) {
+  return (
+    <div className="px-4 py-1.5 bg-surface-2/50 border-b border-border-1 text-text-3 text-[10.5px] uppercase tracking-[0.08em] font-medium">
+      {label}
+    </div>
   );
 }
