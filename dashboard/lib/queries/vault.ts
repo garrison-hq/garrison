@@ -61,8 +61,13 @@ function classifyRotation(
   cadence: string,
 ): SecretMetadataRow['rotationStatus'] {
   if (!lastRotatedAt) return 'never';
-  // Cadence comes in as ISO interval text (e.g. "90 days").
-  const cadenceDays = Number(/(\d+)\s*day/i.exec(cadence)?.[1] ?? '90');
+  // Cadence comes in as ISO interval text (e.g. "90 days"). The
+  // regex is bounded with character classes that don't overlap
+  // (\d vs space) so it can't backtrack super-linearly; the
+  // fallback `?? '90'` defaults to the migration-baked
+  // rotation_cadence DEFAULT.
+  const cadenceMatch = /^(\d+) /.exec(cadence);
+  const cadenceDays = Number(cadenceMatch?.[1] ?? '90');
   const ageDays = (Date.now() - new Date(lastRotatedAt).getTime()) / (1000 * 60 * 60 * 24);
   if (ageDays > cadenceDays) return 'overdue';
   if (ageDays > cadenceDays * 0.8) return 'aging';
@@ -155,9 +160,10 @@ export async function fetchRoleSecretMatrix(): Promise<{
     secretsSet.add(g.secret_path);
     return { roleSlug: g.role_slug, secretPath: g.secret_path };
   });
+  const cmp = (a: string, b: string) => a.localeCompare(b);
   return {
-    roles: Array.from(rolesSet).sort(),
-    secrets: Array.from(secretsSet).sort(),
+    roles: Array.from(rolesSet).sort(cmp),
+    secrets: Array.from(secretsSet).sort(cmp),
     cells,
   };
 }

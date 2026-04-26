@@ -18,12 +18,15 @@ export function ThemeSwitcher({ initial }: { initial: ThemePreference }) {
 
   async function setPref(next: ThemePreference) {
     if (next === preference || pending) return;
+    const previous = preference;
     setPending(true);
     setPreference(next);
     // Optimistically apply the theme to the live DOM so the user
     // sees the switch immediately. The server-side persistence call
     // races but is monotone — if it fails we rollback the local
-    // state.
+    // state to the captured `previous` value (NOT the stale
+    // `preference` closure-captured at render time, which would
+    // still hold the new value after setPreference).
     if (next !== 'system') {
       document.documentElement.dataset.theme = next;
     } else {
@@ -45,7 +48,7 @@ export function ThemeSwitcher({ initial }: { initial: ThemePreference }) {
       // cache hasn't seen the update yet).
       router.refresh();
     } catch {
-      setPreference(preference);
+      setPreference(previous);
     } finally {
       setPending(false);
     }

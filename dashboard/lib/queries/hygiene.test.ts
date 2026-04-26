@@ -61,7 +61,7 @@ describe('lib/queries/hygiene', () => {
     const { fetchHygieneRows } = await import('./hygiene');
     const result = await fetchHygieneRows();
     expect(result.total).toBe(3);
-    expect(result.rows.map((r) => r.hygieneStatus).sort()).toEqual([
+    expect(result.rows.map((r) => r.hygieneStatus).sort((a, b) => a.localeCompare(b))).toEqual([
       'finalize_never_called',
       'sandbox_escape',
       'suspected_secret_emitted',
@@ -72,7 +72,7 @@ describe('lib/queries/hygiene', () => {
     await seedTransitions(['finalize_never_called', 'sandbox_escape', 'suspected_secret_emitted']);
     const { fetchHygieneRows } = await import('./hygiene');
     const result = await fetchHygieneRows();
-    const modes = result.rows.map((r) => r.failureMode).sort();
+    const modes = result.rows.map((r) => r.failureMode).sort((a, b) => a.localeCompare(b));
     expect(modes).toEqual(['finalize_path', 'sandbox_escape', 'suspected_secret_emitted']);
   });
 
