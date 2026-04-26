@@ -24,6 +24,9 @@
   "agents": {
     "empty": "zz_agents_empty"
   },
+  "activity": {
+    "empty": "zz_activity_empty"
+  },
   "vault": {
     "secretsHeading": "zz_vault_secretsHeading",
     "auditHeading": "zz_vault_auditHeading",

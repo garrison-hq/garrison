@@ -61,6 +61,7 @@ export function parseChannel(row: OutboxRow): ActivityEvent {
     row.channel,
   );
   if (transitionMatch) {
+    const agentInstanceRaw = payload.agent_instance_id ?? payload.agentInstanceId;
     return {
       kind: 'ticket.transitioned',
       eventId: row.id,
@@ -69,6 +70,7 @@ export function parseChannel(row: OutboxRow): ActivityEvent {
       department: transitionMatch[1],
       from: transitionMatch[2],
       to: transitionMatch[3],
+      agentInstanceId: typeof agentInstanceRaw === 'string' ? agentInstanceRaw : null,
     };
   }
 

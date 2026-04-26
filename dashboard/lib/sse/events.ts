@@ -22,6 +22,9 @@ export type ActivityEvent =
       department: string;
       from: string;
       to: string;
+      /** Run grouping key (FR-061). May be null for transitions not
+       *  triggered by an agent (manual / SQL-direct moves). */
+      agentInstanceId: string | null;
     }
   | {
       kind: 'unknown';

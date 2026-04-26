@@ -24,6 +24,9 @@
   "agents": {
     "empty": "No agents configured."
   },
+  "activity": {
+    "empty": "No activity yet. Events appear here as agents spawn, transition tickets, and finalize."
+  },
   "vault": {
     "secretsHeading": "Secrets",
     "auditHeading": "Vault audit log",
