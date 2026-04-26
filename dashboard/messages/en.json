@@ -92,6 +92,34 @@
       "creates": "creates"
     }
   },
+  "agentsMeta": {
+    "subtitleAgents": "agents",
+    "subtitleLive": "live now",
+    "subtitleSaturation": "cap saturation",
+    "running": "running",
+    "noAgentsInDept": "No agents configured for this department.",
+    "headers": {
+      "agent": "agent",
+      "department": "department",
+      "role": "role",
+      "model": "model",
+      "concurrency": "concurrency",
+      "listensFor": "listens for",
+      "lastSpawn": "last spawn",
+      "spawns7d": "spawns / 7d",
+      "skills": "skills"
+    },
+    "kpi": {
+      "agents": "agents",
+      "liveAgents": "live",
+      "concurrency": "concurrency",
+      "pctOfCap": "% of cap",
+      "spawns24h": "spawns / 24h",
+      "rolling24h": "rolling 24h",
+      "idleAgents": "idle agents",
+      "zeroLiveInstances": "zero live instances"
+    }
+  },
   "hygieneMeta": {
     "open": "open",
     "newToday": "new today",
