@@ -4,3 +4,6 @@ mempalace.yaml
 entities.json
 experiment-results/
 .codegraph/
+
+# Dev-stack generated artefacts (scripts/dev-stack-up.sh)
+.dev-stack.env
