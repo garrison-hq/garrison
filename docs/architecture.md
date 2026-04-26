@@ -28,6 +28,7 @@ land in `docs/` know which one to open for which question.
 | Why per-department concurrency caps? | [`RATIONALE.md`](../RATIONALE.md) §11 |
 | What is this system explicitly *not*? | [`RATIONALE.md`](../RATIONALE.md) §12 |
 | What actually shipped in M1 and what the spec got wrong? | [M1 retro](./retros/m1.md) |
+| What actually shipped in M3 (operator dashboard)?         | [M3 retro](./retros/m3.md) |
 
 ## The one-paragraph summary
 
@@ -39,17 +40,17 @@ holds a dedicated LISTEN connection, enforces per-department
 concurrency caps, spawns short-lived agent subprocesses, and reaps
 them. Agents are ephemeral: they wake on an event, read their
 context, do the work, write to MemPalace, transition the ticket,
-and exit. The web UI (M3+) is the operator console. There is no
-long-running agent daemon anywhere in the system. If `pg_notify`
-drops a notification during a reconnect, a `processed_at`-driven
-fallback poll picks it up.
+and exit. The web UI (M3, read-only; M4+ adds mutations) is the
+operator console. There is no long-running agent daemon anywhere
+in the system. If `pg_notify` drops a notification during a
+reconnect, a `processed_at`-driven fallback poll picks it up.
 
 ## The one-diagram summary
 
 ```
             +-------------------+
-            |   Operator UI     |   (M3+, not yet shipped)
-            +---------+---------+
+            |   Operator UI     |   (M3 read-only, shipped;
+            +---------+---------+    M4+ adds mutations)
                       |
                       | INSERT ticket
                       v
