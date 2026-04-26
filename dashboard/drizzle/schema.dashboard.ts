@@ -38,10 +38,10 @@ export const users = pgTable(
     emailVerified: boolean('email_verified').notNull().default(false),
     name: text(),
     image: text(),
-    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' })
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' })
       .defaultNow()
       .notNull(),
-    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' })
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' })
       .defaultNow()
       .notNull(),
     // Per-operator theme persistence (FR-010a). 'system' means the
@@ -65,15 +65,24 @@ export const sessions = pgTable(
     userId: uuid('user_id')
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),
-    expiresAt: timestamp('expires_at', { withTimezone: true, mode: 'string' }).notNull(),
+    expiresAt: timestamp('expires_at', { withTimezone: true, mode: 'date' }).notNull(),
     token: text().notNull(),
-    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' })
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' })
+      .defaultNow()
+      .notNull(),
+    // better-auth touches updated_at on every session refresh; the
+    // .$onUpdate hook in better-auth's adapter writes the new value,
+    // so the column is NOT NULL with a defaultNow seed.
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' })
       .defaultNow()
       .notNull(),
     ipAddress: inet('ip_address'),
     userAgent: text('user_agent'),
   },
-  (t) => [unique('sessions_token_unique').on(t.token)],
+  (t) => [
+    unique('sessions_token_unique').on(t.token),
+    index('sessions_user_id_idx').on(t.userId),
+  ],
 );
 
 export const accounts = pgTable('accounts', {
@@ -90,33 +99,37 @@ export const accounts = pgTable('accounts', {
   idToken: text('id_token'),
   accessTokenExpiresAt: timestamp('access_token_expires_at', {
     withTimezone: true,
-    mode: 'string',
+    mode: 'date',
   }),
   refreshTokenExpiresAt: timestamp('refresh_token_expires_at', {
     withTimezone: true,
-    mode: 'string',
+    mode: 'date',
   }),
   scope: text(),
-  createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' })
+  createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' })
     .defaultNow()
     .notNull(),
-  updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' })
+  updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' })
     .defaultNow()
     .notNull(),
-});
+}, (t) => [index('accounts_user_id_idx').on(t.userId)]);
 
-export const verifications = pgTable('verifications', {
-  id: uuid().defaultRandom().primaryKey().notNull(),
-  identifier: text().notNull(),
-  value: text().notNull(),
-  expiresAt: timestamp('expires_at', { withTimezone: true, mode: 'string' }).notNull(),
-  createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' })
-    .defaultNow()
-    .notNull(),
-  updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' })
-    .defaultNow()
-    .notNull(),
-});
+export const verifications = pgTable(
+  'verifications',
+  {
+    id: uuid().defaultRandom().primaryKey().notNull(),
+    identifier: text().notNull(),
+    value: text().notNull(),
+    expiresAt: timestamp('expires_at', { withTimezone: true, mode: 'date' }).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' })
+      .defaultNow()
+      .notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' })
+      .defaultNow()
+      .notNull(),
+  },
+  (t) => [index('verifications_identifier_idx').on(t.identifier)],
+);
 
 export const operatorInvites = pgTable(
   'operator_invites',
@@ -131,12 +144,12 @@ export const operatorInvites = pgTable(
     createdByUserId: uuid('created_by_user_id').references(() => users.id, {
       onDelete: 'set null',
     }),
-    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' })
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' })
       .defaultNow()
       .notNull(),
-    expiresAt: timestamp('expires_at', { withTimezone: true, mode: 'string' }).notNull(),
-    revokedAt: timestamp('revoked_at', { withTimezone: true, mode: 'string' }),
-    redeemedAt: timestamp('redeemed_at', { withTimezone: true, mode: 'string' }),
+    expiresAt: timestamp('expires_at', { withTimezone: true, mode: 'date' }).notNull(),
+    revokedAt: timestamp('revoked_at', { withTimezone: true, mode: 'date' }),
+    redeemedAt: timestamp('redeemed_at', { withTimezone: true, mode: 'date' }),
     redeemedByUserId: uuid('redeemed_by_user_id').references(() => users.id, {
       onDelete: 'set null',
     }),

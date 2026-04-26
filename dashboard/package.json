@@ -19,6 +19,7 @@
     "drizzle:migrate": "drizzle-kit migrate"
   },
   "dependencies": {
+    "better-auth": "^1.6.9",
     "drizzle-orm": "^0.45.2",
     "next": "16.2.4",
     "postgres": "^3.4.9",

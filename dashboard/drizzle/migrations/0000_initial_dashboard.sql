@@ -33,6 +33,7 @@ CREATE TABLE "sessions" (
 	"expires_at" timestamp with time zone NOT NULL,
 	"token" text NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"ip_address" "inet",
 	"user_agent" text,
 	CONSTRAINT "sessions_token_unique" UNIQUE("token")
@@ -64,8 +65,11 @@ ALTER TABLE "accounts" ADD CONSTRAINT "accounts_user_id_users_id_fk" FOREIGN KEY
 ALTER TABLE "operator_invites" ADD CONSTRAINT "operator_invites_created_by_user_id_users_id_fk" FOREIGN KEY ("created_by_user_id") REFERENCES "public"."users"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "operator_invites" ADD CONSTRAINT "operator_invites_redeemed_by_user_id_users_id_fk" FOREIGN KEY ("redeemed_by_user_id") REFERENCES "public"."users"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "sessions" ADD CONSTRAINT "sessions_user_id_users_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."users"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+CREATE INDEX "accounts_user_id_idx" ON "accounts" USING btree ("user_id");--> statement-breakpoint
 CREATE INDEX "operator_invites_token_idx" ON "operator_invites" USING btree ("token");--> statement-breakpoint
-CREATE INDEX "operator_invites_pending_idx" ON "operator_invites" USING btree ("expires_at") WHERE revoked_at IS NULL AND redeemed_at IS NULL;
+CREATE INDEX "operator_invites_pending_idx" ON "operator_invites" USING btree ("expires_at") WHERE revoked_at IS NULL AND redeemed_at IS NULL;--> statement-breakpoint
+CREATE INDEX "sessions_user_id_idx" ON "sessions" USING btree ("user_id");--> statement-breakpoint
+CREATE INDEX "verifications_identifier_idx" ON "verifications" USING btree ("identifier");
 
 -- +grant-block: garrison_dashboard_app
 -- Appended by drizzle/scripts/append-grants.ts after every
