@@ -654,6 +654,41 @@ func TestLoadConfigParseLogLevelWarnErrorDebug(t *testing.T) {
 	}
 }
 
+// TestLoadConfigCustomerIDInvalidUUID — GARRISON_CUSTOMER_ID set to a
+// non-UUID value fails Load with a recognisable message (covers the
+// id.Scan error branch in the env-override path).
+func TestLoadConfigCustomerIDInvalidUUID(t *testing.T) {
+	realAgentEnv(t)
+	t.Setenv("GARRISON_CUSTOMER_ID", "not-a-uuid")
+
+	_, err := config.Load()
+	if err == nil {
+		t.Fatal("Load(): want error for invalid GARRISON_CUSTOMER_ID, got nil")
+	}
+	if !strings.Contains(err.Error(), "GARRISON_CUSTOMER_ID") {
+		t.Errorf("error = %v; want it to mention GARRISON_CUSTOMER_ID", err)
+	}
+}
+
+// TestLoadConfigCustomerIDFromDBUnreachable — when GARRISON_CUSTOMER_ID is
+// unset and the DB pool fails to query (unreachable host), Load returns the
+// resolveCustomerID error. Exercises the resolveCustomerID DB path.
+func TestLoadConfigCustomerIDFromDBUnreachable(t *testing.T) {
+	realAgentEnv(t)
+	// Point at an unreachable Postgres so resolveCustomerID's QueryRow fails.
+	// The pool is created lazily (no immediate dial); the SELECT then errors.
+	t.Setenv("GARRISON_DATABASE_URL", "postgres://u:p@127.0.0.1:1/garrison?sslmode=disable&connect_timeout=1")
+	t.Setenv("GARRISON_CUSTOMER_ID", "")
+
+	_, err := config.Load()
+	if err == nil {
+		t.Fatal("Load(): want error from unreachable resolveCustomerID, got nil")
+	}
+	if !strings.Contains(err.Error(), "CustomerID") {
+		t.Errorf("error = %v; want it to mention CustomerID", err)
+	}
+}
+
 // TestLoadConfigCustomerIDFromEnvOverride — M2.3 T006: GARRISON_CUSTOMER_ID
 // bypasses the DB bootstrap query; accessor returns the parsed UUID.
 func TestLoadConfigCustomerIDFromEnvOverride(t *testing.T) {

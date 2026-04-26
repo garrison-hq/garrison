@@ -382,3 +382,110 @@ func TestNewClientReturnsAuthError(t *testing.T) {
 		t.Errorf("expected ErrVaultUnavailable, got %v", err)
 	}
 }
+
+// TestNewClientNilLoggerAndAuthFailure — exercises the real NewClient path
+// (not newClientWithSDK) so the slog.Default() fallback for nil Logger and
+// the "initial authentication failed" wrap both run. SiteURL points at a
+// loopback port that no listener owns; the SDK's retry policy then drains
+// to "connection refused" and NewClient wraps the failure. Skipped under
+// -short because the SDK retry budget is ~13s.
+func TestNewClientNilLoggerAndAuthFailure(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping: SDK retry on refused dial is ~13s")
+	}
+	cfg := ClientConfig{
+		SiteURL:      "http://127.0.0.1:1",
+		ClientID:     "cid",
+		ClientSecret: "sec",
+		CustomerID:   "cust",
+		ProjectID:    "proj",
+		Environment:  "dev",
+		// Logger intentionally nil — exercises the fallback branch.
+	}
+	_, err := NewClient(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("NewClient: expected error from unreachable SiteURL; got nil")
+	}
+	if !strings.Contains(err.Error(), "initial authentication failed") {
+		t.Errorf("error %q does not mention 'initial authentication failed'", err.Error())
+	}
+}
+
+// TestNewClientWithSDKMissingClientID — newClientWithSDK rejects empty
+// ClientID/ClientSecret (the unit-test constructor's own validation).
+func TestNewClientWithSDKMissingClientID(t *testing.T) {
+	sdk := &mockSDK{auth: &mockAuth{}, secrets: &mockSecrets{}}
+	if _, err := newClientWithSDK(sdk, ClientConfig{ClientSecret: "x"}); err == nil {
+		t.Fatal("newClientWithSDK: want error for empty ClientID; got nil")
+	}
+	if _, err := newClientWithSDK(sdk, ClientConfig{ClientID: "x"}); err == nil {
+		t.Fatal("newClientWithSDK: want error for empty ClientSecret; got nil")
+	}
+}
+
+// TestFetchEmptyRequestReturnsEmpty — Fetch(nil) and Fetch([]) return an
+// empty map and never invoke the SDK (the empty-input fast path).
+func TestFetchEmptyRequestReturnsEmpty(t *testing.T) {
+	auth := &mockAuth{token: "tok"}
+	sec := &mockSecrets{}
+	c := newTestClient(auth, sec)
+	for _, name := range []string{"nil", "empty"} {
+		t.Run(name, func(t *testing.T) {
+			var req []GrantRow
+			if name == "empty" {
+				req = []GrantRow{}
+			}
+			result, err := c.Fetch(context.Background(), req)
+			if err != nil {
+				t.Fatalf("Fetch(%s): unexpected error: %v", name, err)
+			}
+			if len(result) != 0 {
+				t.Errorf("Fetch(%s): got %d entries, want empty map", name, len(result))
+			}
+		})
+	}
+}
+
+// TestFetchReauthFailsReturnsAuthExpired — when the first Retrieve returns
+// 401 and the subsequent reauthenticate also fails, fetchOneUnderLockWithRetry
+// returns ErrVaultAuthExpired (lines covering the reauth-failure branch).
+func TestFetchReauthFailsReturnsAuthExpired(t *testing.T) {
+	// loginErr makes UniversalAuthLogin fail; Retrieve returns 401 first so
+	// the retry path triggers reauth.
+	auth := &mockAuth{loginErr: errors.New("auth backend down")}
+	sec := &mockSecrets{responses: []mockRetrieveResponse{
+		{err: apiErr(http.StatusUnauthorized)},
+	}}
+	c := newTestClient(auth, sec)
+
+	_, err := c.Fetch(context.Background(), singleGrant())
+	if !errors.Is(err, ErrVaultAuthExpired) {
+		t.Errorf("expected ErrVaultAuthExpired (reauth failure path), got %v", err)
+	}
+}
+
+// TestFetchAfterReauthRetryReturns500 — after a successful reauth the retry
+// itself can still hit a non-401 SDK error (e.g. 500). The wrapper must
+// classify via classifySDKError (the "retry returned non-401" branch).
+func TestFetchAfterReauthRetryReturns500(t *testing.T) {
+	auth := &mockAuth{token: "tok"}
+	sec := &mockSecrets{responses: []mockRetrieveResponse{
+		{err: apiErr(http.StatusUnauthorized)},        // first call → 401 triggers reauth
+		{err: apiErr(http.StatusInternalServerError)}, // retry → 500
+	}}
+	c := newTestClient(auth, sec)
+
+	_, err := c.Fetch(context.Background(), singleGrant())
+	if !errors.Is(err, ErrVaultUnavailable) {
+		t.Errorf("expected ErrVaultUnavailable from classifySDKError(500); got %v", err)
+	}
+}
+
+// TestClassifySDKError401 — direct call to classifySDKError with a 401 maps
+// to ErrVaultAuthExpired (the dedicated 401 case in the switch).
+func TestClassifySDKError401(t *testing.T) {
+	err := classifySDKError(apiErr(http.StatusUnauthorized))
+	if !errors.Is(err, ErrVaultAuthExpired) {
+		t.Errorf("expected ErrVaultAuthExpired for 401, got %v", err)
+	}
+}
