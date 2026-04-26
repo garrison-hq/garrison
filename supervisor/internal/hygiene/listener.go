@@ -102,7 +102,7 @@ func RunListener(ctx context.Context, deps Deps) error {
 		backoff = 100 * time.Millisecond
 
 		err = listenLoop(ctx, conn, deps)
-		_ = conn.Close(context.Background())
+		_ = conn.Close(context.WithoutCancel(ctx))
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -138,7 +138,7 @@ func listenLoop(ctx context.Context, conn *pgx.Conn, deps Deps) error {
 		// using the event_id. BUT the trigger also inserts the transition
 		// row itself — so we go through the transition_id directly. See
 		// handleTransition for the lookup discipline.
-		go func(payload string, channel string) {
+		go func(payload, channel string) {
 			if err := handleTransition(ctx, deps, payload, channel); err != nil {
 				deps.Logger.Warn("hygiene handleTransition failed; sweep will retry",
 					"channel", channel,

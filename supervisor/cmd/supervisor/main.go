@@ -20,7 +20,9 @@ import (
 	"github.com/garrison-hq/garrison/supervisor/internal/spawn"
 	"github.com/garrison-hq/garrison/supervisor/internal/store"
 	"github.com/garrison-hq/garrison/supervisor/internal/vault"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -161,16 +163,7 @@ func runDaemon() int {
 	}
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel}))
-	logger.Info("supervisor starting", "version", version)
-	logger.Info("config loaded",
-		"poll_interval", cfg.PollInterval,
-		"subprocess_timeout", cfg.SubprocessTimeout,
-		"shutdown_grace", cfg.ShutdownGrace,
-		"health_port", cfg.HealthPort,
-		"use_fake_agent", cfg.UseFakeAgent,
-		"claude_bin", cfg.ClaudeBin,
-		"mcp_config_dir", cfg.MCPConfigDir,
-	)
+	logDaemonStartupConfig(logger, cfg)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -179,51 +172,19 @@ func runDaemon() int {
 	defer stopSignals()
 	go watchSignals(ctx, sigCh, cancel, logger)
 
-	pool, listenConn, err := pgdb.Connect(ctx, cfg)
-	if err != nil {
-		if errors.Is(err, context.Canceled) {
-			logger.Info("shutdown during initial connect")
-			return ExitOK
-		}
-		logger.Error("initial connect failed", "error", err)
-		return ExitFailure
+	pool, listenConn, exitCode := connectAndLock(ctx, cfg, logger)
+	if pool == nil {
+		return exitCode
 	}
 	defer pool.Close()
 	defer func() { _ = listenConn.Close(context.Background()) }()
-	logger.Info("connected to Postgres")
-
-	if err := pgdb.AcquireAdvisoryLock(ctx, listenConn); err != nil {
-		if errors.Is(err, pgdb.ErrAdvisoryLockHeld) {
-			logger.Error("advisory lock held by another supervisor; exiting")
-			return ExitAdvisoryLockHeld
-		}
-		logger.Error("advisory lock acquisition failed", "error", err)
-		return ExitFailure
-	}
-	logger.Info("advisory lock acquired")
 
 	queries := store.New(pool)
 	state := health.NewState()
 	var sigkillCounter atomic.Int64
 
-	// M2.2 — palace bootstrap runs unconditionally (T001 finding F1:
-	// mempalace init --yes is idempotent in 3.3.2) BEFORE the agents
-	// cache loads so a broken palace surface halts startup cleanly.
-	// Fake-agent mode and the GARRISON_DISABLE_PALACE_BOOTSTRAP test-hook
-	// skip this — tests that don't exercise the real spawn path or don't
-	// stand up the mempalace sidecar can't reach it either.
-	if !cfg.UseFakeAgent && !cfg.DisablePalaceBootstrap {
-		if err := mempalace.Bootstrap(ctx, mempalace.BootstrapConfig{
-			DockerBin:          cfg.DockerBin,
-			MempalaceContainer: cfg.MempalaceContainer,
-			PalacePath:         cfg.PalacePath,
-			Logger:             logger,
-			InitTimeout:        30 * time.Second,
-		}); err != nil {
-			logger.Error("palace bootstrap failed", "error", err,
-				"container", cfg.MempalaceContainer, "path", cfg.PalacePath)
-			return ExitFailure
-		}
+	if exitCode := runPalaceBootstrap(ctx, cfg, logger); exitCode != ExitOK {
+		return exitCode
 	}
 
 	// Agents cache is populated at startup; hot-reload is deferred per
@@ -236,70 +197,12 @@ func runDaemon() int {
 	}
 	logger.Info("agents cache loaded", "count", agentsCache.Len())
 
-	// The supervisor writes its own absolute path into mcp-config-<uuid>.
-	// json so Claude's MCP launcher can exec `supervisor mcp-postgres` —
-	// os.Executable is the portable way to get that path without hard-
-	// coding /usr/local/bin/supervisor. If it fails, we log and fall
-	// back to os.Args[0]; spawn_failed will surface in the agent_instances
-	// row if the resulting path can't actually execute.
-	//
-	// GARRISON_SUPERVISOR_BIN_OVERRIDE is a test-only hook (T018 chaos
-	// test uses it to point the MCP config at /bin/does-not-exist so
-	// Claude reports postgres.status=failed at init). Production never
-	// sets it.
-	var supervisorBin string
-	if override := os.Getenv("GARRISON_SUPERVISOR_BIN_OVERRIDE"); override != "" {
-		supervisorBin = override
-		logger.Warn("GARRISON_SUPERVISOR_BIN_OVERRIDE active; MCP config will point at the override path",
-			"override", override)
-	} else {
-		exe, err := os.Executable()
-		if err != nil {
-			logger.Warn("os.Executable failed; using os.Args[0]", "err", err)
-			exe = os.Args[0]
-		}
-		supervisorBin = exe
-	}
+	supervisorBin := resolveSupervisorBin(logger)
+	sharedPalaceClient := buildSharedPalaceClient(cfg)
 
-	// M2.2.1 T011: palace client shared across the hygiene listener and
-	// the finalize atomic writer. Constructed outside the fake-agent
-	// gate so the spawn deps can hold a pointer unconditionally;
-	// fake-agent + disable-bootstrap paths set spawn.Deps.Palace=nil
-	// and WriteFinalize's nil-guard handles it (no atomic write runs).
-	var sharedPalaceClient *mempalace.Client
-	if !cfg.UseFakeAgent && !cfg.DisablePalaceBootstrap {
-		sharedPalaceClient = &mempalace.Client{
-			DockerBin:          cfg.DockerBin,
-			MempalaceContainer: cfg.MempalaceContainer,
-			PalacePath:         cfg.PalacePath,
-			DockerHost:         cfg.DockerHost,
-			Timeout:            10 * time.Second,
-			Exec:               mempalace.RealDockerExec{DockerBin: cfg.DockerBin},
-		}
-	}
-
-	// M2.3: construct the vault client from config. Nil when vault is not
-	// configured (fake-agent path, or real-Claude path without vault env vars).
-	// The vault steps in spawn.go are skipped when Vault==nil.
-	var vaultClient vault.Fetcher
-	if !cfg.UseFakeAgent && cfg.InfisicalAddr() != "" {
-		cid := cfg.CustomerID()
-		cidStr := fmt.Sprintf("%x-%x-%x-%x-%x",
-			cid.Bytes[0:4], cid.Bytes[4:6], cid.Bytes[6:8], cid.Bytes[8:10], cid.Bytes[10:16])
-		vc, vcErr := vault.NewClient(ctx, vault.ClientConfig{
-			SiteURL:      cfg.InfisicalAddr(),
-			ClientID:     cfg.InfisicalClientID(),
-			ClientSecret: cfg.InfisicalClientSecret(),
-			ProjectID:    cfg.InfisicalProjectID(),
-			Environment:  cfg.InfisicalEnvironment(),
-			CustomerID:   cidStr,
-			Logger:       logger,
-		})
-		if vcErr != nil {
-			logger.Error("vault: failed to create Infisical client; aborting startup", "err", vcErr)
-			return ExitFailure
-		}
-		vaultClient = vc
+	vaultClient, exitCode := buildVaultClient(ctx, cfg, logger)
+	if exitCode != ExitOK {
+		return exitCode
 	}
 
 	spawnDeps := spawn.Deps{
@@ -410,4 +313,141 @@ func runDaemon() int {
 	}
 	logger.Info("shutdown complete")
 	return ExitOK
+}
+
+// logDaemonStartupConfig emits the "supervisor starting" + "config
+// loaded" pair at startup. Pure logging; pulled out to reduce
+// runDaemon's line count without changing semantics.
+func logDaemonStartupConfig(logger *slog.Logger, cfg *config.Config) {
+	logger.Info("supervisor starting", "version", version)
+	logger.Info("config loaded",
+		"poll_interval", cfg.PollInterval,
+		"subprocess_timeout", cfg.SubprocessTimeout,
+		"shutdown_grace", cfg.ShutdownGrace,
+		"health_port", cfg.HealthPort,
+		"use_fake_agent", cfg.UseFakeAgent,
+		"claude_bin", cfg.ClaudeBin,
+		"mcp_config_dir", cfg.MCPConfigDir,
+	)
+}
+
+// connectAndLock dials Postgres with FR-017 backoff and acquires the
+// FR-018 advisory lock on the listen connection. Returns (nil, nil,
+// exitCode) on any failure path so runDaemon can short-circuit.
+func connectAndLock(ctx context.Context, cfg *config.Config, logger *slog.Logger) (*pgxpool.Pool, *pgx.Conn, int) {
+	pool, listenConn, err := pgdb.Connect(ctx, cfg)
+	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			logger.Info("shutdown during initial connect")
+			return nil, nil, ExitOK
+		}
+		logger.Error("initial connect failed", "error", err)
+		return nil, nil, ExitFailure
+	}
+	logger.Info("connected to Postgres")
+	if err := pgdb.AcquireAdvisoryLock(ctx, listenConn); err != nil {
+		_ = listenConn.Close(context.Background())
+		pool.Close()
+		if errors.Is(err, pgdb.ErrAdvisoryLockHeld) {
+			logger.Error("advisory lock held by another supervisor; exiting")
+			return nil, nil, ExitAdvisoryLockHeld
+		}
+		logger.Error("advisory lock acquisition failed", "error", err)
+		return nil, nil, ExitFailure
+	}
+	logger.Info("advisory lock acquired")
+	return pool, listenConn, ExitOK
+}
+
+// runPalaceBootstrap runs `mempalace init --yes` against the sidecar
+// container before the agents cache loads, so a broken palace surface
+// halts startup cleanly. T001 finding F1: the operation is idempotent
+// in MemPalace 3.3.2. Fake-agent mode and the test-hook
+// GARRISON_DISABLE_PALACE_BOOTSTRAP both skip this.
+func runPalaceBootstrap(ctx context.Context, cfg *config.Config, logger *slog.Logger) int {
+	if cfg.UseFakeAgent || cfg.DisablePalaceBootstrap {
+		return ExitOK
+	}
+	if err := mempalace.Bootstrap(ctx, mempalace.BootstrapConfig{
+		DockerBin:          cfg.DockerBin,
+		MempalaceContainer: cfg.MempalaceContainer,
+		PalacePath:         cfg.PalacePath,
+		Logger:             logger,
+		InitTimeout:        30 * time.Second,
+	}); err != nil {
+		logger.Error("palace bootstrap failed", "error", err,
+			"container", cfg.MempalaceContainer, "path", cfg.PalacePath)
+		return ExitFailure
+	}
+	return ExitOK
+}
+
+// resolveSupervisorBin returns the absolute path the supervisor writes
+// into mcp-config-<uuid>.json so Claude's MCP launcher can exec
+// `supervisor mcp-postgres`. os.Executable is the portable way to get
+// that path; on failure we fall back to os.Args[0] and rely on
+// spawn_failed to surface a non-executable resolved path.
+//
+// GARRISON_SUPERVISOR_BIN_OVERRIDE is a test-only hook (T018 chaos test
+// uses it to point the MCP config at /bin/does-not-exist so Claude
+// reports postgres.status=failed at init). Production never sets it.
+func resolveSupervisorBin(logger *slog.Logger) string {
+	if override := os.Getenv("GARRISON_SUPERVISOR_BIN_OVERRIDE"); override != "" {
+		logger.Warn("GARRISON_SUPERVISOR_BIN_OVERRIDE active; MCP config will point at the override path",
+			"override", override)
+		return override
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		logger.Warn("os.Executable failed; using os.Args[0]", "err", err)
+		return os.Args[0]
+	}
+	return exe
+}
+
+// buildSharedPalaceClient constructs the M2.2.1 T011 palace client
+// shared across the hygiene listener and the finalize atomic writer.
+// Returns nil for the fake-agent and bootstrap-disabled paths so callers
+// can hold a pointer unconditionally and rely on WriteFinalize's
+// nil-guard to skip the atomic write.
+func buildSharedPalaceClient(cfg *config.Config) *mempalace.Client {
+	if cfg.UseFakeAgent || cfg.DisablePalaceBootstrap {
+		return nil
+	}
+	return &mempalace.Client{
+		DockerBin:          cfg.DockerBin,
+		MempalaceContainer: cfg.MempalaceContainer,
+		PalacePath:         cfg.PalacePath,
+		DockerHost:         cfg.DockerHost,
+		Timeout:            10 * time.Second,
+		Exec:               mempalace.RealDockerExec{DockerBin: cfg.DockerBin},
+	}
+}
+
+// buildVaultClient constructs the M2.3 vault.Fetcher when the Infisical
+// address is configured. Returns (nil, ExitOK) when vault should be
+// skipped (fake-agent path or no Infisical address). On Infisical
+// failures the supervisor must abort startup — returns (nil,
+// ExitFailure).
+func buildVaultClient(ctx context.Context, cfg *config.Config, logger *slog.Logger) (vault.Fetcher, int) {
+	if cfg.UseFakeAgent || cfg.InfisicalAddr() == "" {
+		return nil, ExitOK
+	}
+	cid := cfg.CustomerID()
+	cidStr := fmt.Sprintf("%x-%x-%x-%x-%x",
+		cid.Bytes[0:4], cid.Bytes[4:6], cid.Bytes[6:8], cid.Bytes[8:10], cid.Bytes[10:16])
+	vc, err := vault.NewClient(ctx, vault.ClientConfig{
+		SiteURL:      cfg.InfisicalAddr(),
+		ClientID:     cfg.InfisicalClientID(),
+		ClientSecret: cfg.InfisicalClientSecret(),
+		ProjectID:    cfg.InfisicalProjectID(),
+		Environment:  cfg.InfisicalEnvironment(),
+		CustomerID:   cidStr,
+		Logger:       logger,
+	})
+	if err != nil {
+		logger.Error("vault: failed to create Infisical client; aborting startup", "err", err)
+		return nil, ExitFailure
+	}
+	return vc, ExitOK
 }

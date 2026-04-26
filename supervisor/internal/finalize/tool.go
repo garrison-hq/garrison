@@ -256,79 +256,114 @@ func Validate(raw json.RawMessage) (*FinalizePayload, *ValidationError) {
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return nil, newDecodeOrTypeError(raw, err)
 	}
+	if err := validateTicketID(p.TicketID); err != nil {
+		return nil, err
+	}
+	if err := validateOutcome(p.Outcome); err != nil {
+		return nil, err
+	}
+	if err := validateDiaryEntry(p.DiaryEntry); err != nil {
+		return nil, err
+	}
+	if err := validateKGTripleCount(len(p.KGTriples)); err != nil {
+		return nil, err
+	}
+	triples, err := validateKGTriples(p.KGTriples)
+	if err != nil {
+		return nil, err
+	}
+	return &FinalizePayload{
+		TicketID:   p.TicketID,
+		Outcome:    p.Outcome,
+		DiaryEntry: p.DiaryEntry,
+		KGTriples:  triples,
+	}, nil
+}
 
-	if p.TicketID == "" {
-		return nil, newValidationError(
+func validateTicketID(id string) *ValidationError {
+	if id == "" {
+		return newValidationError(
 			"ticket_id", ConstraintRequired,
 			"ticket_id is required",
 			"non-empty UUID string", "",
 		)
 	}
-	if !uuidRe.MatchString(p.TicketID) {
-		return nil, newValidationError(
+	if !uuidRe.MatchString(id) {
+		return newValidationError(
 			"ticket_id", ConstraintFormat,
 			"ticket_id is not a valid UUID",
-			"UUID (8-4-4-4-12 hex)", p.TicketID,
+			"UUID (8-4-4-4-12 hex)", id,
 		)
 	}
+	return nil
+}
 
-	if n := len(p.Outcome); n < OutcomeMin {
-		return nil, newValidationError(
+func validateOutcome(outcome string) *ValidationError {
+	n := len(outcome)
+	if n < OutcomeMin {
+		return newValidationError(
 			"outcome", ConstraintMinLength,
 			fmt.Sprintf("outcome length %d is below minimum %d", n, OutcomeMin),
-			fmt.Sprintf(expectedStringMinLenFmt, OutcomeMin), p.Outcome,
+			fmt.Sprintf(expectedStringMinLenFmt, OutcomeMin), outcome,
 		)
-	} else if n > OutcomeMax {
-		return nil, newValidationError(
+	}
+	if n > OutcomeMax {
+		return newValidationError(
 			"outcome", ConstraintMaxLength,
 			fmt.Sprintf("outcome length %d exceeds maximum %d", n, OutcomeMax),
-			fmt.Sprintf(expectedStringMaxLenFmt, OutcomeMax), p.Outcome,
+			fmt.Sprintf(expectedStringMaxLenFmt, OutcomeMax), outcome,
 		)
 	}
+	return nil
+}
 
-	if n := len(p.DiaryEntry.Rationale); n < RationaleMin {
-		return nil, newValidationError(
+func validateDiaryEntry(d DiaryEntry) *ValidationError {
+	if n := len(d.Rationale); n < RationaleMin {
+		return newValidationError(
 			"diary_entry.rationale", ConstraintMinLength,
 			fmt.Sprintf("rationale length %d is below minimum %d", n, RationaleMin),
-			fmt.Sprintf(expectedStringMinLenFmt, RationaleMin), p.DiaryEntry.Rationale,
+			fmt.Sprintf(expectedStringMinLenFmt, RationaleMin), d.Rationale,
 		)
 	} else if n > RationaleMax {
-		return nil, newValidationError(
+		return newValidationError(
 			"diary_entry.rationale", ConstraintMaxLength,
 			fmt.Sprintf("rationale length %d exceeds maximum %d", n, RationaleMax),
-			fmt.Sprintf(expectedStringMaxLenFmt, RationaleMax), p.DiaryEntry.Rationale,
+			fmt.Sprintf(expectedStringMaxLenFmt, RationaleMax), d.Rationale,
 		)
 	}
+	if err := validateStringArray(d.Artifacts, "diary_entry.artifacts"); err != nil {
+		return err
+	}
+	if err := validateStringArray(d.Blockers, "diary_entry.blockers"); err != nil {
+		return err
+	}
+	return validateStringArray(d.Discoveries, "diary_entry.discoveries")
+}
 
-	if err := validateStringArray(p.DiaryEntry.Artifacts, "diary_entry.artifacts"); err != nil {
-		return nil, err
-	}
-	if err := validateStringArray(p.DiaryEntry.Blockers, "diary_entry.blockers"); err != nil {
-		return nil, err
-	}
-	if err := validateStringArray(p.DiaryEntry.Discoveries, "diary_entry.discoveries"); err != nil {
-		return nil, err
-	}
-
-	if n := len(p.KGTriples); n < KGTripleArrayMin {
-		return nil, newValidationError(
+func validateKGTripleCount(n int) *ValidationError {
+	if n < KGTripleArrayMin {
+		return newValidationError(
 			"kg_triples", ConstraintMinItems,
 			fmt.Sprintf("kg_triples length %d is below minimum %d", n, KGTripleArrayMin),
 			fmt.Sprintf("array with min length %d", KGTripleArrayMin),
 			fmt.Sprintf(actualNItemsFmt, n),
 		)
-	} else if n > KGTripleArrayMax {
-		return nil, newValidationError(
+	}
+	if n > KGTripleArrayMax {
+		return newValidationError(
 			"kg_triples", ConstraintMaxItems,
 			fmt.Sprintf("kg_triples length %d exceeds maximum %d", n, KGTripleArrayMax),
 			fmt.Sprintf("array with max length %d", KGTripleArrayMax),
 			fmt.Sprintf(actualNItemsFmt, n),
 		)
 	}
+	return nil
+}
 
+func validateKGTriples(rawTriples []rawKGTriple) ([]KGTriple, *ValidationError) {
 	now := time.Now().UTC()
-	triples := make([]KGTriple, 0, len(p.KGTriples))
-	for i, t := range p.KGTriples {
+	triples := make([]KGTriple, 0, len(rawTriples))
+	for i, t := range rawTriples {
 		fieldPrefix := fmt.Sprintf("kg_triples[%d]", i)
 		if err := validateTripleField(t.Subject, fieldPrefix+".subject"); err != nil {
 			return nil, err
@@ -350,13 +385,7 @@ func Validate(raw json.RawMessage) (*FinalizePayload, *ValidationError) {
 			ValidFrom: validFrom,
 		})
 	}
-
-	return &FinalizePayload{
-		TicketID:   p.TicketID,
-		Outcome:    p.Outcome,
-		DiaryEntry: p.DiaryEntry,
-		KGTriples:  triples,
-	}, nil
+	return triples, nil
 }
 
 // newDecodeOrTypeError classifies a `json.Unmarshal` failure. A

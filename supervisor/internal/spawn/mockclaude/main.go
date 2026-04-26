@@ -45,6 +45,11 @@ import (
 
 var ticketIDPattern = regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`)
 
+const (
+	ticketIDToken = "{{TICKET_ID}}"
+	toolUseIDFmt  = "toolu_%d"
+)
+
 func main() {
 	// Catch SIGTERM on a dedicated goroutine so tests that need to
 	// verify signal reception observe a marker-file write before the
@@ -118,7 +123,7 @@ func main() {
 		if strings.HasPrefix(line, "#") {
 			// Expand {{TICKET_ID}} in directive arguments so fixture files can
 			// reference the ticket ID in file paths and other directive params.
-			line = strings.ReplaceAll(line, "{{TICKET_ID}}", ticketID)
+			line = strings.ReplaceAll(line, ticketIDToken, ticketID)
 			if err := runDirective(line, ticketID, &exitCode); err != nil {
 				fmt.Fprintf(os.Stderr, "mockclaude: directive %q: %v\n", line, err)
 				os.Exit(1)
@@ -128,7 +133,7 @@ func main() {
 		if line == "" {
 			continue
 		}
-		line = strings.ReplaceAll(line, "{{TICKET_ID}}", ticketID)
+		line = strings.ReplaceAll(line, ticketIDToken, ticketID)
 		fmt.Println(line)
 	}
 	if err := scanner.Err(); err != nil {
@@ -156,7 +161,7 @@ func runDirective(line, ticketID string, exitCode *int) error {
 		// directive separates the two; contents may contain spaces.
 		contents := strings.TrimPrefix(line, "#write-hello-txt-contents")
 		contents = strings.TrimLeft(contents, " \t")
-		contents = strings.ReplaceAll(contents, "{{TICKET_ID}}", ticketID)
+		contents = strings.ReplaceAll(contents, ticketIDToken, ticketID)
 		return os.WriteFile("hello.txt", []byte(contents), 0o644)
 	case "#sleep":
 		if len(fields) < 2 {
@@ -237,7 +242,7 @@ func runDirective(line, ticketID string, exitCode *int) error {
 		}
 		toolName := parts[1]
 		inputJSON := parts[2]
-		toolUseID := fmt.Sprintf("toolu_%d", time.Now().UnixNano()%1_000_000)
+		toolUseID := fmt.Sprintf(toolUseIDFmt, time.Now().UnixNano()%1_000_000)
 		assistant := fmt.Sprintf(
 			`{"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","content":[{"type":"tool_use","id":"%s","name":"%s","input":%s}]}}`,
 			toolUseID, toolName, inputJSON,
@@ -259,7 +264,7 @@ func runDirective(line, ticketID string, exitCode *int) error {
 		}
 		toolName := parts[1]
 		detail := parts[2]
-		toolUseID := fmt.Sprintf("toolu_%d", time.Now().UnixNano()%1_000_000)
+		toolUseID := fmt.Sprintf(toolUseIDFmt, time.Now().UnixNano()%1_000_000)
 		assistant := fmt.Sprintf(
 			`{"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","content":[{"type":"tool_use","id":"%s","name":"%s","input":{}}]}}`,
 			toolUseID, toolName,
@@ -287,8 +292,8 @@ func runDirective(line, ticketID string, exitCode *int) error {
 			return fmt.Errorf("#finalize-tool-use-ok needs <attempt> <input-json>")
 		}
 		attempt := parts[1]
-		inputJSON := strings.ReplaceAll(parts[2], "{{TICKET_ID}}", ticketID)
-		toolUseID := fmt.Sprintf("toolu_%d", time.Now().UnixNano()%1_000_000)
+		inputJSON := strings.ReplaceAll(parts[2], ticketIDToken, ticketID)
+		toolUseID := fmt.Sprintf(toolUseIDFmt, time.Now().UnixNano()%1_000_000)
 		assistant := fmt.Sprintf(
 			`{"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","content":[{"type":"tool_use","id":"%s","name":"finalize_ticket","input":%s}]}}`,
 			toolUseID, inputJSON,
@@ -316,7 +321,7 @@ func runDirective(line, ticketID string, exitCode *int) error {
 		attempt := parts[1]
 		errorType := parts[2]
 		field := parts[3]
-		toolUseID := fmt.Sprintf("toolu_%d", time.Now().UnixNano()%1_000_000)
+		toolUseID := fmt.Sprintf(toolUseIDFmt, time.Now().UnixNano()%1_000_000)
 		assistant := fmt.Sprintf(
 			`{"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","content":[{"type":"tool_use","id":"%s","name":"finalize_ticket","input":{"ticket_id":"bad"}}]}}`,
 			toolUseID,
