@@ -1,0 +1,113 @@
+@import "tailwindcss";
+
+/*
+ * Garrison dashboard — token system.
+ *
+ * Tokens are defined under [data-theme="dark"] and [data-theme="light"]
+ * blocks; the [data-theme] attribute lives on <html> and is set by the
+ * server-component shell layout from the operator's theme_preference
+ * column on the better-auth user record (T009).
+ *
+ * Dark token values lifted verbatim from .workspace/m3-mocks/garrison-
+ * reference/styles.css; the surface/text/border ladders are renamed to
+ * the consistent X-1/X-2/... pattern (--surface → --surface-1, --border
+ * → --border-1, --border-strong → --border-2, --text → --text-1).
+ *
+ * Light tokens are derived for parity (FR-010): same hue/chroma on the
+ * accent + status colors via OKLCH so semantic-color meaning survives
+ * the theme flip; surface/text/border ladders are inverted lightness.
+ */
+
+[data-theme="dark"] {
+  --bg: #0A0A0A;
+  --surface-1: #141414;
+  --surface-2: #1C1C1C;
+  --surface-3: #232323;
+  --border-1: #262626;
+  --border-2: #333333;
+  --text-1: #EDEDED;
+  --text-2: #A1A1A1;
+  --text-3: #666666;
+  --text-4: #444444;
+
+  --accent: oklch(0.78 0.14 160);
+  --accent-dim: oklch(0.78 0.14 160 / 0.14);
+  --info: oklch(0.7 0.12 240);
+  --warn: oklch(0.78 0.14 75);
+  --err:  oklch(0.68 0.18 25);
+  --ok:   oklch(0.78 0.14 160);
+}
+
+[data-theme="light"] {
+  --bg: #FAFAFA;
+  --surface-1: #FFFFFF;
+  --surface-2: #F4F4F5;
+  --surface-3: #E4E4E7;
+  --border-1: #D4D4D8;
+  --border-2: #A1A1AA;
+  --text-1: #18181B;
+  --text-2: #52525B;
+  --text-3: #71717A;
+  --text-4: #A1A1AA;
+
+  --accent: oklch(0.55 0.14 160);
+  --accent-dim: oklch(0.55 0.14 160 / 0.14);
+  --info: oklch(0.5 0.14 240);
+  --warn: oklch(0.55 0.16 75);
+  --err:  oklch(0.5 0.2 25);
+  --ok:   oklch(0.55 0.14 160);
+}
+
+/*
+ * Default to dark when no [data-theme] is set yet (e.g. a server-rendered
+ * pre-hydration paint on the login route). The shell layout overwrites
+ * this attribute on every authenticated request.
+ */
+:root {
+  --bg: #0A0A0A;
+  --surface-1: #141414;
+  --surface-2: #1C1C1C;
+  --surface-3: #232323;
+  --border-1: #262626;
+  --border-2: #333333;
+  --text-1: #EDEDED;
+  --text-2: #A1A1A1;
+  --text-3: #666666;
+  --text-4: #444444;
+  --accent: oklch(0.78 0.14 160);
+  --accent-dim: oklch(0.78 0.14 160 / 0.14);
+  --info: oklch(0.7 0.12 240);
+  --warn: oklch(0.78 0.14 75);
+  --err:  oklch(0.68 0.18 25);
+  --ok:   oklch(0.78 0.14 160);
+
+  --sans: 'Geist', 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  --mono: 'Geist Mono', 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface-1: var(--surface-1);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+  --color-border-1: var(--border-1);
+  --color-border-2: var(--border-2);
+  --color-text-1: var(--text-1);
+  --color-text-2: var(--text-2);
+  --color-text-3: var(--text-3);
+  --color-text-4: var(--text-4);
+  --color-accent: var(--accent);
+  --color-info: var(--info);
+  --color-warn: var(--warn);
+  --color-err: var(--err);
+  --color-ok: var(--ok);
+}
+
+html, body {
+  background: var(--bg);
+  color: var(--text-1);
+  font-family: var(--sans);
+  font-size: 13px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+}
