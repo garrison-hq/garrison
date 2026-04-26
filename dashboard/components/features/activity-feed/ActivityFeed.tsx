@@ -26,22 +26,34 @@ interface RunBucket {
   latestAt: number;
 }
 
-function bucketEvent(buckets: Map<string, RunBucket>, ev: ActivityEvent): void {
+function bucketEvent(buckets: Map<string, RunBucket>, ev: ActivityEvent): Map<string, RunBucket> {
+  // Pure: returns a new Map with a new bucket value where the event
+  // belongs. React StrictMode runs setState updaters twice in dev to
+  // catch impure mutations — pushing into existing.events directly
+  // would land the same event in the bucket twice and the EventRow
+  // list would crash with duplicate React keys. Also dedupes against
+  // existing eventIds in the bucket as a defense-in-depth check.
   const runId =
     ev.kind === 'ticket.transitioned' ? (ev.agentInstanceId ?? null) : null;
   const key = runId ?? `__unattributed_${ev.eventId}`;
-  const existing = buckets.get(key);
+  const next = new Map(buckets);
+  const existing = next.get(key);
   if (existing) {
-    existing.events.push(ev);
+    if (existing.events.some((e) => e.eventId === ev.eventId)) return next;
     const ts = new Date(ev.at).getTime();
-    if (ts > existing.latestAt) existing.latestAt = ts;
+    next.set(key, {
+      runId,
+      events: [...existing.events, ev],
+      latestAt: ts > existing.latestAt ? ts : existing.latestAt,
+    });
   } else {
-    buckets.set(key, {
+    next.set(key, {
       runId,
       events: [ev],
       latestAt: new Date(ev.at).getTime(),
     });
   }
+  return next;
 }
 
 export function ActivityFeed() {
@@ -61,11 +73,7 @@ export function ActivityFeed() {
         const event = JSON.parse(msg.data) as ActivityEvent;
         if (seenRef.current.has(event.eventId)) return;
         seenRef.current.add(event.eventId);
-        setBuckets((prev) => {
-          const next = new Map(prev);
-          bucketEvent(next, event);
-          return next;
-        });
+        setBuckets((prev) => bucketEvent(prev, event));
       } catch {
         // ignore malformed frames
       }

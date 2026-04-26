@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="56" viewBox="0 0 320 56" fill="none" role="img" aria-label="garrison">
+  <path d="M10 18 V10 H18" stroke="#EDEDED" stroke-width="4"></path>
+  <path d="M46 10 H54 V18" stroke="#EDEDED" stroke-width="4"></path>
+  <path d="M54 46 V54 H46" stroke="#EDEDED" stroke-width="4"></path>
+  <path d="M18 54 H10 V46" stroke="#EDEDED" stroke-width="4"></path>
+  <rect x="28" y="28" width="8" height="8" fill="#5DD3A8"></rect>
+  <text x="78" y="40" font-family="&#39;Geist Mono&#39;, ui-monospace, &#39;JetBrains Mono&#39;, SFMono-Regular, Menlo, monospace" font-size="26" font-weight="500" letter-spacing="-0.26" fill="#EDEDED">garrison</text>
+</svg>

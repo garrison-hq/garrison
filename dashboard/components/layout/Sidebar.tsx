@@ -1,3 +1,4 @@
+import Image from 'next/image';
 import Link from 'next/link';
 import { getTranslations } from 'next-intl/server';
 import { StatusDot } from '@/components/ui/StatusDot';
@@ -14,12 +15,24 @@ export async function Sidebar() {
   const t = await getTranslations('nav');
   return (
     <aside className="w-60 bg-surface-1 border-r border-border-1 flex-shrink-0 flex flex-col py-3">
-      <div className="px-4 pb-3 flex items-center gap-2">
-        <div className="w-5 h-5 rounded bg-text-1 text-bg grid place-items-center font-mono font-semibold text-[11px]">
-          G
-        </div>
-        <span className="text-text-1 font-semibold text-sm">Garrison</span>
-      </div>
+      <Link href="/" className="px-4 pb-3 block">
+        <Image
+          src="/brand/lockup/garrison-lockup-dark.svg"
+          alt="Garrison"
+          width={160}
+          height={28}
+          className="theme-asset-dark h-7 w-auto"
+          priority
+        />
+        <Image
+          src="/brand/lockup/garrison-lockup-light.svg"
+          alt="Garrison"
+          width={160}
+          height={28}
+          className="theme-asset-light h-7 w-auto"
+          priority
+        />
+      </Link>
 
       <nav className="flex-1 flex flex-col gap-0.5 px-2">
         <NavLink href="/" label={t('orgOverview')} />

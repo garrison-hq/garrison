@@ -18,6 +18,35 @@
  * the theme flip; surface/text/border ladders are inverted lightness.
  */
 
+/*
+ * :root holds the dark-default token values + the font-family
+ * tokens. MUST come before the [data-theme] blocks: `:root` and
+ * `[data-theme="X"]` have equal CSS specificity (0,1,0), so source
+ * order decides — putting :root last would let it override
+ * [data-theme="light"] and freeze the page on dark forever.
+ */
+:root {
+  --bg: #0A0A0A;
+  --surface-1: #141414;
+  --surface-2: #1C1C1C;
+  --surface-3: #232323;
+  --border-1: #262626;
+  --border-2: #333333;
+  --text-1: #EDEDED;
+  --text-2: #A1A1A1;
+  --text-3: #666666;
+  --text-4: #444444;
+  --accent: oklch(0.78 0.14 160);
+  --accent-dim: oklch(0.78 0.14 160 / 0.14);
+  --info: oklch(0.7 0.12 240);
+  --warn: oklch(0.78 0.14 75);
+  --err:  oklch(0.68 0.18 25);
+  --ok:   oklch(0.78 0.14 160);
+
+  --sans: 'Geist', 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  --mono: 'Geist Mono', 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
 [data-theme="dark"] {
   --bg: #0A0A0A;
   --surface-1: #141414;
@@ -58,33 +87,6 @@
   --ok:   oklch(0.55 0.14 160);
 }
 
-/*
- * Default to dark when no [data-theme] is set yet (e.g. a server-rendered
- * pre-hydration paint on the login route). The shell layout overwrites
- * this attribute on every authenticated request.
- */
-:root {
-  --bg: #0A0A0A;
-  --surface-1: #141414;
-  --surface-2: #1C1C1C;
-  --surface-3: #232323;
-  --border-1: #262626;
-  --border-2: #333333;
-  --text-1: #EDEDED;
-  --text-2: #A1A1A1;
-  --text-3: #666666;
-  --text-4: #444444;
-  --accent: oklch(0.78 0.14 160);
-  --accent-dim: oklch(0.78 0.14 160 / 0.14);
-  --info: oklch(0.7 0.12 240);
-  --warn: oklch(0.78 0.14 75);
-  --err:  oklch(0.68 0.18 25);
-  --ok:   oklch(0.78 0.14 160);
-
-  --sans: 'Geist', 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-  --mono: 'Geist Mono', 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
-}
-
 @theme inline {
   --color-bg: var(--bg);
   --color-surface-1: var(--surface-1);
@@ -110,4 +112,15 @@ html, body {
   font-size: 13px;
   line-height: 1.45;
   -webkit-font-smoothing: antialiased;
+}
+
+/*
+ * Theme-aware brand assets. Two <img> tags ship in the DOM (one dark
+ * lockup, one light); CSS hides the wrong one based on the active
+ * data-theme. Avoids a flash on theme-flip and means a single
+ * Image-from-disk per theme regardless of how often the user toggles.
+ */
+[data-theme="dark"] .theme-asset-light,
+[data-theme="light"] .theme-asset-dark {
+  display: none;
 }

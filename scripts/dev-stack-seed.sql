@@ -51,13 +51,13 @@ INSERT INTO departments (id, company_id, slug, name, concurrency_cap, workspace_
 VALUES
   ('00000000-0000-0000-0000-00000000d001', '00000000-0000-0000-0000-00000000c001',
    'engineering', 'Engineering', 3, '/tmp/garrison-dev/engineering',
-   '{"columns":["todo","in_dev","in_review","done"]}'::jsonb),
+   '{"columns":[{"slug":"todo","label":"To do"},{"slug":"in_dev","label":"In dev"},{"slug":"in_review","label":"In review"},{"slug":"done","label":"Done"}]}'::jsonb),
   ('00000000-0000-0000-0000-00000000d002', '00000000-0000-0000-0000-00000000c001',
    'qa', 'Quality Assurance', 2, '/tmp/garrison-dev/qa',
-   '{"columns":["todo","in_dev","in_review","done"]}'::jsonb),
+   '{"columns":[{"slug":"todo","label":"To do"},{"slug":"in_dev","label":"In dev"},{"slug":"in_review","label":"In review"},{"slug":"done","label":"Done"}]}'::jsonb),
   ('00000000-0000-0000-0000-00000000d003', '00000000-0000-0000-0000-00000000c001',
    'docs', 'Documentation', 1, '/tmp/garrison-dev/docs',
-   '{"columns":["todo","in_dev","in_review","done"]}'::jsonb)
+   '{"columns":[{"slug":"todo","label":"To do"},{"slug":"in_dev","label":"In dev"},{"slug":"in_review","label":"In review"},{"slug":"done","label":"Done"}]}'::jsonb)
 ON CONFLICT (id) DO NOTHING;
 
 -- =========================================================================

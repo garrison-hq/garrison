@@ -1,6 +1,21 @@
 import './globals.css';
+import type { Metadata } from 'next';
 import { getSession } from '@/lib/auth/session';
 import { resolveTheme, type ThemePreference, type ResolvedTheme } from '@/lib/theme/resolve';
+
+export const metadata: Metadata = {
+  title: 'Garrison — Operator OS',
+  // Adaptive SVG favicon flips with system theme; PNG fallbacks for
+  // browsers that don't grok prefers-color-scheme inside SVGs.
+  icons: {
+    icon: [
+      { url: '/favicon.svg', type: 'image/svg+xml' },
+      { url: '/favicon-32.png', type: 'image/png', sizes: '32x32' },
+      { url: '/favicon-16.png', type: 'image/png', sizes: '16x16' },
+    ],
+    apple: '/apple-touch-icon.png',
+  },
+};
 
 // Root layout. Owns the <html>/<body> shell + the data-theme
 // attribute (FR-010 + FR-010a). Reads the operator's saved theme
