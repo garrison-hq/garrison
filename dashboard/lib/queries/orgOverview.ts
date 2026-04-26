@@ -30,7 +30,12 @@ export interface DeptRow {
   slug: string;
   name: string;
   ticketCounts: Record<string, number>;
+  /** Configured agents (agents.status='active') for this department. */
   agentCount: number;
+  /** Currently-running agent_instances (status='running'). Drives
+   *  the "X / Y active" tile on the org-overview department card. */
+  liveInstances: number;
+  /** Per-department concurrency cap. */
   agentCap: number;
   lastTransitionAt: Date | null;
   hygieneWarnings: number;
@@ -68,6 +73,7 @@ export async function fetchDepartmentRows(): Promise<DeptRow[]> {
     concurrency_cap: number;
     ticket_counts: Record<string, number> | null;
     agent_count: number;
+    live_instances: number;
     last_transition_at: Date | null;
     hygiene_warnings: number;
   }>(sql`
@@ -82,6 +88,8 @@ export async function fetchDepartmentRows(): Promise<DeptRow[]> {
           GROUP BY column_slug
        ) t) AS ticket_counts,
       (SELECT count(*)::int FROM agents WHERE department_id = d.id AND status = 'active') AS agent_count,
+      (SELECT count(*)::int FROM agent_instances
+         WHERE department_id = d.id AND status = 'running') AS live_instances,
       (SELECT max(tt.at) FROM ticket_transitions tt
          JOIN tickets t ON t.id = tt.ticket_id
          WHERE t.department_id = d.id) AS last_transition_at,
@@ -98,6 +106,7 @@ export async function fetchDepartmentRows(): Promise<DeptRow[]> {
     name: row.name,
     ticketCounts: row.ticket_counts ?? {},
     agentCount: Number(row.agent_count ?? 0),
+    liveInstances: Number(row.live_instances ?? 0),
     agentCap: row.concurrency_cap,
     lastTransitionAt: row.last_transition_at,
     hygieneWarnings: Number(row.hygiene_warnings ?? 0),

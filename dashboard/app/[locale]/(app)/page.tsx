@@ -33,14 +33,19 @@ export default async function Home() {
 
       <KPIStrip kpis={kpis} />
 
-      <section className="space-y-2">
-        <h2 className="text-text-2 text-xs uppercase tracking-wider">
-          {ovT('departmentsHeading')}
-        </h2>
+      <section className="space-y-3">
+        <div className="flex items-baseline gap-3">
+          <h2 className="text-text-1 text-sm font-semibold">
+            {ovT('departmentsHeading')}
+          </h2>
+          <span className="text-text-3 text-xs">
+            {departments.length} configured
+          </span>
+        </div>
         {departments.length === 0 ? (
           <EmptyState description={ovT('noDepartments')} />
         ) : (
-          <div className="border border-border-1 rounded divide-y divide-border-1 bg-surface-1">
+          <div className="grid gap-3 grid-cols-1 md:grid-cols-2 xl:grid-cols-3">
             {departments.map((row) => (
               <DepartmentRow key={row.slug} row={row} />
             ))}
