@@ -119,11 +119,18 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
-      - run: bun install --frozen-lockfile
       # vitest globalSetup boots a Postgres testcontainer and applies
-      # both goose + drizzle migrations; the unit tests run against
-      # that container. The runner needs Docker available — Ubuntu
-      # GitHub runners ship docker.
+      # goose-managed supervisor migrations + Drizzle migrations.
+      # The harness shells out to the goose CLI; install it from
+      # source so the integration step runs the same migration
+      # path as developer machines.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: supervisor/go.mod
+          cache-dependency-path: supervisor/go.sum
+      - name: Install goose CLI
+        run: go install github.com/pressly/goose/v3/cmd/goose@v3.21.1
+      - run: bun install --frozen-lockfile
       - run: bun run test:coverage
       - name: Upload dashboard coverage
         uses: actions/upload-artifact@v4
