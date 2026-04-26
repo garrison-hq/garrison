@@ -47,12 +47,12 @@ const KIND_DOT_TONE: Record<string, ChipTone> = {
 };
 
 function chipToneFor(kind: string, hint?: string): ChipTone {
-  if (kind === 'unknown' && hint && hint.startsWith('error')) return 'err';
+  if (kind === 'unknown' && hint?.startsWith('error')) return 'err';
   return KIND_CHIP_TONE[kind] ?? 'neutral';
 }
 
 function dotToneFor(kind: string, hint?: string): ChipTone {
-  if (kind === 'unknown' && hint && hint.startsWith('error')) return 'err';
+  if (kind === 'unknown' && hint?.startsWith('error')) return 'err';
   return KIND_DOT_TONE[kind] ?? 'neutral';
 }
 

@@ -35,6 +35,17 @@ function shortId(id: string): string {
   return id.slice(-SHORT_ID_LEN);
 }
 
+type Transition = { department: string; fromCol: string; toCol: string };
+
+function readTransition(
+  first: ActivityEvent | undefined,
+  last: ActivityEvent | undefined,
+): Transition | null {
+  if (first?.kind !== 'ticket.transitioned') return null;
+  const toCol = last?.kind === 'ticket.transitioned' ? last.to : first.to;
+  return { department: first.department, fromCol: first.from, toCol };
+}
+
 export function RunGroup({
   runId,
   events,
@@ -50,21 +61,8 @@ export function RunGroup({
   const first = sorted[0];
   const last = sorted.at(-1);
 
-  let department: string | null = null;
-  let fromCol: string | null = null;
-  let toCol: string | null = null;
-  if (first?.kind === 'ticket.transitioned') {
-    department = first.department;
-    fromCol = first.from;
-    toCol = last?.kind === 'ticket.transitioned' ? last.to : first.to;
-  }
-
-  const heartbeat =
-    department !== null &&
-    fromCol !== null &&
-    toCol !== null &&
-    fromCol === toCol;
-
+  const transition = readTransition(first, last);
+  const heartbeat = transition !== null && transition.fromCol === transition.toCol;
   const latestAt = last?.at ?? first?.at;
 
   return (
@@ -86,29 +84,14 @@ export function RunGroup({
         <span className="text-text-3 text-[11px] font-mono font-tabular border-r border-border-1 pr-3">
           {events.length} {events.length === 1 ? 'event' : 'events'}
         </span>
-        {heartbeat ? (
-          <span className="font-mono text-[11.5px] flex items-center gap-1.5 truncate">
-            <span className="inline-block w-1.5 h-1.5 rounded-full bg-text-4" aria-hidden />
-            <span className="text-text-2">{department}</span>
-            <span className="text-text-4">/</span>
-            <span className="text-text-3">{toCol}</span>
-            <span className="text-text-3 text-[10.5px] uppercase tracking-[0.08em] ml-2">
-              {t('heartbeat')}
-            </span>
-          </span>
-        ) : department && fromCol && toCol ? (
-          <span className="font-mono text-[11.5px] flex items-center gap-2 truncate">
-            <span className="text-text-2">{department}</span>
-            <span className="text-text-4">/</span>
-            <span className="text-text-3">{fromCol}</span>
-            <span className="text-text-4 mx-0.5" aria-hidden>→</span>
-            <span className="text-text-1">{toCol}</span>
-          </span>
-        ) : (
-          <span className="font-mono text-[11.5px] text-text-3 truncate">
-            {runId === null ? t('unattributed') : t('ticketActivity')}
-          </span>
-        )}
+        <RunSummary
+          runId={runId}
+          transition={transition}
+          heartbeat={heartbeat}
+          heartbeatLabel={t('heartbeat')}
+          unattributedLabel={t('unattributed')}
+          activityLabel={t('ticketActivity')}
+        />
         <span
           className="text-text-3 text-[10.5px] font-mono font-tabular"
           title={latestAt ? formatIsoFull(latestAt) : undefined}
@@ -127,5 +110,51 @@ export function RunGroup({
         </div>
       ) : null}
     </div>
+  );
+}
+
+function RunSummary({
+  runId,
+  transition,
+  heartbeat,
+  heartbeatLabel,
+  unattributedLabel,
+  activityLabel,
+}: Readonly<{
+  runId: string | null;
+  transition: Transition | null;
+  heartbeat: boolean;
+  heartbeatLabel: string;
+  unattributedLabel: string;
+  activityLabel: string;
+}>) {
+  if (heartbeat && transition) {
+    return (
+      <span className="font-mono text-[11.5px] flex items-center gap-1.5 truncate">
+        <span className="inline-block w-1.5 h-1.5 rounded-full bg-text-4" aria-hidden />
+        <span className="text-text-2">{transition.department}</span>
+        <span className="text-text-4">/</span>
+        <span className="text-text-3">{transition.toCol}</span>
+        <span className="text-text-3 text-[10.5px] uppercase tracking-[0.08em] ml-2">
+          {heartbeatLabel}
+        </span>
+      </span>
+    );
+  }
+  if (transition) {
+    return (
+      <span className="font-mono text-[11.5px] flex items-center gap-2 truncate">
+        <span className="text-text-2">{transition.department}</span>
+        <span className="text-text-4">/</span>
+        <span className="text-text-3">{transition.fromCol}</span>
+        <span className="text-text-4 mx-0.5" aria-hidden>→</span>
+        <span className="text-text-1">{transition.toCol}</span>
+      </span>
+    );
+  }
+  return (
+    <span className="font-mono text-[11.5px] text-text-3 truncate">
+      {runId === null ? unattributedLabel : activityLabel}
+    </span>
   );
 }

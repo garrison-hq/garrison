@@ -135,18 +135,16 @@ export function ActivityFeed() {
   const today = dayKey(Date.now());
 
   // Status indicator classes — three states.
-  const statusToneClass =
-    status === 'live'
-      ? 'text-ok'
-      : status === 'reconnecting'
-        ? 'text-warn'
-        : 'text-text-3';
-  const statusDotClass =
-    status === 'live'
-      ? 'bg-ok animate-pulse'
-      : status === 'reconnecting'
-        ? 'bg-warn'
-        : 'bg-text-3';
+  let statusToneClass: string;
+  if (status === 'live') statusToneClass = 'text-ok';
+  else if (status === 'reconnecting') statusToneClass = 'text-warn';
+  else statusToneClass = 'text-text-3';
+
+  let statusDotClass: string;
+  if (status === 'live') statusDotClass = 'bg-ok animate-pulse';
+  else if (status === 'reconnecting') statusDotClass = 'bg-warn';
+  else statusDotClass = 'bg-text-3';
+
   const statusLabel = t.has(status) ? t(status) : status;
 
   return (

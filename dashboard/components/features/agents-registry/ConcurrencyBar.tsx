@@ -18,8 +18,9 @@ export function ConcurrencyBar({
 }: Readonly<{ live: number; cap: number }>) {
   const safeCap = Math.max(1, cap);
   const pct = Math.min(1, live / safeCap);
-  const tone: Tone =
-    live >= cap ? 'err' : pct >= 0.8 ? 'warn' : 'accent';
+  let tone: Tone = 'accent';
+  if (live >= cap) tone = 'err';
+  else if (pct >= 0.8) tone = 'warn';
   return (
     <div
       className="flex items-center gap-2"

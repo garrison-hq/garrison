@@ -19,8 +19,9 @@ export async function AgentsKPIStrip({
     stats.totalCap > 0
       ? Math.round((stats.totalLive / stats.totalCap) * 100)
       : 0;
-  const concurrencyTone: Tone =
-    concurrencyPct >= 90 ? 'err' : concurrencyPct >= 80 ? 'warn' : 'ok';
+  let concurrencyTone: Tone = 'ok';
+  if (concurrencyPct >= 90) concurrencyTone = 'err';
+  else if (concurrencyPct >= 80) concurrencyTone = 'warn';
 
   return (
     <div className="bg-surface-1 border border-border-1 rounded grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 divide-y lg:divide-y-0 lg:divide-x divide-border-1">
