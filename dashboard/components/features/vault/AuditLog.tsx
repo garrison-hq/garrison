@@ -25,7 +25,7 @@ function groupByDay(rows: VaultAuditRow[]): { day: string; rows: VaultAuditRow[]
   for (const r of rows) {
     const day = new Date(r.timestamp).toISOString().slice(0, 10);
     const last = out.at(-1);
-    if (last && last.day === day) {
+    if (last?.day === day) {
       last.rows.push(r);
     } else {
       out.push({ day, rows: [r] });
@@ -62,13 +62,14 @@ export async function AuditLog({
 function Group({ day, rows }: Readonly<{ day: string; rows: VaultAuditRow[] }>) {
   return (
     <>
-      <tr aria-hidden>
-        <td
+      <tr>
+        <th
+          scope="rowgroup"
           colSpan={5}
-          className="px-3 py-1.5 bg-surface-2/50 border-t border-border-1 border-b text-text-3 font-mono text-[10.5px] tracking-tight"
+          className="text-left px-3 py-1.5 bg-surface-2/50 border-t border-border-1 border-b text-text-3 font-mono text-[10.5px] tracking-tight font-normal"
         >
           {day}
-        </td>
+        </th>
       </tr>
       {rows.map((r) => (
         <tr key={r.id} data-testid="audit-row">
