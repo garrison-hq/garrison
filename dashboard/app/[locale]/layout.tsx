@@ -3,8 +3,7 @@ import { notFound } from 'next/navigation';
 import { hasLocale, NextIntlClientProvider } from 'next-intl';
 import { setRequestLocale } from 'next-intl/server';
 import { routing } from '@/lib/i18n/routing';
-import { getSession } from '@/lib/auth/session';
-import { resolveTheme, type ThemePreference, type ResolvedTheme } from '@/lib/theme/resolve';
+import { LocaleSync } from './LocaleSync';
 
 export const metadata: Metadata = {
   title: 'Garrison',
@@ -16,19 +15,10 @@ export function generateStaticParams() {
   return routing.locales.map((locale) => ({ locale }));
 }
 
-function isThemePref(v: unknown): v is ThemePreference {
-  return v === 'dark' || v === 'light' || v === 'system';
-}
-
-// Locale-aware shell. Sets the html lang to the active locale and
-// the data-theme attribute to the operator's resolved preference.
-// Loads the catalog for Client Components via NextIntlClientProvider.
-//
-// System-pref detection: when the operator's saved value is
-// 'system', we default to 'dark' on the server (matches the
-// resolved-default in app/globals.css). The client-side
-// ThemeSwitcher's optimistic update flips the attribute live when
-// the operator changes preference.
+// Locale-aware layout. The root layout (app/layout.tsx) owns the
+// <html data-theme=...> shell; this layer wraps children in the
+// next-intl provider and synchronises <html lang> via a tiny
+// client island so it tracks the active locale.
 export default async function LocaleLayout({
   children,
   params,
@@ -41,18 +31,10 @@ export default async function LocaleLayout({
     notFound();
   }
   setRequestLocale(locale);
-
-  const session = await getSession();
-  const stored = (session?.user as { themePreference?: unknown } | undefined)?.themePreference;
-  const operatorPref: ThemePreference = isThemePref(stored) ? stored : 'system';
-  const systemFallback: ResolvedTheme = 'dark';
-  const dataTheme = resolveTheme(operatorPref, systemFallback);
-
   return (
-    <html lang={locale} data-theme={dataTheme}>
-      <body>
-        <NextIntlClientProvider>{children}</NextIntlClientProvider>
-      </body>
-    </html>
+    <NextIntlClientProvider>
+      <LocaleSync locale={locale} />
+      {children}
+    </NextIntlClientProvider>
   );
 }
