@@ -22,7 +22,10 @@ beforeEach(async () => {
   }
 });
 
-async function seedEvent(channel: string, payload: Record<string, unknown>, atIso: string) {
+type JsonScalar = string | number | boolean | null;
+type JsonPayload = { [key: string]: JsonScalar | JsonPayload };
+
+async function seedEvent(channel: string, payload: JsonPayload, atIso: string) {
   const sql = postgres(env.TEST_SUPERUSER_DSN, { max: 1 });
   try {
     // postgres-js sends `${JSON.stringify(p)}::jsonb` as a JSON
