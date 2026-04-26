@@ -18,6 +18,9 @@
     "noTickets": "zz_kanban_noTickets",
     "departmentNotFound": "zz_kanban_departmentNotFound"
   },
+  "hygiene": {
+    "empty": "zz_hygiene_empty"
+  },
   "ticketDetail": {
     "history": "zz_td_history",
     "noHistory": "zz_td_noHistory",

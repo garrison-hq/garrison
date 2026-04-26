@@ -18,6 +18,9 @@
     "noTickets": "No open tickets in this department.",
     "departmentNotFound": "Department not found."
   },
+  "hygiene": {
+    "empty": "No hygiene issues to triage. Rows appear here when transitions land with a non-clean hygiene_status."
+  },
   "ticketDetail": {
     "history": "Transition history",
     "noHistory": "No transitions yet.",
