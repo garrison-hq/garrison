@@ -53,7 +53,7 @@ VALUES
    'engineering', 'Engineering', 3, '/tmp/garrison-dev/engineering',
    '{"columns":[{"slug":"todo","label":"To do"},{"slug":"in_dev","label":"In dev"},{"slug":"in_review","label":"In review"},{"slug":"done","label":"Done"}]}'::jsonb),
   ('00000000-0000-0000-0000-00000000d002', '00000000-0000-0000-0000-00000000c001',
-   'qa', 'Quality Assurance', 2, '/tmp/garrison-dev/qa',
+   'qa-engineer', 'QA Engineering', 2, '/tmp/garrison-dev/qa-engineer',
    '{"columns":[{"slug":"todo","label":"To do"},{"slug":"in_dev","label":"In dev"},{"slug":"in_review","label":"In review"},{"slug":"done","label":"Done"}]}'::jsonb),
   ('00000000-0000-0000-0000-00000000d003', '00000000-0000-0000-0000-00000000c001',
    'docs', 'Documentation', 1, '/tmp/garrison-dev/docs',
@@ -238,7 +238,7 @@ VALUES
      'agent_instance_id', '00000000-0000-0000-0000-bbbb00000001',
      'event_id', 'evt-004'),
    now() - interval '3 days' + interval '4 minutes'),
-  ('work.ticket.transitioned.qa.in_review.done',
+  ('work.ticket.transitioned.qa-engineer.in_review.done',
    jsonb_build_object(
      'ticket_id', '00000000-0000-0000-0000-aaaa00010002',
      'agent_instance_id', '00000000-0000-0000-0000-bbbb00000004',
