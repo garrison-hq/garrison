@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import { useTranslations } from 'next-intl';
 import type { InviteRow } from '@/lib/auth/invites';
 
 interface Props {
@@ -12,6 +13,7 @@ interface Props {
 // link, the expiration timestamp, and a revoke button. Revoke calls
 // the API and refreshes the page.
 export function PendingInvitesList({ invites, baseUrl }: Props) {
+  const t = useTranslations('auth.admin');
   const [busyId, setBusyId] = useState<string | null>(null);
 
   async function revoke(id: string) {
@@ -30,11 +32,7 @@ export function PendingInvitesList({ invites, baseUrl }: Props) {
   }
 
   if (invites.length === 0) {
-    return (
-      <p className="text-text-3 text-xs">
-        No pending invites.
-      </p>
-    );
+    return <p className="text-text-3 text-xs">{t('noPending')}</p>;
   }
 
   return (
@@ -47,7 +45,7 @@ export function PendingInvitesList({ invites, baseUrl }: Props) {
               {link}
             </code>
             <span className="text-text-3 text-xs whitespace-nowrap">
-              expires {new Date(inv.expiresAt).toISOString().slice(0, 16)}Z
+              {t('expires', { when: new Date(inv.expiresAt).toISOString().slice(0, 16) + 'Z' })}
             </span>
             <button
               type="button"
@@ -56,7 +54,7 @@ export function PendingInvitesList({ invites, baseUrl }: Props) {
               className="text-err text-xs px-2 py-1 border border-border-1 rounded disabled:opacity-60"
               data-testid="revoke-invite"
             >
-              {busyId === inv.id ? 'revoking…' : 'revoke'}
+              {busyId === inv.id ? t('revoking') : t('revoke')}
             </button>
           </li>
         );

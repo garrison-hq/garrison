@@ -139,15 +139,32 @@ async function startDashboard(env: HarnessEnv): Promise<void> {
     // not running yet — fall through and start one
   }
 
+  // Make sure the test-mode `zz` catalog exists before the build:
+  // GARRISON_TEST_MODE=1 expands the locale list to ['en', 'zz']
+  // (lib/i18n/config.ts) and next-intl's loader fails the build if
+  // messages/zz.json is missing. The fixture under
+  // tests/fixtures/i18n/zz.json is the canonical source.
+  const fixture = join(DASHBOARD_DIR, 'tests', 'fixtures', 'i18n', 'zz.json');
+  const target = join(DASHBOARD_DIR, 'messages', 'zz.json');
+  if (existsSync(fixture) && !existsSync(target)) {
+    const { copyFileSync } = await import('node:fs');
+    copyFileSync(fixture, target);
+  }
+
   // Build once if .next/standalone isn't already present. We use
   // `next start` rather than `next dev` for tests because Turbopack's
   // dev-mode root detection has been flaky on this layout (see M3
   // retro notes for T006). `next start` runs the prebuilt server and
   // is closer to production behavior anyway.
+  //
+  // GARRISON_TEST_MODE=1 is set here AND in the runtime spawn below
+  // because the locale list in lib/i18n/config.ts is read at both
+  // build time (next-intl bakes the catalog list into the bundle)
+  // and request time.
   if (!existsSync(join(DASHBOARD_DIR, '.next', 'BUILD_ID'))) {
     const buildResult = spawnSync('bun', ['run', 'build'], {
       cwd: DASHBOARD_DIR,
-      env: { ...process.env, ...env },
+      env: { ...process.env, ...env, GARRISON_TEST_MODE: '1' },
       stdio: 'inherit',
     });
     if (buildResult.status !== 0) {

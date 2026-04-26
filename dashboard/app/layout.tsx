@@ -1,17 +1,14 @@
-import type { Metadata } from 'next';
+// Root layout — passthrough only. The actual <html>/<body> shell
+// lives in app/[locale]/layout.tsx so it can wrap children in
+// NextIntlClientProvider with the resolved locale + catalog. This
+// file exists because Next.js requires app/layout.tsx; per
+// next-intl App Router conventions, it just renders {children}.
+//
+// Global CSS still imports here so it ships in every render
+// regardless of which [locale] segment is active.
+
 import './globals.css';
 
-export const metadata: Metadata = {
-  title: 'Garrison',
-  description: 'Operator console for the Garrison agent orchestration system.',
-};
-
 export default function RootLayout({ children }: { children: React.ReactNode }) {
-  // T009 will resolve the operator's theme_preference and rewrite the
-  // data-theme attribute server-side. T002 ships dark by default.
-  return (
-    <html lang="en" data-theme="dark">
-      <body>{children}</body>
-    </html>
-  );
+  return children;
 }

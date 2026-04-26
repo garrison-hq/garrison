@@ -1,30 +1,26 @@
 'use client';
 
-import { Suspense, useState } from 'react';
-import { useRouter, useSearchParams } from 'next/navigation';
+import { use, useState } from 'react';
+import { useRouter } from 'next/navigation';
+import { useTranslations } from 'next-intl';
 
-// Login form. Posts to better-auth's sign-in/email endpoint via
-// fetch (NOT Server Action) so the cookie set in the response
-// reaches the browser's cookie jar without a server-side redirect
-// dance. better-auth handles the cookie scheme.
+// Invite-redemption form. Public route (allow-listed in middleware).
+// Posts to /api/invites/redeem; on success, the response carries a
+// Set-Cookie that logs the new operator in, and we redirect to the
+// org overview at /.
+//
+// The token is read from the URL pathname; the operator never types
+// it. better-auth's session cookie is set by the redeem route's
+// forwarded headers.
 
-export default function LoginPage() {
-  return (
-    <Suspense
-      fallback={
-        <main className="min-h-screen flex items-center justify-center p-8">
-          <p className="text-text-2 text-sm">loading…</p>
-        </main>
-      }
-    >
-      <LoginForm />
-    </Suspense>
-  );
-}
-
-function LoginForm() {
+export default function RedeemInvitePage({
+  params,
+}: {
+  params: Promise<{ token: string }>;
+}) {
+  const { token } = use(params);
+  const t = useTranslations('auth.invite');
   const router = useRouter();
-  const search = useSearchParams();
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
 
@@ -34,21 +30,22 @@ function LoginForm() {
     setPending(true);
     const fd = new FormData(e.currentTarget);
     try {
-      const res = await fetch('/api/auth/sign-in/email', {
+      const res = await fetch('/api/invites/redeem', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({
+          token,
+          name: String(fd.get('name') ?? ''),
           email: String(fd.get('email') ?? ''),
           password: String(fd.get('password') ?? ''),
         }),
-        credentials: 'include',
       });
       if (!res.ok) {
-        const body = (await res.json().catch(() => ({}))) as { message?: string };
-        throw new Error(body.message ?? `sign-in failed (HTTP ${res.status})`);
+        const body = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(body.error ?? `redeem failed (HTTP ${res.status})`);
       }
-      const redirectTo = search.get('redirect') ?? '/';
-      router.push(redirectTo);
+      router.push('/');
       router.refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -63,10 +60,23 @@ function LoginForm() {
         onSubmit={onSubmit}
         className="w-full max-w-sm space-y-4 bg-surface-1 border border-border-1 rounded p-6"
       >
-        <h1 className="text-text-1 text-lg font-semibold">Sign in</h1>
+        <div className="space-y-1">
+          <h1 className="text-text-1 text-lg font-semibold">{t('heading')}</h1>
+          <p className="text-text-3 text-xs">{t('description')}</p>
+        </div>
 
         <label className="block space-y-1">
-          <span className="text-text-2 text-xs">Email</span>
+          <span className="text-text-2 text-xs">{t('name')}</span>
+          <input
+            name="name"
+            type="text"
+            required
+            className="w-full bg-surface-2 border border-border-1 rounded px-2 py-1.5 text-text-1"
+          />
+        </label>
+
+        <label className="block space-y-1">
+          <span className="text-text-2 text-xs">{t('email')}</span>
           <input
             name="email"
             type="email"
@@ -76,11 +86,12 @@ function LoginForm() {
         </label>
 
         <label className="block space-y-1">
-          <span className="text-text-2 text-xs">Password</span>
+          <span className="text-text-2 text-xs">{t('password')}</span>
           <input
             name="password"
             type="password"
             required
+            minLength={8}
             className="w-full bg-surface-2 border border-border-1 rounded px-2 py-1.5 text-text-1"
           />
         </label>
@@ -92,7 +103,7 @@ function LoginForm() {
           disabled={pending}
           className="w-full bg-accent text-bg rounded px-3 py-2 font-medium disabled:opacity-60"
         >
-          {pending ? 'signing in…' : 'Sign in'}
+          {pending ? t('submitting') : t('submit')}
         </button>
       </form>
     </main>

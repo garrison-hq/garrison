@@ -1,10 +1,12 @@
 'use client';
 
 import { useState } from 'react';
+import { useTranslations } from 'next-intl';
 
 // One-button "generate invite" form. Posts to /api/invites and
 // reloads the parent page so the new invite appears in the list.
 export function GenerateInviteForm() {
+  const t = useTranslations('auth.admin');
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -36,7 +38,7 @@ export function GenerateInviteForm() {
         className="bg-accent text-bg rounded px-3 py-1.5 text-sm font-medium disabled:opacity-60"
         data-testid="generate-invite"
       >
-        {pending ? 'generating…' : 'Generate invite'}
+        {pending ? t('generating') : t('generate')}
       </button>
       {error ? <p className="text-err text-xs">{error}</p> : null}
     </form>

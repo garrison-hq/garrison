@@ -1,0 +1,66 @@
+{
+  "common": {
+    "loading": "loading…",
+    "refresh": "refresh",
+    "expand": "expand",
+    "collapse": "collapse",
+    "logOut": "Log out"
+  },
+  "nav": {
+    "orgOverview": "Org overview",
+    "departments": "Departments",
+    "tickets": "Tickets",
+    "activity": "Activity",
+    "hygiene": "Hygiene",
+    "vault": "Vault",
+    "agents": "Agents",
+    "admin": "Admin"
+  },
+  "auth": {
+    "signIn": {
+      "heading": "Sign in",
+      "email": "Email",
+      "password": "Password",
+      "submit": "Sign in",
+      "submitting": "signing in…"
+    },
+    "setup": {
+      "heading": "First-run setup",
+      "description": "Create the inaugural operator account. This page disappears once an account exists.",
+      "name": "Name",
+      "email": "Email",
+      "password": "Password",
+      "submit": "Create operator account"
+    },
+    "invite": {
+      "heading": "Accept invite",
+      "description": "You were invited to join this Garrison instance as an operator. Set your account details to continue.",
+      "name": "Name",
+      "email": "Email",
+      "password": "Password",
+      "submit": "Create account",
+      "submitting": "redeeming…"
+    },
+    "admin": {
+      "heading": "Operator invites",
+      "description": "Generate a one-time link to invite an additional operator. Share the link out-of-band; it expires after 72 hours.",
+      "generate": "Generate invite",
+      "generating": "generating…",
+      "noPending": "No pending invites.",
+      "expires": "expires {when}",
+      "revoke": "revoke",
+      "revoking": "revoking…"
+    }
+  },
+  "errors": {
+    "auth": {
+      "no_session": "You're not signed in.",
+      "invite_not_found": "Invite link does not exist.",
+      "invite_expired": "Invite link has expired.",
+      "invite_revoked": "Invite link was revoked.",
+      "invite_already_redeemed": "Invite link has already been used.",
+      "first_run_locked": "First-run setup is no longer available.",
+      "email_already_exists": "An account with this email already exists."
+    }
+  }
+}

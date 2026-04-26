@@ -1,4 +1,11 @@
 import type { NextConfig } from 'next';
+import createNextIntlPlugin from 'next-intl/plugin';
+
+// next-intl's plugin wires lib/i18n/request.ts into the build so the
+// catalog for the active locale resolves on every request. The
+// plugin is the only published path for the App Router; configuring
+// next-intl manually requires reimplementing what this plugin does.
+const withNextIntl = createNextIntlPlugin('./lib/i18n/request.ts');
 
 const nextConfig: NextConfig = {
   // Standalone output is required for the production Docker image (T019).
@@ -14,4 +21,4 @@ const nextConfig: NextConfig = {
   },
 };
 
-export default nextConfig;
+export default withNextIntl(nextConfig);

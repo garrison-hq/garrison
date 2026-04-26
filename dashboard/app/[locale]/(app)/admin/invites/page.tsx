@@ -1,4 +1,5 @@
 import { headers } from 'next/headers';
+import { getTranslations } from 'next-intl/server';
 import { listPendingInvites } from '@/lib/auth/invites';
 import { PendingInvitesList } from '@/components/features/invites/PendingInvitesList';
 import { GenerateInviteForm } from '@/components/features/invites/GenerateInviteForm';
@@ -15,15 +16,13 @@ export default async function AdminInvitesPage() {
   const proto = h.get('x-forwarded-proto') ?? 'http';
   const host = h.get('host') ?? 'localhost';
   const baseUrl = `${proto}://${host}`;
+  const t = await getTranslations('auth.admin');
 
   return (
     <main className="max-w-2xl mx-auto p-8 space-y-6">
       <div>
-        <h1 className="text-text-1 text-lg font-semibold">Operator invites</h1>
-        <p className="text-text-3 text-xs">
-          Generate a one-time link to invite an additional operator. Share the link out-of-band;
-          it expires after 72 hours.
-        </p>
+        <h1 className="text-text-1 text-lg font-semibold">{t('heading')}</h1>
+        <p className="text-text-3 text-xs">{t('description')}</p>
       </div>
       <GenerateInviteForm />
       <PendingInvitesList invites={invites} baseUrl={baseUrl} />

@@ -1,0 +1,66 @@
+{
+  "common": {
+    "loading": "zz_loading",
+    "refresh": "zz_refresh",
+    "expand": "zz_expand",
+    "collapse": "zz_collapse",
+    "logOut": "zz_logOut"
+  },
+  "nav": {
+    "orgOverview": "zz_orgOverview",
+    "departments": "zz_departments",
+    "tickets": "zz_tickets",
+    "activity": "zz_activity",
+    "hygiene": "zz_hygiene",
+    "vault": "zz_vault",
+    "agents": "zz_agents",
+    "admin": "zz_admin"
+  },
+  "auth": {
+    "signIn": {
+      "heading": "zz_signIn_heading",
+      "email": "zz_signIn_email",
+      "password": "zz_signIn_password",
+      "submit": "zz_signIn_submit",
+      "submitting": "zz_signIn_submitting"
+    },
+    "setup": {
+      "heading": "zz_setup_heading",
+      "description": "zz_setup_description",
+      "name": "zz_setup_name",
+      "email": "zz_setup_email",
+      "password": "zz_setup_password",
+      "submit": "zz_setup_submit"
+    },
+    "invite": {
+      "heading": "zz_invite_heading",
+      "description": "zz_invite_description",
+      "name": "zz_invite_name",
+      "email": "zz_invite_email",
+      "password": "zz_invite_password",
+      "submit": "zz_invite_submit",
+      "submitting": "zz_invite_submitting"
+    },
+    "admin": {
+      "heading": "zz_admin_heading",
+      "description": "zz_admin_description",
+      "generate": "zz_admin_generate",
+      "generating": "zz_admin_generating",
+      "noPending": "zz_admin_noPending",
+      "expires": "zz_admin_expires {when}",
+      "revoke": "zz_admin_revoke",
+      "revoking": "zz_admin_revoking"
+    }
+  },
+  "errors": {
+    "auth": {
+      "no_session": "zz_err_no_session",
+      "invite_not_found": "zz_err_invite_not_found",
+      "invite_expired": "zz_err_invite_expired",
+      "invite_revoked": "zz_err_invite_revoked",
+      "invite_already_redeemed": "zz_err_invite_already_redeemed",
+      "first_run_locked": "zz_err_first_run_locked",
+      "email_already_exists": "zz_err_email_already_exists"
+    }
+  }
+}

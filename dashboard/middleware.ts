@@ -1,28 +1,16 @@
 import { NextRequest, NextResponse } from 'next/server';
+import createIntlMiddleware from 'next-intl/middleware';
+import { routing } from '@/lib/i18n/routing';
 
-// Auth gate. Every route except the explicit allow-list redirects to
-// /login when the request has no better-auth session cookie.
+// Composed middleware. Order:
+//   1. next-intl rewrites the URL to attach the resolved locale
+//      to the request internally (with localePrefix: 'as-needed',
+//      `/login` resolves to the en catalog without changing the URL).
+//   2. The auth gate redirects unauthenticated requests to /login,
+//      preserving the original pathname in ?redirect=.
 //
-// Allow-list (no auth needed):
-//   /login                — login form
-//   /setup                — first-run wizard (the page itself
-//                            self-404s when users table is non-empty)
-//   /invite/[token]       — invite-redemption form (T007)
-//   /api/auth/**          — better-auth's built-in handlers
-//   /api/invites/redeem   — public POST consumed by /invite/[token]
-//                            (T007 wires this; the middleware exception
-//                            ships now so T007 can hit it without
-//                            another middleware edit)
-//   /api/sse/activity     — does its own session check + 401 (T015)
-//   /_next/**, /public/** — Next.js static assets
-//
-// We do NOT call better-auth's getSession() here. Edge-runtime
-// middleware shouldn't perform DB reads on every request; instead,
-// we look for the better-auth session cookie. If the cookie is
-// missing, redirect; if present, the downstream Server Component
-// validates it via getSession() and surfaces NoSession on
-// expired/forged tokens. Better-auth's cookie name is
-// `better-auth.session_token` (the default).
+// We let next-intl run first so the auth gate sees a locale-aware
+// pathname for redirect targets.
 
 const PUBLIC_PREFIXES = [
   '/login',
@@ -40,17 +28,58 @@ const SESSION_COOKIE_NAMES = [
   '__Secure-better-auth.session_token',
 ];
 
+const intlMiddleware = createIntlMiddleware(routing);
+
+function isPublic(pathname: string): boolean {
+  // Strip a leading /<locale>/ segment if next-intl prepended one
+  // (e.g. /en/login → /login) so the allow-list compares against the
+  // canonical path.
+  const stripped = stripLocale(pathname);
+  return PUBLIC_PREFIXES.some(
+    (prefix) => stripped === prefix || stripped.startsWith(prefix),
+  );
+}
+
+function stripLocale(pathname: string): string {
+  for (const locale of routing.locales) {
+    if (pathname === `/${locale}`) return '/';
+    if (pathname.startsWith(`/${locale}/`)) return pathname.slice(`/${locale}`.length);
+  }
+  return pathname;
+}
+
 export function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
 
-  // Public routes pass through unchanged.
-  if (PUBLIC_PREFIXES.some((prefix) => pathname === prefix || pathname.startsWith(prefix))) {
+  // /api/* paths are locale-agnostic — never run them through
+  // next-intl's middleware (which would otherwise try to inject a
+  // locale prefix and 404 our route handlers).
+  if (pathname.startsWith('/api/')) {
+    if (isPublic(pathname)) {
+      return NextResponse.next();
+    }
+    const hasSessionCookie = SESSION_COOKIE_NAMES.some(
+      (name) => req.cookies.get(name)?.value,
+    );
+    if (!hasSessionCookie) {
+      // For API calls, return a 401 rather than redirecting.
+      return NextResponse.json({ error: 'no_session' }, { status: 401 });
+    }
     return NextResponse.next();
   }
 
-  // Look for the better-auth session cookie. The actual token
-  // validation happens server-side in getSession(); we only gate
-  // access at the network edge.
+  // Run intl middleware first. It returns a NextResponse that may
+  // include a rewrite/redirect; we propagate it through whatever
+  // happens next so cookies + headers it set survive.
+  const intlResponse = intlMiddleware(req);
+
+  // Public routes: pass intl's response through unchanged.
+  if (isPublic(pathname)) {
+    return intlResponse;
+  }
+
+  // Auth gate: cookie-only check at the edge. The downstream
+  // Server Component validates the token in getSession().
   const hasSessionCookie = SESSION_COOKIE_NAMES.some(
     (name) => req.cookies.get(name)?.value,
   );
@@ -61,13 +90,11 @@ export function middleware(req: NextRequest) {
     return NextResponse.redirect(url);
   }
 
-  return NextResponse.next();
+  return intlResponse;
 }
 
 export const config = {
   // Run on every request except the explicit static-asset paths
-  // Next.js handles internally. The matcher is broad on purpose;
-  // PUBLIC_PREFIXES inside the function does the fine-grained
-  // allow-listing.
+  // Next.js handles internally.
   matcher: ['/((?!_next/static|_next/image|favicon.ico).*)'],
 };
