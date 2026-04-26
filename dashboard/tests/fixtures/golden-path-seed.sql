@@ -1,0 +1,17 @@
+-- T021 golden-path seed. Drives the full M3 acceptance journey
+-- against a single Postgres testcontainer. Seeds:
+--   1 company
+--   1 engineering department with 4-column workflow
+--   2 agents (engineer + qa-engineer)
+--   1 ticket with cost-blind-spot agent_instance (clean finalize, $0)
+--   1 ticket with sandbox-escape transition
+--   1 ticket with suspected_secret_emitted transition
+--   1 ticket with finalize_never_called transition
+--   3 vault entries (secret_metadata + agent_role_secrets) spanning
+--     both agents
+--   2 vault_access_log rows (1 per agent)
+--   1 10-event sequence in event_outbox for the activity feed
+--
+-- The seeding code is JS-side in tests/integration/golden-path.spec.ts
+-- so test cleanup hooks can drive it; this file documents the shape
+-- for human review.
