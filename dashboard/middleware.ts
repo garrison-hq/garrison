@@ -94,7 +94,13 @@ export function middleware(req: NextRequest) {
 }
 
 export const config = {
-  // Run on every request except the explicit static-asset paths
-  // Next.js handles internally.
-  matcher: ['/((?!_next/static|_next/image|favicon.ico).*)'],
+  // Run on every request except static-asset paths. Excluding them
+  // here (rather than allow-listing in PUBLIC_PREFIXES) is important:
+  // next-intl's middleware otherwise rewrites e.g. /favicon.svg to
+  // /en/favicon.svg, which 404s; and the auth gate would 307 brand
+  // assets to /login. Both produce broken-looking favicons + missing
+  // sidebar logos.
+  matcher: [
+    '/((?!_next/static|_next/image|favicon\\.ico|favicon\\.svg|favicon-dark\\.svg|favicon-light\\.svg|favicon-\\d+\\.png|apple-touch-icon\\.png|brand/).*)',
+  ],
 };
