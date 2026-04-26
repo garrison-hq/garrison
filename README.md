@@ -7,9 +7,16 @@
 
 # Garrison
 
-[![Build](https://img.shields.io/badge/build-local-lightgrey)](#running-the-supervisor-locally)
+[![CI](https://github.com/garrison-hq/garrison/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/garrison-hq/garrison/actions/workflows/ci.yml)
+[![Quality Gate](https://sonarcloud.io/api/project_badges/measure?project=garrison-hq_garrison&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=garrison-hq_garrison)
+[![Coverage](https://sonarcloud.io/api/project_badges/measure?project=garrison-hq_garrison&metric=coverage)](https://sonarcloud.io/component_measures?id=garrison-hq_garrison&metric=coverage)
+[![Reliability](https://sonarcloud.io/api/project_badges/measure?project=garrison-hq_garrison&metric=reliability_rating)](https://sonarcloud.io/component_measures?id=garrison-hq_garrison&metric=reliability_rating)
+[![Maintainability](https://sonarcloud.io/api/project_badges/measure?project=garrison-hq_garrison&metric=sqale_rating)](https://sonarcloud.io/component_measures?id=garrison-hq_garrison&metric=sqale_rating)
+[![Security](https://sonarcloud.io/api/project_badges/measure?project=garrison-hq_garrison&metric=security_rating)](https://sonarcloud.io/component_measures?id=garrison-hq_garrison&metric=security_rating)
 [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](./LICENSE)
 [![Go 1.25](https://img.shields.io/badge/go-1.25-00ADD8.svg)](https://go.dev/dl/)
+[![Next.js 16](https://img.shields.io/badge/next.js-16-black.svg)](https://nextjs.org/)
+[![Postgres 17](https://img.shields.io/badge/postgres-17-336791.svg)](https://www.postgresql.org/)
 
 Most agent orchestrators either burn tokens on idle heartbeats or lose
 everything between sessions. Garrison does neither.
