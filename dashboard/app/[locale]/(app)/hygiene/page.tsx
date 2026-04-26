@@ -34,7 +34,7 @@ export default async function HygienePage({
   ]);
 
   return (
-    <main className="p-6 space-y-4">
+    <div className="p-6 space-y-4">
       <div className="flex items-center justify-between">
         <h1 className="text-text-1 text-lg font-semibold">{navT('hygiene')}</h1>
         <RefreshButton />
@@ -42,6 +42,6 @@ export default async function HygienePage({
       <FailureModeFilter />
       <HygieneTable rows={hygiene.rows} emptyDescription={t('empty')} />
       <SoftPoll intervalMs={30_000} />
-    </main>
+    </div>
   );
 }

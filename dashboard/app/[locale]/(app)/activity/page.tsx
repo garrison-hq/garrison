@@ -7,10 +7,10 @@ export const dynamic = 'force-dynamic';
 export default async function ActivityPage() {
   const t = await getTranslations('nav');
   return (
-    <main className="p-6 space-y-4">
+    <div className="p-6 space-y-4">
       <h1 className="text-text-1 text-lg font-semibold">{t('activity')}</h1>
       <FilterChips />
       <ActivityFeed />
-    </main>
+    </div>
   );
 }

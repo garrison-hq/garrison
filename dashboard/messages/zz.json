@@ -6,6 +6,14 @@
     "collapse": "zz_collapse",
     "logOut": "zz_logOut"
   },
+  "a11y": {
+    "skipToContent": "zz_skipToContent"
+  },
+  "notFound": {
+    "title": "zz_notFound_title",
+    "description": "zz_notFound_description",
+    "back": "zz_notFound_back"
+  },
   "orgOverview": {
     "openTickets": "zz_openTickets",
     "activeAgents": "zz_activeAgents",
@@ -28,6 +36,7 @@
     "empty": "zz_activity_empty"
   },
   "vault": {
+    "sectionsLabel": "zz_vault_sectionsLabel",
     "secretsHeading": "zz_vault_secretsHeading",
     "auditHeading": "zz_vault_auditHeading",
     "matrixHeading": "zz_vault_matrixHeading",
@@ -53,6 +62,7 @@
     "sandboxEscape": "zz_td_sandboxEscape"
   },
   "nav": {
+    "primaryNavigationLabel": "zz_primaryNavigationLabel",
     "orgOverview": "zz_orgOverview",
     "departments": "zz_departments",
     "tickets": "zz_tickets",

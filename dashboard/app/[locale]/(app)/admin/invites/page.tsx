@@ -19,13 +19,13 @@ export default async function AdminInvitesPage() {
   const t = await getTranslations('auth.admin');
 
   return (
-    <main className="max-w-2xl mx-auto p-8 space-y-6">
+    <div className="max-w-2xl mx-auto p-8 space-y-6">
       <div>
         <h1 className="text-text-1 text-lg font-semibold">{t('heading')}</h1>
         <p className="text-text-3 text-xs">{t('description')}</p>
       </div>
       <GenerateInviteForm />
       <PendingInvitesList invites={invites} baseUrl={baseUrl} />
-    </main>
+    </div>
   );
 }

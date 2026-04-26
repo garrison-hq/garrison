@@ -1,3 +1,4 @@
+import { getTranslations } from 'next-intl/server';
 import { Sidebar } from '@/components/layout/Sidebar';
 import { Topbar } from '@/components/layout/Topbar';
 
@@ -9,7 +10,7 @@ import { Topbar } from '@/components/layout/Topbar';
 // the data-theme attribute on <html>; that layout reads the
 // operator's saved preference from the session.
 
-export default function AppLayout({
+export default async function AppLayout({
   children,
   panel,
 }: Readonly<{ children: React.ReactNode; panel: React.ReactNode }>) {
@@ -18,13 +19,20 @@ export default function AppLayout({
   // overlaying `children`. The two slots are siblings inside the
   // same scrollable column so the drawer's fixed positioning
   // anchors to the viewport, not to the children container.
+  const t = await getTranslations('a11y');
   return (
     <div className="min-h-screen flex flex-col">
+      <a
+        href="#main-content"
+        className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-50 focus:bg-surface-2 focus:text-text-1 focus:border focus:border-border-2 focus:rounded focus:px-3 focus:py-2 focus:text-sm"
+      >
+        {t('skipToContent')}
+      </a>
       <div className="flex flex-1 min-h-0">
         <Sidebar />
         <div className="flex-1 flex flex-col min-h-0">
           <Topbar />
-          <div className="flex-1 overflow-auto">{children}</div>
+          <main id="main-content" className="flex-1 overflow-auto">{children}</main>
         </div>
       </div>
       {panel}

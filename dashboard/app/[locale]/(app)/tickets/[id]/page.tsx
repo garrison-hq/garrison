@@ -18,11 +18,11 @@ export default async function TicketDetailPage({
     notFound();
   }
   return (
-    <main className="p-6 space-y-6 max-w-4xl">
+    <div className="p-6 space-y-6 max-w-4xl">
       <MetadataBlock metadata={detail.metadata} />
       <HistoryBlock history={detail.history} />
       <AgentInstancesBlock instances={detail.instances} />
       <PalaceLinksBlock ticketId={detail.metadata.id} />
-    </main>
+    </div>
   );
 }

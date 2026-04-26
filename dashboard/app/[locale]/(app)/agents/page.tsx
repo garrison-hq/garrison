@@ -14,7 +14,7 @@ export default async function AgentsPage() {
     getTranslations('agents'),
   ]);
   return (
-    <main className="p-6 space-y-4">
+    <div className="p-6 space-y-4">
       <div className="flex items-center justify-between">
         <h1 className="text-text-1 text-lg font-semibold">{navT('agents')}</h1>
         <RefreshButton />
@@ -25,6 +25,6 @@ export default async function AgentsPage() {
         <AgentsTable rows={rows} />
       )}
       <SoftPoll intervalMs={60_000} />
-    </main>
+    </div>
   );
 }
