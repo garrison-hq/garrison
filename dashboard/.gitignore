@@ -25,6 +25,7 @@ coverage/
 test-results/
 playwright-report/
 playwright/.cache/
+tests/integration/.harness/
 
 # Drizzle pull intermediate output (canonical schema lives at
 # drizzle/schema.ts; the _introspected/ subdir is regenerated each
