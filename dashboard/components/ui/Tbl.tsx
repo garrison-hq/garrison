@@ -14,20 +14,31 @@ export function Tbl({ children, ...rest }: HTMLAttributes<HTMLTableElement>) {
   );
 }
 
-export function Th({ children, ...rest }: HTMLAttributes<HTMLTableCellElement>) {
+export function Th({
+  children,
+  className = '',
+  ...rest
+}: HTMLAttributes<HTMLTableCellElement>) {
   return (
     <th
       {...rest}
-      className="text-left text-text-3 font-medium text-[11px] uppercase tracking-wider px-3 py-2 bg-surface-2 border-b border-border-1"
+      className={`text-text-3 font-medium text-[10.5px] uppercase tracking-[0.08em] px-3 py-2 bg-surface-2 border-b border-border-1 ${className || 'text-left'}`}
     >
       {children}
     </th>
   );
 }
 
-export function Td({ children, ...rest }: HTMLAttributes<HTMLTableCellElement>) {
+export function Td({
+  children,
+  className = '',
+  ...rest
+}: HTMLAttributes<HTMLTableCellElement>) {
   return (
-    <td {...rest} className="px-3 py-2 text-text-1 border-b border-border-1 last:border-b-0">
+    <td
+      {...rest}
+      className={`px-3 py-2 text-text-1 border-b border-border-1 last:border-b-0 ${className}`}
+    >
       {children}
     </td>
   );

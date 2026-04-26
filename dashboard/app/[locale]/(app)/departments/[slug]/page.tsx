@@ -1,8 +1,6 @@
 import { notFound } from 'next/navigation';
-import { getTranslations } from 'next-intl/server';
 import { fetchDepartmentBySlug, fetchKanban } from '@/lib/queries/kanban';
 import { KanbanBoard } from '@/components/features/kanban/KanbanBoard';
-import { EmptyState } from '@/components/ui/EmptyState';
 
 export const dynamic = 'force-dynamic';
 
@@ -17,19 +15,40 @@ export default async function DepartmentPage({
     notFound();
   }
   const tickets = await fetchKanban(slug);
-  const t = await getTranslations('kanban');
+
+  // Per-column counts for the header strip — exposed up here so
+  // the header reads as a primary nav cue, not a chrome detail.
+  const counts: Record<string, number> = {};
+  for (const c of dept.columns) counts[c.slug] = 0;
+  for (const t of tickets) {
+    if (counts[t.columnSlug] !== undefined) counts[t.columnSlug] += 1;
+  }
 
   return (
-    <main className="p-6 space-y-4">
-      <div className="flex items-center gap-3">
-        <h1 className="text-text-1 text-lg font-semibold font-mono">{dept.slug}</h1>
-        <span className="text-text-3 text-sm">{dept.name}</span>
-      </div>
-      {tickets.length === 0 && dept.columns.length > 0 ? (
-        <EmptyState description={t('noTickets')} />
-      ) : (
+    <div className="px-6 py-5 space-y-5 max-w-[1600px] mx-auto h-full flex flex-col">
+      <header className="space-y-2">
+        <div className="flex items-baseline gap-3">
+          <h1 className="text-text-1 text-2xl font-semibold tracking-tight">
+            {dept.name}
+          </h1>
+          <span className="text-text-3 text-xs font-mono">{dept.slug}</span>
+        </div>
+        <div className="flex items-center gap-5 text-[11px]">
+          {dept.columns.map((c) => (
+            <span key={c.slug} className="flex items-center gap-1.5">
+              <span className="text-text-3 uppercase tracking-[0.08em] text-[10.5px]">
+                {c.label}
+              </span>
+              <span className="text-text-1 font-mono font-tabular">
+                {counts[c.slug] ?? 0}
+              </span>
+            </span>
+          ))}
+        </div>
+      </header>
+      <div className="flex-1 min-h-0">
         <KanbanBoard dept={dept} tickets={tickets} />
-      )}
-    </main>
+      </div>
+    </div>
   );
 }

@@ -37,3 +37,21 @@ export function formatTimeOfDay(when: Date | string): string {
   const t = typeof when === 'string' ? new Date(when) : when;
   return t.toISOString().slice(11, 19);
 }
+
+// "Apr 26 17:37" — short calendar+time for transition history
+// rows. Used as the visible value; full ISO string sits on the
+// element's title attribute as a tooltip.
+const SHORT_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+export function formatShortDateTime(when: Date | string): string {
+  const t = typeof when === 'string' ? new Date(when) : when;
+  const m = SHORT_MONTHS[t.getUTCMonth()];
+  const d = String(t.getUTCDate()).padStart(2, '0');
+  const hh = String(t.getUTCHours()).padStart(2, '0');
+  const mm = String(t.getUTCMinutes()).padStart(2, '0');
+  return `${m} ${d} ${hh}:${mm}`;
+}
+
+export function formatIsoFull(when: Date | string): string {
+  const t = typeof when === 'string' ? new Date(when) : when;
+  return t.toISOString();
+}

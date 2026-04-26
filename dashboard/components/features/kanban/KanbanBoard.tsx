@@ -21,9 +21,14 @@ export function KanbanBoard({
     }
   }
   return (
-    <div className="flex gap-3 overflow-x-auto">
+    <div className="grid gap-3 h-full" style={{ gridTemplateColumns: `repeat(${dept.columns.length}, minmax(220px, 1fr))` }}>
       {dept.columns.map((c) => (
-        <KanbanColumn key={c.slug} slug={c.slug} label={c.label} tickets={byColumn.get(c.slug) ?? []} />
+        <KanbanColumn
+          key={c.slug}
+          slug={c.slug}
+          label={c.label}
+          tickets={byColumn.get(c.slug) ?? []}
+        />
       ))}
     </div>
   );
