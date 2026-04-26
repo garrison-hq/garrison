@@ -12,6 +12,15 @@ const toneClass: Record<Tone, string> = {
   ok: 'bg-ok',
 };
 
-export function StatusDot({ tone = 'neutral' }: Readonly<{ tone?: Tone }>) {
-  return <span className={`inline-block w-1.5 h-1.5 rounded-full ${toneClass[tone]}`} />;
+export function StatusDot({
+  tone = 'neutral',
+  pulse = false,
+}: Readonly<{ tone?: Tone; pulse?: boolean }>) {
+  return (
+    <span
+      className={`inline-block w-1.5 h-1.5 rounded-full ${toneClass[tone]} ${
+        pulse ? 'animate-pulse' : ''
+      }`}
+    />
+  );
 }
