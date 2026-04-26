@@ -34,7 +34,16 @@ export interface HarnessEnv {
   TEST_SUPERUSER_DSN: string;
 }
 
-export async function bootHarness(): Promise<HarnessEnv> {
+/**
+ * Boot the Postgres testcontainer + apply goose + Drizzle migrations
+ * + set role passwords. Returns the env vars the dashboard process
+ * (and the unit tests that talk to the DB directly) need.
+ *
+ * Idempotent across same-process re-imports via the `started`
+ * module-level handle, and across test-worker forks via the env
+ * file written to tests/integration/.harness/env.json.
+ */
+export async function bootDb(): Promise<HarnessEnv> {
   // Test workers re-import this module in their own process;
   // globalSetup's container handle is not visible to them. If the
   // env file already exists, trust it — the container is alive
@@ -102,12 +111,33 @@ export async function bootHarness(): Promise<HarnessEnv> {
     TEST_SUPERUSER_DSN: superUserDsn,
   };
   writeEnvFile(env);
+  return env;
+}
+
+/**
+ * Full Playwright-flavored boot: Postgres + migrations + dashboard.
+ * Vitest unit tests use bootDb only.
+ */
+export async function bootHarness(): Promise<HarnessEnv> {
+  const env = await bootDb();
   await startDashboard(env);
   return env;
 }
 
 async function startDashboard(env: HarnessEnv): Promise<void> {
   if (dashboardProc) return;
+
+  // Cross-process idempotency: if the dashboard is already
+  // listening on the configured port (started by globalSetup, which
+  // ran in a different process from this test worker), reuse it.
+  try {
+    const probe = await fetch(`${env.BETTER_AUTH_URL}/login`, { redirect: 'manual' });
+    if (probe.status < 500) {
+      return;
+    }
+  } catch {
+    // not running yet — fall through and start one
+  }
 
   // Build once if .next/standalone isn't already present. We use
   // `next start` rather than `next dev` for tests because Turbopack's
@@ -127,7 +157,7 @@ async function startDashboard(env: HarnessEnv): Promise<void> {
 
   const proc = spawn('bun', ['run', 'start'], {
     cwd: DASHBOARD_DIR,
-    env: { ...process.env, ...env },
+    env: { ...process.env, ...env, GARRISON_TEST_MODE: '1' },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   dashboardProc = proc;

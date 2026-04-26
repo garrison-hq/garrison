@@ -35,6 +35,15 @@ if (!secret) {
 export const auth = betterAuth({
   secret,
   baseURL: process.env.BETTER_AUTH_URL,
+  // Disable trusted-origin checking in test mode: integration tests
+  // call /api/auth and /api/invites/redeem from a Node fetch without
+  // an Origin header, which better-auth otherwise treats as a CSRF
+  // signal and rejects with 403. Production deploys keep the default.
+  trustedOrigins: process.env.GARRISON_TEST_MODE === '1' ? ['http://localhost:3010'] : undefined,
+  // Disable rate limiting in test mode. Better-auth's default
+  // bucket is small enough that the test suite (multiple sign-up
+  // attempts seeded between specs) trips it within seconds.
+  rateLimit: process.env.GARRISON_TEST_MODE === '1' ? { enabled: false } : undefined,
   // The dashboard tables use `id uuid DEFAULT gen_random_uuid()` per
   // plan §"data-model.md"; let Postgres generate IDs rather than have
   // better-auth pass nanoid-shaped strings into a uuid column.
