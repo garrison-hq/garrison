@@ -26,6 +26,11 @@ test-results/
 playwright-report/
 playwright/.cache/
 
+# Drizzle pull intermediate output (canonical schema lives at
+# drizzle/schema.ts; the _introspected/ subdir is regenerated each
+# time `bun run drizzle:pull` runs and is not source-of-truth).
+drizzle/_introspected/
+
 # OS / editor noise
 .DS_Store
 *.tsbuildinfo
