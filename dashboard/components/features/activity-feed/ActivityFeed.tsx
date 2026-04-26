@@ -44,7 +44,7 @@ function bucketEvent(buckets: Map<string, RunBucket>, ev: ActivityEvent): Map<st
     next.set(key, {
       runId,
       events: [...existing.events, ev],
-      latestAt: ts > existing.latestAt ? ts : existing.latestAt,
+      latestAt: Math.max(ts, existing.latestAt),
     });
   } else {
     next.set(key, {

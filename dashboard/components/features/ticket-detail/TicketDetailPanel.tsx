@@ -33,12 +33,12 @@ export function TicketDetailPanel({
     function onKey(e: KeyboardEvent) {
       if (e.key === 'Escape') router.back();
     }
-    window.addEventListener('keydown', onKey);
+    globalThis.addEventListener('keydown', onKey);
     // Lock body scroll while the drawer is open.
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
     return () => {
-      window.removeEventListener('keydown', onKey);
+      globalThis.removeEventListener('keydown', onKey);
       document.body.style.overflow = previousOverflow;
     };
   }, [router]);
@@ -51,6 +51,11 @@ export function TicketDetailPanel({
         aria-label="Close ticket panel"
         className="fixed inset-0 z-40 bg-black/50 garrison-fade-in"
       />
+      {/* Native <dialog open> has UA defaults that override Tailwind's
+          `fixed` positioning (position: absolute; left: 0; right: 0;
+          margin: auto) and push the underlying surface around. Use
+          <aside role="dialog" aria-modal="true"> instead — same a11y
+          semantics, no rogue UA styles. */}
       <aside
         role="dialog"
         aria-modal="true"

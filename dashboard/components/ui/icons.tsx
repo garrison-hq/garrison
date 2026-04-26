@@ -59,12 +59,13 @@ export const AgentIcon = (p: Props) => (
 
 export const AdminIcon = (p: Props) => (
   <svg {...base} {...p}>
-    <circle cx="8" cy="8" r="2" stroke="currentColor" strokeWidth="1.2" />
+    <circle cx="8" cy="6" r="2.5" stroke="currentColor" strokeWidth="1.2" />
     <path
-      d="M8 2v2M8 12v2M2 8h2M12 8h2M4 4l1.4 1.4M10.6 10.6L12 12M4 12l1.4-1.4M10.6 5.4L12 4"
+      d="M3 14c0-2.8 2.2-5 5-5s5 2.2 5 5"
       stroke="currentColor"
       strokeWidth="1.2"
       strokeLinecap="round"
+      fill="none"
     />
   </svg>
 );
