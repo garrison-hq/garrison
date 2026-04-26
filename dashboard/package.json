@@ -19,6 +19,7 @@
     "drizzle:migrate": "drizzle-kit migrate"
   },
   "dependencies": {
+    "@tanstack/react-query": "^5.100.5",
     "better-auth": "^1.6.9",
     "drizzle-orm": "^0.45.2",
     "next": "16.2.4",

@@ -6,6 +6,14 @@
     "collapse": "zz_collapse",
     "logOut": "zz_logOut"
   },
+  "orgOverview": {
+    "openTickets": "zz_openTickets",
+    "activeAgents": "zz_activeAgents",
+    "transitions24h": "zz_transitions24h",
+    "hygieneWarnings": "zz_hygieneWarnings",
+    "departmentsHeading": "zz_departmentsHeading",
+    "noDepartments": "zz_noDepartments"
+  },
   "nav": {
     "orgOverview": "zz_orgOverview",
     "departments": "zz_departments",

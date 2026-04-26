@@ -6,6 +6,14 @@
     "collapse": "collapse",
     "logOut": "Log out"
   },
+  "orgOverview": {
+    "openTickets": "open tickets",
+    "activeAgents": "active agents",
+    "transitions24h": "transitions 24h",
+    "hygieneWarnings": "hygiene warnings",
+    "departmentsHeading": "Departments",
+    "noDepartments": "No departments configured."
+  },
   "nav": {
     "orgOverview": "Org overview",
     "departments": "Departments",
