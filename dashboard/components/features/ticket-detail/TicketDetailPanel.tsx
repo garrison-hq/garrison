@@ -1,7 +1,6 @@
 'use client';
 
 import type { ReactNode } from 'react';
-import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useEffect } from 'react';
 
@@ -68,13 +67,18 @@ export function TicketDetailPanel({
           </button>
           <div className="flex items-center gap-3 text-xs">
             <span className="text-text-3 font-mono">{departmentSlug}</span>
-            <Link
+            {/* Plain <a> (not next/link): the user is already at
+                /tickets/<id> via the intercept, so an in-shell
+                Link to the same href is a no-op. A full anchor
+                triggers a hard navigation, which re-resolves the
+                URL fresh — the intercept doesn't fire on initial
+                page loads, so the full page renders. */}
+            <a
               href={`/tickets/${ticketId}`}
               className="text-text-3 hover:text-text-1"
-              prefetch={false}
             >
               open full →
-            </Link>
+            </a>
           </div>
         </div>
         <div className="p-6 space-y-6">{children}</div>
