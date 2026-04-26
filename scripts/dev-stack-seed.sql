@@ -192,7 +192,51 @@ VALUES
    '00000000-0000-0000-0000-00000000d002', '00000000-0000-0000-0000-aaaa00010001',
    'qa-engineer', 'running',
    now() - interval '47 seconds', NULL,
-   NULL, NULL, 'normal')
+   NULL, NULL, 'normal'),
+  -- Additional completed runs spread across the three departments
+  -- so the activity feed has more than a handful of run buckets
+  -- to scroll through. Each instance becomes one collapsed run
+  -- group on /activity (events keyed by agent_instance_id).
+  ('00000000-0000-0000-0000-bbbb00000008',
+   '00000000-0000-0000-0000-00000000d001', '00000000-0000-0000-0000-aaaa00000005',
+   'engineer', 'completed',
+   now() - interval '3 days 1 hour', now() - interval '3 days' + interval '40 minutes',
+   'finalize_ticket called', 0.041800, 'normal'),
+  ('00000000-0000-0000-0000-bbbb00000009',
+   '00000000-0000-0000-0000-00000000d001', '00000000-0000-0000-0000-aaaa00000004',
+   'engineer', 'completed',
+   now() - interval '2 days', now() - interval '2 days' + interval '8 minutes',
+   'finalize_ticket called', 0.058200, 'normal'),
+  ('00000000-0000-0000-0000-bbbb0000000a',
+   '00000000-0000-0000-0000-00000000d001', '00000000-0000-0000-0000-aaaa00000001',
+   'engineer', 'completed',
+   now() - interval '6 hours', now() - interval '6 hours' + interval '2 minutes',
+   'rate_limit_backoff', 0.003900, 'normal'),
+  ('00000000-0000-0000-0000-bbbb0000000b',
+   '00000000-0000-0000-0000-00000000d002', '00000000-0000-0000-0000-aaaa00010002',
+   'qa-engineer', 'completed',
+   now() - interval '2 days 12 hours', now() - interval '2 days 12 hours' + interval '5 minutes',
+   'finalize_ticket called', 0.018400, 'normal'),
+  ('00000000-0000-0000-0000-bbbb0000000c',
+   '00000000-0000-0000-0000-00000000d002', '00000000-0000-0000-0000-aaaa00010001',
+   'qa-engineer', 'completed',
+   now() - interval '1 day 4 hours', now() - interval '1 day 4 hours' + interval '9 minutes',
+   'finalize_ticket called', 0.024500, 'normal'),
+  ('00000000-0000-0000-0000-bbbb0000000d',
+   '00000000-0000-0000-0000-00000000d003', '00000000-0000-0000-0000-aaaa00020001',
+   'tech-writer', 'completed',
+   now() - interval '20 hours', now() - interval '20 hours' + interval '4 minutes',
+   'finalize_ticket called', 0.011200, 'normal'),
+  ('00000000-0000-0000-0000-bbbb0000000e',
+   '00000000-0000-0000-0000-00000000d001', '00000000-0000-0000-0000-aaaa00000002',
+   'engineer', 'completed',
+   now() - interval '4 hours', now() - interval '4 hours' + interval '7 minutes',
+   'finalize_ticket called', 0.031600, 'normal'),
+  ('00000000-0000-0000-0000-bbbb0000000f',
+   '00000000-0000-0000-0000-00000000d001', '00000000-0000-0000-0000-aaaa00000001',
+   'engineer', 'completed',
+   now() - interval '90 minutes', now() - interval '90 minutes' + interval '3 minutes',
+   'finalize_ticket called', 0.014700, 'normal')
 ON CONFLICT (id) DO NOTHING;
 
 -- =========================================================================
@@ -224,7 +268,51 @@ VALUES
   -- Suspected-secret-emitted failure mode (the M2.3 vault scanner output)
   ('00000000-0000-0000-0000-aaaa00000003', 'in_dev', 'todo',
    '00000000-0000-0000-0000-bbbb00000005', 'suspected_secret_emitted',
-   now() - interval '14 hours' + interval '4 minutes');
+   now() - interval '14 hours' + interval '4 minutes'),
+
+  -- Additional clean transitions across all three departments so
+  -- /activity has a richer timeline. One per agent_instance from
+  -- bbbb00000008..bbbb0000000f, telling the lifecycle story for
+  -- each run (todo → in_dev → in_review → done).
+  ('00000000-0000-0000-0000-aaaa00000005', 'in_dev', 'in_review',
+   '00000000-0000-0000-0000-bbbb00000008', 'clean',
+   now() - interval '3 days' + interval '20 minutes'),
+  ('00000000-0000-0000-0000-aaaa00000004', 'todo', 'in_dev',
+   '00000000-0000-0000-0000-bbbb00000009', 'clean',
+   now() - interval '2 days' + interval '4 minutes'),
+  ('00000000-0000-0000-0000-aaaa00000001', 'todo', 'in_dev',
+   '00000000-0000-0000-0000-bbbb0000000a', 'clean',
+   now() - interval '6 hours' + interval '1 minute'),
+  ('00000000-0000-0000-0000-aaaa00000001', 'in_dev', 'todo',
+   '00000000-0000-0000-0000-bbbb0000000a', 'clean',
+   now() - interval '6 hours' + interval '2 minutes'),
+  ('00000000-0000-0000-0000-aaaa00010002', 'in_dev', 'in_review',
+   '00000000-0000-0000-0000-bbbb0000000b', 'clean',
+   now() - interval '2 days 12 hours' + interval '3 minutes'),
+  ('00000000-0000-0000-0000-aaaa00010001', 'todo', 'in_dev',
+   '00000000-0000-0000-0000-bbbb0000000c', 'clean',
+   now() - interval '1 day 4 hours' + interval '2 minutes'),
+  ('00000000-0000-0000-0000-aaaa00010001', 'in_dev', 'in_review',
+   '00000000-0000-0000-0000-bbbb0000000c', 'clean',
+   now() - interval '1 day 4 hours' + interval '8 minutes'),
+  ('00000000-0000-0000-0000-aaaa00020001', 'todo', 'in_dev',
+   '00000000-0000-0000-0000-bbbb0000000d', 'clean',
+   now() - interval '20 hours' + interval '1 minute'),
+  ('00000000-0000-0000-0000-aaaa00020001', 'in_dev', 'todo',
+   '00000000-0000-0000-0000-bbbb0000000d', 'clean',
+   now() - interval '20 hours' + interval '4 minutes'),
+  ('00000000-0000-0000-0000-aaaa00000002', 'todo', 'in_dev',
+   '00000000-0000-0000-0000-bbbb0000000e', 'clean',
+   now() - interval '4 hours' + interval '1 minute'),
+  ('00000000-0000-0000-0000-aaaa00000002', 'in_dev', 'in_review',
+   '00000000-0000-0000-0000-bbbb0000000e', 'clean',
+   now() - interval '4 hours' + interval '6 minutes'),
+  ('00000000-0000-0000-0000-aaaa00000001', 'todo', 'in_dev',
+   '00000000-0000-0000-0000-bbbb0000000f', 'clean',
+   now() - interval '90 minutes' + interval '1 minute'),
+  ('00000000-0000-0000-0000-aaaa00000001', 'in_dev', 'in_review',
+   '00000000-0000-0000-0000-bbbb0000000f', 'clean',
+   now() - interval '90 minutes' + interval '3 minutes');
 
 -- =========================================================================
 -- 6. Event outbox — recent events for the activity feed
