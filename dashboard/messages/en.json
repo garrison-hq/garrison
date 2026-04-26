@@ -6,6 +6,14 @@
     "collapse": "collapse",
     "logOut": "Log out"
   },
+  "a11y": {
+    "skipToContent": "Skip to main content"
+  },
+  "notFound": {
+    "title": "Page not found",
+    "description": "The page you tried to reach doesn't exist or has moved.",
+    "back": "Back to org overview"
+  },
   "orgOverview": {
     "openTickets": "open tickets",
     "activeAgents": "active agents",
@@ -28,6 +36,7 @@
     "empty": "No activity yet. Events appear here as agents spawn, transition tickets, and finalize."
   },
   "vault": {
+    "sectionsLabel": "Vault sections",
     "secretsHeading": "Secrets",
     "auditHeading": "Vault audit log",
     "matrixHeading": "Role × secret grants",
@@ -36,7 +45,29 @@
     "matrixTab": "matrix",
     "emptySecrets": "No secrets registered.",
     "emptyAudit": "No vault access events recorded.",
-    "emptyMatrix": "No agent-role-to-secret grants configured."
+    "emptyMatrix": "No agent-role-to-secret grants configured.",
+    "tracked": "tracked",
+    "events": "events",
+    "lastRotationSweep": "last rotation sweep",
+    "lastEvent": "last event",
+    "headers": {
+      "path": "path",
+      "roles": "roles",
+      "lastRotated": "last rotated",
+      "status": "status",
+      "timestamp": "timestamp",
+      "role": "role",
+      "secretPath": "secret path",
+      "outcome": "outcome",
+      "ticket": "ticket"
+    },
+    "legend": {
+      "granted": "granted",
+      "notGranted": "not granted"
+    },
+    "rolesCount": "roles",
+    "secretsCount": "secrets",
+    "grantsCount": "grants"
   },
   "ticketDetail": {
     "history": "Transition history",
@@ -70,6 +101,7 @@
     }
   },
   "nav": {
+    "primaryNavigationLabel": "Primary navigation",
     "orgOverview": "Org overview",
     "departments": "Departments",
     "tickets": "Tickets",
