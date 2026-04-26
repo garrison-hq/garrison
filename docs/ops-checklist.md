@@ -301,7 +301,104 @@ The `garrison_agent_ro` role has **no** grant on `vault_access_log`, `agent_role
 
 ---
 
+## M3 — operator dashboard
+
+The M3 milestone ships a Next.js 16 dashboard as a fourth container
+alongside supervisor + mempalace + socket-proxy. Reads M2-arc data
+through two new dashboard-scoped Postgres roles. No agent-facing
+role is touched.
+
+**1. Goose migration ordering**
+
+Run `goose up` BEFORE `bun run drizzle:migrate`. The goose migrations
+include `20260426000010_m3_dashboard_roles.sql` and
+`20260426000011_m3_dashboard_dept_grants.sql`, which create the two
+dashboard-scoped roles + their SELECT grants on supervisor-owned
+tables. Drizzle migrations land the dashboard-owned schema (better-
+auth tables + `operator_invites`) on top.
+
+```sh
+# from the supervisor directory
+goose -dir ../migrations postgres "${SUPERVISOR_DSN}" up
+```
+
+**2. Role passwords + LOGIN**
+
+Both M3 roles ship as `NOINHERIT NOLOGIN`. Set passwords + flip
+LOGIN at deployment time, mirroring the M2.2 `garrison_agent_mempalace`
+procedure.
+
+```sql
+-- as the DB owner
+ALTER ROLE garrison_dashboard_app WITH LOGIN PASSWORD '<random>';
+ALTER ROLE garrison_dashboard_ro  WITH LOGIN PASSWORD '<random>';
+```
+
+Persist both passwords to your operator secret store (NOT
+Infisical — Infisical is the agent-facing vault per the M2.3 threat
+model). The dashboard reads them at startup via `DASHBOARD_APP_DSN`
+and `DASHBOARD_RO_DSN` (see FR-002a–f and FR-021).
+
+**3. `BETTER_AUTH_SECRET` generation**
+
+```sh
+openssl rand -hex 32
+```
+
+Persist the value to the operator secret store and surface it to
+the dashboard container as `BETTER_AUTH_SECRET`. Rotation
+invalidates every existing operator session — generate + rotate
+during a low-traffic window.
+
+**4. Drizzle migration application**
+
+```sh
+cd dashboard
+bun install
+DASHBOARD_APP_DSN=<owner-dsn-or-app-role-dsn> bun run drizzle:migrate
+```
+
+The migration emits the five dashboard-owned tables (users,
+sessions, accounts, verifications, operator_invites) and a
+trailing GRANT block that gives `garrison_dashboard_app` CRUD on
+each. The grant block is appended automatically by
+`drizzle/scripts/append-grants.ts`; if you regenerate the
+migration locally, re-run `bun run drizzle:generate` to re-append.
+
+**5. Dashboard image digest pinning**
+
+```sh
+docker build -t garrison-dashboard:dev dashboard/
+docker images --digests garrison-dashboard:dev
+```
+
+Record the digest in your deployment notes. The runtime image is
+≤250 MB (verified at T019: 217 MB) and runs `node server.js`
+against the Next.js standalone output as the non-root `dashboard`
+user. Mirrors the M2.3 ops-checklist Infisical-image-pinning
+pattern.
+
+**6. First-run walkthrough**
+
+1. Bring up the compose stack: `docker compose up -d` from
+   `supervisor/`.
+2. Visit `http://localhost:3000` (or whatever
+   `BETTER_AUTH_URL` points at).
+3. The middleware redirects to `/setup` because the `users` table
+   is empty — fill in name + email + password + submit.
+4. The wizard auto-redirects to `/login`; sign in with the same
+   credentials.
+5. The org overview at `/` renders against the M2-arc data the
+   supervisor is producing.
+6. To invite a second operator, navigate to `/admin/invites`,
+   click **Generate invite**, share the link out-of-band. The
+   invitee opens the link and creates their account; both
+   operators see identical data thereafter (FR-002f).
+
+---
+
 ## Changelog
 
+- **2026-04-26**: M3 dashboard deployment section added.
 - **2026-04-24**: M2.3 Infisical deployment section added.
 - **2026-04-22**: Initial version. M2.1's `garrison_agent_ro` password discipline codified. M2.2 and M2.3 sections sketched based on planned milestone designs.
