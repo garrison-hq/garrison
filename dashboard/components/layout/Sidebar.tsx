@@ -12,7 +12,6 @@ import {
   HomeIcon,
   HygieneIcon,
   VaultIcon,
-  GearIcon,
 } from '@/components/ui/icons';
 
 // Sidebar — same vocabulary as .workspace/m3-mocks/garrison-reference/
@@ -105,9 +104,6 @@ export async function Sidebar() {
           </div>
           <div className="text-text-3 text-[10px] font-mono">operator</div>
         </div>
-        <span className="text-text-3 hover:text-text-1 cursor-default" title="Settings (M4+)">
-          <GearIcon />
-        </span>
       </div>
     </aside>
   );
