@@ -23,6 +23,7 @@ import (
 	"github.com/garrison-hq/garrison/supervisor/internal/mcpconfig"
 	"github.com/garrison-hq/garrison/supervisor/internal/mempalace"
 	"github.com/garrison-hq/garrison/supervisor/internal/store"
+	"github.com/garrison-hq/garrison/supervisor/internal/vault"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -94,6 +95,23 @@ type Deps struct {
 	// comes from config.DefaultFinalizeWriteTimeout.
 	Palace               *mempalace.Client
 	FinalizeWriteTimeout time.Duration
+
+	// M2.3: vault client (Fetcher interface so tests can inject a mock).
+	// CustomerID scopes grant queries and audit rows to this deployment's
+	// company row (D6.3 / OQ-2). Both are wired from config in cmd/supervisor.
+	// nil Vault is tolerated — vault steps are skipped (zero-grants fast path).
+	Vault      vault.Fetcher
+	CustomerID pgtype.UUID
+
+	// GrantsListerFn overrides the default ListGrantsForRole DB call when
+	// set. Tests inject mock grants without a real database. Production
+	// leaves this nil and the live deps.Queries path is used.
+	GrantsListerFn func(ctx context.Context, roleSlug string, customerID pgtype.UUID) ([]vault.GrantRow, error)
+
+	// AuditFn overrides the full vault audit write (Begin + WriteAuditRow + Commit)
+	// when set. Tests inject failure scenarios (e.g. returning ErrVaultAuditFailed)
+	// without needing a real pool. Production leaves this nil.
+	AuditFn func(ctx context.Context, row vault.AuditRow) error
 }
 
 // UseFake decides which branch Spawn runs. UseFakeAgent wins if set;
@@ -357,6 +375,32 @@ func runRealClaude(
 		return writeFail(ExitAgentMissing)
 	}
 
+	// --- M2.3 vault steps V1–V5 (D4.5 / FR-409 / FR-405 / FR-407 / FR-412) ---
+	// Rule 3 pre-check: run BEFORE the vault fetch so no Infisical request is
+	// made when the agent's mcp_config carries a banned server name (T013 /
+	// D4.5 ordering). mcpconfig.Write also checks Rule 3 inside WriteWithOps
+	// against the full composed config as a defence-in-depth guard.
+	if err := mcpconfig.CheckExtraServers(agent.McpConfig); err != nil {
+		if errors.Is(err, mcpconfig.ErrVaultMCPBanned) {
+			logger.Error("Rule 3 pre-check: vault-pattern server in agents.mcp_config", "err", err)
+			return writeFail(ExitVaultMCPInConfig)
+		}
+		logger.Error("Rule 3 pre-check: parse agents.mcp_config failed", "err", err)
+		return writeFail(ExitSpawnFailed)
+	}
+	fetched, vaultExit := vaultOrchestrate(ctx, deps, roleSlug, instanceID, ticketUUID, agent.AgentMD, logger)
+	if vaultExit != "" {
+		return writeFail(vaultExit)
+	}
+	// Ensure all fetched secrets are zeroed on any exit path from this point.
+	defer func() {
+		for k := range fetched {
+			sv := fetched[k]
+			sv.Zero()
+		}
+	}()
+	// --- end M2.3 vault steps ---
+
 	// Step 3a: wake-up context capture. Non-blocking on failure per FR-207b.
 	var wakeUpStdout string
 	wakeUpStatus := mempalace.StatusSkipped // M2.2 never writes 'skipped' in
@@ -391,20 +435,29 @@ func runRealClaude(
 	// entry with GARRISON_AGENT_INSTANCE_ID + GARRISON_DATABASE_URL env
 	// vars so the subprocess server scopes its already-committed check
 	// to this specific spawn per FR-260.
-	mcpPath, err := mcpconfig.Write(ctx, deps.MCPConfigDir, instanceID, deps.SupervisorBin, deps.AgentRODSN,
-		mcpconfig.MempalaceParams{
+	mcpPath, err := mcpconfig.Write(ctx, mcpconfig.WriteParams{
+		Dir:           deps.MCPConfigDir,
+		InstanceID:    instanceID,
+		SupervisorBin: deps.SupervisorBin,
+		DSN:           deps.AgentRODSN,
+		Mempalace: mcpconfig.MempalaceParams{
 			DockerBin:          deps.DockerBin,
 			MempalaceContainer: deps.MempalaceContainer,
 			PalacePath:         deps.PalacePath,
 			DockerHost:         deps.DockerHost,
 		},
-		mcpconfig.FinalizeParams{
+		Finalize: mcpconfig.FinalizeParams{
 			SupervisorBin:   deps.SupervisorBin,
 			AgentInstanceID: formatUUID(instanceID),
 			DatabaseURL:     deps.AgentRODSN,
 		},
-	)
+		ExtraServersJSON: agent.McpConfig, // M2.3 T013: agent-specific servers; Rule 3 checks these
+	})
 	if err != nil {
+		if errors.Is(err, mcpconfig.ErrVaultMCPBanned) {
+			logger.Error("mcpconfig: Rule 3 violation — vault-pattern MCP server", "err", err)
+			return writeFail(ExitVaultMCPInConfig)
+		}
 		logger.Error("mcpconfig.Write failed; recording spawn_failed", "err", err)
 		return writeFail(ExitSpawnFailed)
 	}
@@ -473,6 +526,19 @@ func runRealClaude(
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		return writeFail(ExitSpawnFailed)
+	}
+
+	// V6: inject secrets as env vars (FR-416). Secrets are appended to the
+	// subprocess environment; they are never logged or placed in argv.
+	// Zero() is called in the deferred cleanup above (after cmd.Start copies
+	// the values into the OS process).
+	if len(fetched) > 0 {
+		env := os.Environ()
+		for envVar, sv := range fetched {
+			//nolint:vaultlog // UnsafeBytes is the only safe path for env-var injection
+			env = append(env, envVar+"="+string(sv.UnsafeBytes()))
+		}
+		cmd.Env = env
 	}
 
 	// Step 7: cmd.Start.
@@ -1092,4 +1158,188 @@ func formatUUID(u pgtype.UUID) string {
 		u.Bytes[8:10],
 		u.Bytes[10:16],
 	)
+}
+
+// vaultAuditErrParams groups the per-fetch error context for auditVaultError,
+// keeping the function signature within the S107 parameter-count limit.
+type vaultAuditErrParams struct {
+	instanceID pgtype.UUID
+	ticketID   pgtype.UUID
+	secretPath string
+	customerID pgtype.UUID
+	outcome    vault.Outcome
+}
+
+// vaultOrchestrate executes vault steps V1 (list grants), V3 (fetch secrets),
+// V4 (Rule 1 leak scan), and V5 (audit). Extracted so unit tests can exercise
+// the vault logic without a real subprocess or DB connection.
+//
+// Returns (fetched, exitReason). exitReason=="" means "continue"; the caller
+// owns the returned map and must defer Zero() on every value. On any non-empty
+// exitReason the returned map is nil (secrets were zeroed internally).
+func vaultOrchestrate(
+	ctx context.Context,
+	deps Deps,
+	roleSlug string,
+	instanceID, ticketID pgtype.UUID,
+	agentMD string,
+	logger *slog.Logger,
+) (map[string]vault.SecretValue, string) {
+	if deps.Vault == nil {
+		return nil, ""
+	}
+
+	// V1: list grants (Rule 2). Zero rows → skip fetch entirely (FR-409).
+	grants, exitReason := listGrantsForRole(ctx, deps, roleSlug, logger)
+	if exitReason != "" {
+		return nil, exitReason
+	}
+	if len(grants) == 0 {
+		return nil, ""
+	}
+
+	// V3: fetch secrets.
+	fetched, ferr := deps.Vault.Fetch(ctx, grants)
+	if ferr != nil {
+		errOutcome := vault.OutcomeErrorFetching
+		if errors.Is(ferr, vault.ErrVaultPermissionDenied) {
+			errOutcome = vault.OutcomeDeniedInfisical
+		}
+		auditVaultError(ctx, deps.Pool, vaultAuditErrParams{
+			instanceID: instanceID,
+			ticketID:   ticketID,
+			secretPath: grants[0].SecretPath,
+			customerID: deps.CustomerID,
+			outcome:    errOutcome,
+		}, logger)
+		return nil, vault.ClassifyExitReason(ferr)
+	}
+
+	// V4: Rule 1 leak scan — reject if literal secret value found in agent.md.
+	if len(fetched) > 0 {
+		if leaked := vault.RuleOneLeakScan(agentMD, fetched); len(leaked) > 0 {
+			zeroFetched(fetched)
+			logger.Error("Rule 1: secret value leaked in agent.md; aborting spawn",
+				"leaked_env_vars", leaked,
+			)
+			return nil, ExitSecretLeakedInAgentMd
+		}
+	}
+
+	// V5: audit log write (fail-closed per Q9).
+	row := vault.AuditRow{
+		AgentInstanceID: instanceID,
+		TicketID:        ticketID,
+		SecretPath:      grants[0].SecretPath,
+		CustomerID:      deps.CustomerID,
+		Outcome:         vault.OutcomeGranted,
+		Timestamp:       time.Now().UTC(),
+	}
+	if exitReason = writeAuditGranted(ctx, deps, row, fetched, logger); exitReason != "" {
+		return nil, exitReason
+	}
+
+	return fetched, ""
+}
+
+// listGrantsForRole runs V1: lists vault grants for the role, using the
+// test override if available. Returns (grants, exitReason); non-empty
+// exitReason means the caller must abort.
+func listGrantsForRole(ctx context.Context, deps Deps, roleSlug string, logger *slog.Logger) ([]vault.GrantRow, string) {
+	if deps.GrantsListerFn != nil {
+		grants, err := deps.GrantsListerFn(ctx, roleSlug, deps.CustomerID)
+		if err != nil {
+			logger.Error("ListGrantsForRole failed", "err", err)
+			return nil, ExitSpawnFailed
+		}
+		return grants, ""
+	}
+	grantRows, err := deps.Queries.ListGrantsForRole(ctx, store.ListGrantsForRoleParams{
+		RoleSlug:   roleSlug,
+		CustomerID: deps.CustomerID,
+	})
+	if err != nil {
+		logger.Error("ListGrantsForRole failed", "err", err)
+		return nil, ExitSpawnFailed
+	}
+	var grants []vault.GrantRow
+	for _, r := range grantRows {
+		grants = append(grants, vault.GrantRow{
+			EnvVarName: r.EnvVarName,
+			SecretPath: r.SecretPath,
+			CustomerID: r.CustomerID,
+		})
+	}
+	return grants, ""
+}
+
+// writeAuditGranted runs V5: writes the success audit row (fail-closed per Q9).
+// Uses deps.AuditFn override if set (unit tests), otherwise uses the DB pool.
+// Returns non-empty exitReason on failure; zeroes fetched before returning.
+func writeAuditGranted(ctx context.Context, deps Deps, row vault.AuditRow, fetched map[string]vault.SecretValue, logger *slog.Logger) string {
+	if deps.AuditFn != nil {
+		if err := deps.AuditFn(ctx, row); err != nil {
+			logger.Error("vault audit: AuditFn failed; fail-closed", "err", err)
+			zeroFetched(fetched)
+			return ExitVaultAuditFailed
+		}
+		return ""
+	}
+	tx, err := deps.Pool.Begin(ctx)
+	if err != nil {
+		logger.Error("vault audit: begin tx failed; fail-closed", "err", err)
+		zeroFetched(fetched)
+		return ExitVaultAuditFailed
+	}
+	if err := vault.WriteAuditRow(ctx, tx, row); err != nil {
+		_ = tx.Rollback(ctx)
+		logger.Error("vault audit: WriteAuditRow failed; fail-closed", "err", err)
+		zeroFetched(fetched)
+		return ExitVaultAuditFailed
+	}
+	if err := tx.Commit(ctx); err != nil {
+		logger.Error("vault audit: commit failed; fail-closed", "err", err)
+		zeroFetched(fetched)
+		return ExitVaultAuditFailed
+	}
+	return ""
+}
+
+// zeroFetched zeroes every SecretValue in the map to prevent secrets from
+// outliving the current call frame.
+func zeroFetched(fetched map[string]vault.SecretValue) {
+	for k := range fetched {
+		sv := fetched[k]
+		sv.Zero()
+	}
+}
+
+// auditVaultError writes a best-effort vault_access_log row when Fetch fails.
+// Non-blocking on pool or write errors; caller still fails the spawn.
+func auditVaultError(ctx context.Context, pool *pgxpool.Pool, p vaultAuditErrParams, logger *slog.Logger) {
+	if pool == nil {
+		return
+	}
+	auditCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	tx, err := pool.Begin(auditCtx)
+	if err != nil {
+		logger.Warn("vault audit: begin tx failed during error audit", "err", err)
+		return
+	}
+	if wErr := vault.WriteAuditRow(auditCtx, tx, vault.AuditRow{
+		AgentInstanceID: p.instanceID,
+		TicketID:        p.ticketID,
+		SecretPath:      p.secretPath,
+		CustomerID:      p.customerID,
+		Outcome:         p.outcome,
+		Timestamp:       time.Now().UTC(),
+	}); wErr != nil {
+		_ = tx.Rollback(auditCtx)
+		logger.Warn("vault audit: WriteAuditRow failed during error audit", "err", wErr)
+		return
+	}
+	if cErr := tx.Commit(auditCtx); cErr != nil {
+		logger.Warn("vault audit: commit failed during error audit", "err", cErr)
+	}
 }

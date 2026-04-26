@@ -1,0 +1,8 @@
+# M2.3 Rule 2 fixture — engineer spawn with zero vault grants.
+# The supervisor must NOT inject any vault env vars when there are no grants.
+# #dump-env-to-file captures all env var names so the test can assert absence.
+#init-mcp-servers [{"name":"postgres","status":"connected"},{"name":"mempalace","status":"connected"},{"name":"finalize","status":"connected"}]
+{"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","content":[{"type":"text","text":"No vault env vars expected — proceeding with normal task."}]}}
+#dump-env-to-file env_dump.txt
+#finalize-tool-use-ok 1 {"ticket_id":"{{TICKET_ID}}","outcome":"M2.3 Rule 2 — zero grants, zero secrets injected","diary_entry":{"rationale":"The mock engineer completed the task without any vault secrets. No secret env vars were present.","artifacts":["env_dump.txt"],"blockers":[],"discoveries":[]},"kg_triples":[{"subject":"agent_mock","predicate":"zero_vault_grants","object":"ticket_{{TICKET_ID}}","valid_from":"now"}]}
+{"type":"result","subtype":"success","is_error":false,"duration_ms":800,"duration_api_ms":600,"total_cost_usd":0.002,"stop_reason":"end_turn","terminal_reason":"completed","result":"Finalized without vault secrets","session_id":"mock-session-m23-rule2","permission_denials":[]}

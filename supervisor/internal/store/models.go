@@ -20,6 +20,7 @@ type Agent struct {
 	PalaceWing   *string
 	Status       string
 	CreatedAt    pgtype.Timestamptz
+	McpConfig    []byte
 }
 
 type AgentInstance struct {
@@ -34,6 +35,17 @@ type AgentInstance struct {
 	TotalCostUsd pgtype.Numeric
 	WakeUpStatus *string
 	RoleSlug     string
+}
+
+type AgentRoleSecret struct {
+	RoleSlug   string
+	SecretPath string
+	EnvVarName string
+	CustomerID pgtype.UUID
+	GrantedAt  pgtype.Timestamptz
+	GrantedBy  string
+	CreatedAt  pgtype.Timestamptz
+	UpdatedAt  pgtype.Timestamptz
 }
 
 type Company struct {
@@ -61,6 +73,18 @@ type EventOutbox struct {
 	ProcessedAt pgtype.Timestamptz
 }
 
+type SecretMetadatum struct {
+	SecretPath       string
+	CustomerID       pgtype.UUID
+	Provenance       string
+	RotationCadence  pgtype.Interval
+	LastRotatedAt    pgtype.Timestamptz
+	LastAccessedAt   pgtype.Timestamptz
+	AllowedRoleSlugs []string
+	CreatedAt        pgtype.Timestamptz
+	UpdatedAt        pgtype.Timestamptz
+}
+
 type Ticket struct {
 	ID                 pgtype.UUID
 	DepartmentID       pgtype.UUID
@@ -81,4 +105,15 @@ type TicketTransition struct {
 	TriggeredByUser            bool
 	At                         pgtype.Timestamptz
 	HygieneStatus              *string
+}
+
+type VaultAccessLog struct {
+	ID              pgtype.UUID
+	AgentInstanceID pgtype.UUID
+	TicketID        pgtype.UUID
+	SecretPath      string
+	CustomerID      pgtype.UUID
+	Outcome         string
+	Timestamp       pgtype.Timestamptz
+	CreatedAt       pgtype.Timestamptz
 }

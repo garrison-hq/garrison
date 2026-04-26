@@ -1,0 +1,10 @@
+# M2.3 vault golden-path fixture — engineer spawn.
+# The supervisor injects EXAMPLE_API_KEY into the subprocess env via vault.
+# #write-env-to-file captures the env var value to prove injection worked.
+# Then #finalize-tool-use-ok commits the ticket (diary entry is clean — no
+# secret patterns — so hygiene_status stays 'clean').
+#init-mcp-servers [{"name":"postgres","status":"connected"},{"name":"mempalace","status":"connected"},{"name":"finalize","status":"connected"}]
+{"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","content":[{"type":"text","text":"Reading ticket objective. EXAMPLE_API_KEY is available in the env."}]}}
+#write-env-to-file EXAMPLE_API_KEY vault_secret_used.txt
+#finalize-tool-use-ok 1 {"ticket_id":"{{TICKET_ID}}","outcome":"M2.3 vault golden path — engineer used injected secret","diary_entry":{"rationale":"The mock engineer completed the task using the injected secret credential. The value was available via EXAMPLE_API_KEY env var.","artifacts":["vault_secret_used.txt"],"blockers":[],"discoveries":[]},"kg_triples":[{"subject":"agent_mock","predicate":"used_vault_secret","object":"ticket_{{TICKET_ID}}","valid_from":"now"}]}
+{"type":"result","subtype":"success","is_error":false,"duration_ms":950,"duration_api_ms":700,"total_cost_usd":0.003,"stop_reason":"end_turn","terminal_reason":"completed","result":"Finalized with vault secret","session_id":"mock-session-m23-vault","permission_denials":[]}

@@ -177,8 +177,131 @@ Periodically (or on suspected compromise):
 
 In-flight agent_instances at the moment of restart will be marked `failed` with `exit_reason = "supervisor_shutdown"` per M2.1's graceful shutdown contract. Their tickets return to `todo` on the next restart cycle (supervisor re-picks up unprocessed events via the `processed_at` fallback poll).
 
+### M2.3 — Infisical deployment
+
+M2.3 adds Infisical as the vault backend. Three new services (`infisical-postgres`, `infisical-redis`, `infisical`) join the compose topology. The supervisor gains three new env vars: `GARRISON_INFISICAL_ADDR`, `GARRISON_INFISICAL_CLIENT_ID`, `GARRISON_INFISICAL_CLIENT_SECRET`. All seven steps below are required before the supervisor can serve any vault-gated spawn.
+
+For architectural rationale see [docs/security/vault-threat-model.md](./security/vault-threat-model.md) Rules 1–7.
+
+**1. Bootstrap secret generation**
+
+Generate three secrets. Store them in your operator password manager. **Never commit them to the repository or any `.env` file that is checked in.**
+
+```bash
+# ENCRYPTION_KEY — 32-byte base64. Used by Infisical to encrypt secrets at rest.
+openssl rand -base64 32
+
+# AUTH_SECRET — 32-byte base64. Used by Infisical for session signing.
+openssl rand -base64 32
+
+# Infisical Postgres password — separate from garrison-postgres.
+openssl rand -base64 24
+```
+
+Set the following in your deployment environment (Coolify → Environment Variables, or `.env.local` for local dev only):
+
+```
+GARRISON_INFISICAL_ENCRYPTION_KEY=<result of first openssl rand>
+GARRISON_INFISICAL_AUTH_SECRET=<result of second openssl rand>
+GARRISON_INFISICAL_PG_PASSWORD=<result of third openssl rand>
+```
+
+**2. Image digest pinning**
+
+`docker-compose.yml` defaults to `infisical/infisical:latest`. For any environment beyond a developer laptop, pin by digest:
+
+```bash
+docker pull infisical/infisical:<version>
+docker inspect --format='{{index .RepoDigests 0}}' infisical/infisical:<version>
+# → infisical/infisical@sha256:<digest>
+```
+
+Set `GARRISON_INFISICAL_IMAGE=infisical/infisical@sha256:<digest>` in your deployment environment before deploying. Record the version and digest in the M2.3 acceptance evidence for audit purposes.
+
+**3. Post-deploy Machine Identity creation**
+
+After `docker compose up` (or Coolify deploy) brings all seven services healthy:
+
+1. Open the Infisical UI at your deployment's internal URL.
+2. Create the admin account on first login (Infisical's setup wizard).
+3. Create a Project for Garrison.
+4. Create two Machine Identities:
+   - `garrison-supervisor` — Universal Auth, read-only scope on the paths the supervisor needs (e.g. `/<customer_id>/operator/*`).
+   - `garrison-dashboard` — Universal Auth, read + write scope. Park the credentials in your password manager until M4 ships.
+5. For each ML, generate a client_id and client_secret. Copy both into your password manager.
+6. Set in your deployment environment:
+
+```
+GARRISON_INFISICAL_CLIENT_ID=<garrison-supervisor client_id>
+GARRISON_INFISICAL_CLIENT_SECRET=<garrison-supervisor client_secret>
+GARRISON_INFISICAL_PROJECT_ID=<project id from Infisical UI>
+GARRISON_INFISICAL_ENVIRONMENT=<environment slug, e.g. "production">
+```
+
+7. Restart the supervisor service. Check logs for `"vault client initialized"` — the supervisor logs this at `INFO` on successful startup.
+
+**4. Seeding an initial secret**
+
+The supervisor reads secrets by path. After seeding in Infisical, register it in Garrison's `secret_metadata` table:
+
+1. In the Infisical UI (or `infisical` CLI with the dashboard ML), add the secret at path `/<customer_id>/<provenance>/<name>`. Example: `/a1b2c3d4.../operator/GITHUB_TOKEN`.
+
+2. Register it in Garrison's Postgres:
+
+```sql
+INSERT INTO secret_metadata
+  (secret_path, customer_id, provenance, rotation_cadence, last_rotated_at)
+VALUES
+  ('/<customer_id>/operator/GITHUB_TOKEN',
+   '<customer-uuid>',
+   'operator_entered',
+   '90 days',
+   now());
+```
+
+This hand-sync path exists until M4 automates the registration flow.
+
+**5. Adding a grant**
+
+A grant ties a secret to an agent role. Grants are database-managed, not Infisical-managed.
+
+1. Create a migration file: `migrations/<timestamp>_m2_3_grant_<role>_<name>.sql`.
+
+2. Insert the grant:
+
+```sql
+INSERT INTO agent_role_secrets (role_slug, env_var_name, secret_path, customer_id, granted_by)
+VALUES ('engineer', 'GITHUB_TOKEN', '/<customer_id>/operator/GITHUB_TOKEN', '<customer-uuid>', 'operator');
+```
+
+3. The `rebuild_secret_metadata_role_slugs` trigger fires automatically and updates `secret_metadata.allowed_role_slugs`.
+
+4. Ship via PR and apply via `goose up` per normal migration discipline.
+
+**6. ML credential rotation**
+
+To rotate `garrison-supervisor`'s client_secret without downtime:
+
+1. In the Infisical UI, navigate to `garrison-supervisor` → Client Secrets → Add New.
+2. Copy the new client_secret.
+3. Set `GARRISON_INFISICAL_CLIENT_SECRET=<new_secret>` in your deployment environment (Coolify).
+4. Trigger a supervisor restart (Coolify → Redeploy or the equivalent for your setup).
+5. Verify logs show `"vault client initialized"` on restart.
+6. Delete the old client_secret in the Infisical UI.
+
+In-flight agent_instances during the restart follow the same `supervisor_shutdown` contract as M2.1.
+
+**7. Vault-table access policy**
+
+The `garrison_agent_ro` role has **no** grant on `vault_access_log`, `agent_role_secrets`, or `secret_metadata` (FR-412 consequence of Rule 3). This is intentional: Claude subprocesses must never be able to read audit records or grants.
+
+- Ad-hoc queries: use the supervisor's primary connection (DSN in `GARRISON_DATABASE_URL`) or connect as the DB owner via `psql`.
+- M3 dashboard reads: the M3 milestone will introduce a dedicated read-only role scoped to the vault tables.
+- Operators debugging a spawn: `SELECT * FROM vault_access_log WHERE ticket_id='<uuid>' ORDER BY accessed_at DESC LIMIT 20;` as the DB owner.
+
 ---
 
 ## Changelog
 
+- **2026-04-24**: M2.3 Infisical deployment section added.
 - **2026-04-22**: Initial version. M2.1's `garrison_agent_ro` password discipline codified. M2.2 and M2.3 sections sketched based on planned milestone designs.

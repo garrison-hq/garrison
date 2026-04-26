@@ -19,6 +19,7 @@ import (
 	"github.com/garrison-hq/garrison/supervisor/internal/pgdb"
 	"github.com/garrison-hq/garrison/supervisor/internal/spawn"
 	"github.com/garrison-hq/garrison/supervisor/internal/store"
+	"github.com/garrison-hq/garrison/supervisor/internal/vault"
 	"github.com/jackc/pgx/v5/pgtype"
 	"golang.org/x/sync/errgroup"
 )
@@ -277,6 +278,30 @@ func runDaemon() int {
 		}
 	}
 
+	// M2.3: construct the vault client from config. Nil when vault is not
+	// configured (fake-agent path, or real-Claude path without vault env vars).
+	// The vault steps in spawn.go are skipped when Vault==nil.
+	var vaultClient vault.Fetcher
+	if !cfg.UseFakeAgent && cfg.InfisicalAddr() != "" {
+		cid := cfg.CustomerID()
+		cidStr := fmt.Sprintf("%x-%x-%x-%x-%x",
+			cid.Bytes[0:4], cid.Bytes[4:6], cid.Bytes[6:8], cid.Bytes[8:10], cid.Bytes[10:16])
+		vc, vcErr := vault.NewClient(ctx, vault.ClientConfig{
+			SiteURL:      cfg.InfisicalAddr(),
+			ClientID:     cfg.InfisicalClientID(),
+			ClientSecret: cfg.InfisicalClientSecret(),
+			ProjectID:    cfg.InfisicalProjectID(),
+			Environment:  cfg.InfisicalEnvironment(),
+			CustomerID:   cidStr,
+			Logger:       logger,
+		})
+		if vcErr != nil {
+			logger.Error("vault: failed to create Infisical client; aborting startup", "err", vcErr)
+			return ExitFailure
+		}
+		vaultClient = vc
+	}
+
 	spawnDeps := spawn.Deps{
 		Pool:               pool,
 		Queries:            queries,
@@ -300,6 +325,9 @@ func runDaemon() int {
 		// M2.2.1 — palace + timeout for the atomic finalize writer.
 		Palace:               sharedPalaceClient,
 		FinalizeWriteTimeout: cfg.FinalizeWriteTimeout,
+		// M2.3 — vault client + customer scope for secret injection.
+		Vault:      vaultClient,
+		CustomerID: cfg.CustomerID(),
 	}
 
 	engineerHandler := func(ctx context.Context, eventID pgtype.UUID) error {
