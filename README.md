@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="brand/garrison-mono-dark.svg">
+    <img alt="garrison" src="brand/garrison-mono-light.svg" width="320">
+  </picture>
+</p>
+
 # Garrison
 
 [![Build](https://img.shields.io/badge/build-local-lightgrey)](#running-the-supervisor-locally)
