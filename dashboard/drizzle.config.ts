@@ -17,17 +17,21 @@ import type { Config } from 'drizzle-kit';
 //      these alongside the first Drizzle-generated migration.
 //
 // `out` is the only directory drizzle-kit writes to during `generate`.
-// `tablesFilter` constrains diff-generation to the dashboard-owned table
-// names so the goose-managed tables are NEVER targeted by drizzle-kit
-// migrations even if they end up in the schema file.
+// Points `schema` at schema.dashboard.ts (NOT the umbrella schema.ts
+// that re-exports both supervisor and dashboard tables). drizzle-kit
+// generate diffs the schema file's exports against the database;
+// pointing it at the dashboard-only file makes the generated SQL
+// cover only those five tables, regardless of whether the supervisor
+// section is present in the introspected types.
+//
+// Runtime clients (lib/db/{appClient,vaultRoClient}.ts) still import
+// from drizzle/schema.ts so query type-safety covers ALL tables;
+// only drizzle-kit's tooling reads this narrower file.
 export default {
-  schema: './drizzle/schema.ts',
+  schema: './drizzle/schema.dashboard.ts',
   out: './drizzle/migrations',
   dialect: 'postgresql',
   dbCredentials: {
     url: process.env.DASHBOARD_APP_DSN ?? '',
   },
-  // Allow-list: only dashboard-owned tables are eligible for diff-generation.
-  // Supervisor-owned tables in schema.ts are introspected types only.
-  tablesFilter: ['users', 'sessions', 'accounts', 'verifications', 'operator_invites'],
 } satisfies Config;

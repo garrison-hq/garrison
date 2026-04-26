@@ -14,7 +14,9 @@
     "test:watch": "vitest",
     "test:ui": "vitest --ui",
     "lint": "next lint",
-    "drizzle:pull": "bun run scripts/pull-supervisor-schema.ts"
+    "drizzle:pull": "bun run scripts/pull-supervisor-schema.ts",
+    "drizzle:generate": "drizzle-kit generate && bun run drizzle/scripts/append-grants.ts",
+    "drizzle:migrate": "drizzle-kit migrate"
   },
   "dependencies": {
     "drizzle-orm": "^0.45.2",

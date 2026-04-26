@@ -82,17 +82,17 @@ function pullSchema(): void {
 function composeSchema(): void {
   const introspectedPath = join(import.meta.dirname, '..', 'drizzle', '_introspected', 'schema.ts');
   const introspected = readFileSync(introspectedPath, 'utf-8');
+  // Write the introspected output to schema.supervisor.ts only.
+  // schema.dashboard.ts is hand-written and untouched here, and
+  // schema.ts re-exports from both. This avoids the "pull clobbers
+  // dashboard-owned tables" failure mode plan §"Phase 0 research
+  // item 4" predicted as the fallback.
   const composed =
     `// ─── generated via drizzle-kit pull — do not edit ───\n` +
     `// Run \`bun run drizzle:pull\` to regenerate.\n` +
     `// Source: goose-managed migrations under ../../migrations/.\n\n` +
-    introspected +
-    `\n\n// ─── dashboard-owned, edit here ───\n` +
-    `// Drizzle-kit generate targets only the tables listed in\n` +
-    `// drizzle.config.ts > tablesFilter. T004 lands the better-auth\n` +
-    `// core (users/sessions/accounts/verifications) + operator_invites\n` +
-    `// + the theme_preference column on users below.\n`;
-  const targetPath = join(import.meta.dirname, '..', 'drizzle', 'schema.ts');
+    introspected;
+  const targetPath = join(import.meta.dirname, '..', 'drizzle', 'schema.supervisor.ts');
   writeFileSync(targetPath, composed);
 }
 
