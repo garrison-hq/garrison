@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import { useRouter } from 'next/navigation';
 import type { ThemePreference } from '@/lib/theme/resolve';
 
 // Tri-state theme switcher — dark / light / system. Persists to the
@@ -11,6 +12,7 @@ import type { ThemePreference } from '@/lib/theme/resolve';
 const PREFERENCES: ThemePreference[] = ['dark', 'light', 'system'];
 
 export function ThemeSwitcher({ initial }: { initial: ThemePreference }) {
+  const router = useRouter();
   const [preference, setPreference] = useState<ThemePreference>(initial);
   const [pending, setPending] = useState(false);
 
@@ -36,6 +38,12 @@ export function ThemeSwitcher({ initial }: { initial: ThemePreference }) {
         body: JSON.stringify({ theme_preference: next }),
       });
       if (!res.ok) throw new Error(`theme update failed (HTTP ${res.status})`);
+      // Refresh the router so layouts re-render with the freshly
+      // persisted preference. Without this, navigating away after
+      // a switch lands on a server-rendered page that still
+      // reflects the old preference (the better-auth session
+      // cache hasn't seen the update yet).
+      router.refresh();
     } catch {
       setPreference(preference);
     } finally {
