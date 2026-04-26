@@ -156,3 +156,45 @@ export async function fetchHygieneRows(
     total: Number(totalResult[0]?.total ?? 0),
   };
 }
+
+export interface HygieneCounts {
+  total: number;
+  newToday: number;
+  byMode: Record<FailureMode, number>;
+}
+
+// Drives the segmented filter chips ("all 14 / finalize-path 6 /
+// sandbox-escape 2 / suspected-secret 6") + the meta line under
+// the page title. Single round-trip via conditional aggregation
+// so filtering the page doesn't hit the DB four times.
+export async function fetchHygieneCounts(): Promise<HygieneCounts> {
+  const finalizeIn = buildQuotedInList(FINALIZE_PATH_STATUSES);
+  const sandboxIn = buildQuotedInList(SANDBOX_ESCAPE_STATUSES);
+  const rows = await appDb.execute<{
+    total: number;
+    new_today: number;
+    finalize_path: number;
+    sandbox_escape: number;
+    suspected_secret_emitted: number;
+  }>(sql`
+    SELECT
+      count(*)::int                                                                     AS total,
+      count(*) FILTER (WHERE at >= date_trunc('day', now() AT TIME ZONE 'UTC'))::int    AS new_today,
+      count(*) FILTER (WHERE hygiene_status IN ${sql.raw(finalizeIn)})::int             AS finalize_path,
+      count(*) FILTER (WHERE hygiene_status IN ${sql.raw(sandboxIn)})::int              AS sandbox_escape,
+      count(*) FILTER (WHERE hygiene_status = 'suspected_secret_emitted')::int          AS suspected_secret_emitted
+    FROM ticket_transitions
+    WHERE hygiene_status IS NOT NULL
+      AND hygiene_status NOT IN ('clean', '')
+  `);
+  const r = rows[0];
+  return {
+    total: Number(r?.total ?? 0),
+    newToday: Number(r?.new_today ?? 0),
+    byMode: {
+      finalize_path: Number(r?.finalize_path ?? 0),
+      sandbox_escape: Number(r?.sandbox_escape ?? 0),
+      suspected_secret_emitted: Number(r?.suspected_secret_emitted ?? 0),
+    },
+  };
+}

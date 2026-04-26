@@ -11,17 +11,29 @@ import { appDb } from '@/lib/db/appClient';
 export interface SidebarStats {
   liveAgents: number;
   totalCapacity: number;
+  /** Open hygiene-flag count — non-clean, non-empty hygiene_status
+   *  rows on ticket_transitions. Drives the Hygiene nav badge. */
+  hygieneOpen: number;
 }
 
 export async function fetchSidebarStats(): Promise<SidebarStats> {
-  const rows = await appDb.execute<{ live_agents: number; total_capacity: number }>(sql`
+  const rows = await appDb.execute<{
+    live_agents: number;
+    total_capacity: number;
+    hygiene_open: number;
+  }>(sql`
     SELECT
-      (SELECT count(*)::int FROM agent_instances WHERE status = 'running') AS live_agents,
-      (SELECT coalesce(sum(concurrency_cap), 0)::int FROM departments)     AS total_capacity
+      (SELECT count(*)::int FROM agent_instances
+         WHERE status = 'running')                                          AS live_agents,
+      (SELECT coalesce(sum(concurrency_cap), 0)::int FROM departments)       AS total_capacity,
+      (SELECT count(*)::int FROM ticket_transitions
+         WHERE hygiene_status IS NOT NULL
+           AND hygiene_status NOT IN ('clean', ''))                          AS hygiene_open
   `);
   const r = rows[0];
   return {
     liveAgents: Number(r?.live_agents ?? 0),
     totalCapacity: Number(r?.total_capacity ?? 0),
+    hygieneOpen: Number(r?.hygiene_open ?? 0),
   };
 }

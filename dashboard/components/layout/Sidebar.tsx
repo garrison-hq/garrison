@@ -67,7 +67,12 @@ export async function Sidebar() {
           <NavSubLink href="/departments/qa-engineer" label="qa-engineer" />
         </NavGroup>
         <NavLink href="/activity" label={t('activity')} icon={<ActivityIcon />} />
-        <NavLink href="/hygiene" label={t('hygiene')} icon={<HygieneIcon />} />
+        <NavLink
+          href="/hygiene"
+          label={t('hygiene')}
+          icon={<HygieneIcon />}
+          badge={stats.hygieneOpen > 0 ? stats.hygieneOpen : undefined}
+        />
         <NavLink href="/vault" label={t('vault')} icon={<VaultIcon />} />
         <NavLink href="/agents" label={t('agents')} icon={<AgentIcon />} />
         <NavGroup label={t('admin')} icon={<AdminIcon />}>
@@ -112,14 +117,25 @@ function NavLink({
   href,
   label,
   icon,
-}: Readonly<{ href: string; label: string; icon: React.ReactNode }>) {
+  badge,
+}: Readonly<{
+  href: string;
+  label: string;
+  icon: React.ReactNode;
+  badge?: number;
+}>) {
   return (
     <Link
       href={href}
       className="flex items-center gap-2 px-3 py-1.5 rounded text-text-2 hover:bg-surface-2 hover:text-text-1 text-sm"
     >
-      <span className="text-text-3 group-hover:text-text-2 shrink-0">{icon}</span>
-      <span>{label}</span>
+      <span className="text-text-3 shrink-0">{icon}</span>
+      <span className="flex-1">{label}</span>
+      {typeof badge === 'number' ? (
+        <span className="text-[10px] font-mono font-tabular px-1.5 py-px rounded bg-surface-3 text-text-2">
+          {badge}
+        </span>
+      ) : null}
     </Link>
   );
 }

@@ -69,6 +69,26 @@
     "secretsCount": "secrets",
     "grantsCount": "grants"
   },
+  "hygieneMeta": {
+    "open": "open",
+    "newToday": "new today",
+    "gate": "gate",
+    "gateWarnOnly": "warn-only",
+    "all": "all",
+    "finalizePath": "finalize-path",
+    "sandboxEscape": "sandbox-escape",
+    "suspectedSecret": "suspected-secret",
+    "openFlags": "open flags",
+    "noFlags": "no open flags",
+    "headers": {
+      "time": "time",
+      "dept": "dept",
+      "transition": "transition",
+      "flag": "flag",
+      "detail": "detail",
+      "ticket": "ticket"
+    }
+  },
   "ticketDetail": {
     "history": "Transition history",
     "noHistory": "No transitions yet.",
