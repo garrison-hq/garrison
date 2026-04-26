@@ -9,7 +9,15 @@ import { Topbar } from '@/components/layout/Topbar';
 // the data-theme attribute on <html>; that layout reads the
 // operator's saved preference from the session.
 
-export default function AppLayout({ children }: Readonly<{ children: React.ReactNode }>) {
+export default function AppLayout({
+  children,
+  panel,
+}: Readonly<{ children: React.ReactNode; panel: React.ReactNode }>) {
+  // `panel` is the @panel parallel slot — empty when no intercepted
+  // route is active, otherwise renders the slide-in drawer
+  // overlaying `children`. The two slots are siblings inside the
+  // same scrollable column so the drawer's fixed positioning
+  // anchors to the viewport, not to the children container.
   return (
     <div className="min-h-screen flex flex-col">
       <div className="flex flex-1 min-h-0">
@@ -19,6 +27,7 @@ export default function AppLayout({ children }: Readonly<{ children: React.React
           <div className="flex-1 overflow-auto">{children}</div>
         </div>
       </div>
+      {panel}
     </div>
   );
 }
