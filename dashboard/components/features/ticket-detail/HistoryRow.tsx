@@ -34,6 +34,7 @@ function isFailure(status: string | null): boolean {
 
 export function HistoryRow({ row }: Readonly<{ row: TransitionRow }>) {
   const t = useTranslations('ticketDetail');
+  const commonT = useTranslations('common');
   const errT = useTranslations('errors');
   const [open, setOpen] = useState(false);
   const fromCls = row.fromColumn ? columnTextClass(row.fromColumn) : 'text-text-3';
@@ -79,7 +80,7 @@ export function HistoryRow({ row }: Readonly<{ row: TransitionRow }>) {
             onClick={() => setOpen((v) => !v)}
             className="text-text-3 hover:text-text-1 text-xs px-1 leading-none"
             aria-expanded={open}
-            aria-label={open ? t('collapse') ?? 'collapse' : t('expand') ?? 'expand'}
+            aria-label={open ? commonT('collapse') : commonT('expand')}
             title={formatShortDateTime(row.at)}
           >
             <span className={`inline-block transition-transform ${open ? 'rotate-90' : ''}`}>
