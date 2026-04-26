@@ -21,6 +21,9 @@
   "hygiene": {
     "empty": "zz_hygiene_empty"
   },
+  "agents": {
+    "empty": "zz_agents_empty"
+  },
   "vault": {
     "secretsHeading": "zz_vault_secretsHeading",
     "auditHeading": "zz_vault_auditHeading",

@@ -21,6 +21,9 @@
   "hygiene": {
     "empty": "No hygiene issues to triage. Rows appear here when transitions land with a non-clean hygiene_status."
   },
+  "agents": {
+    "empty": "No agents configured."
+  },
   "vault": {
     "secretsHeading": "Secrets",
     "auditHeading": "Vault audit log",
