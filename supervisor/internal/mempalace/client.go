@@ -75,6 +75,17 @@ type Triple struct {
 // atomic writer maps to ExitFinalizePalaceWriteFailed.
 var ErrQueryFailed = errors.New("mempalace: palace operation failed")
 
+const (
+	errMissingContainer = "%w: missing container or palace path"
+	errNoDockerExec     = "%w: no DockerExec"
+	errDockerExec       = "%w: docker exec: %v: stderr=%s"
+	mcpServerModule     = "mempalace.mcp_server"
+	mcpPalaceFlag       = "--palace"
+	mcpProtocolVersion  = "2024-11-05"
+	mcpClientName       = "garrison-mempalace"
+	rpcMethodToolsCall  = "tools/call"
+)
+
 // Query runs the two JSON-RPC tool-calls (mempalace_search + mempalace_
 // kg_query) against a fresh mempalace.mcp_server process. Returns
 // ([]Drawer, []Triple, nil) on success or (nil, nil, wrapped
@@ -82,10 +93,10 @@ var ErrQueryFailed = errors.New("mempalace: palace operation failed")
 // byte-for-byte preserved from M2.2's internal/hygiene/palace.go.
 func (c *Client) Query(ctx context.Context, ticketIDText, wing string, window TimeWindow) ([]Drawer, []Triple, error) {
 	if c.MempalaceContainer == "" || c.PalacePath == "" {
-		return nil, nil, fmt.Errorf("%w: missing container or palace path", ErrQueryFailed)
+		return nil, nil, fmt.Errorf(errMissingContainer, ErrQueryFailed)
 	}
 	if c.Exec == nil {
-		return nil, nil, fmt.Errorf("%w: no DockerExec", ErrQueryFailed)
+		return nil, nil, fmt.Errorf(errNoDockerExec, ErrQueryFailed)
 	}
 
 	timeout := c.Timeout
@@ -98,12 +109,12 @@ func (c *Client) Query(ctx context.Context, ticketIDText, wing string, window Ti
 	reqBody := buildQueryRequests(ticketIDText, wing)
 	args := []string{
 		"exec", "-i", c.MempalaceContainer,
-		"python", "-m", "mempalace.mcp_server",
-		"--palace", c.PalacePath,
+		"python", "-m", mcpServerModule,
+		mcpPalaceFlag, c.PalacePath,
 	}
 	stdout, stderr, err := c.Exec.Run(runCtx, args, bytes.NewReader(reqBody))
 	if err != nil {
-		return nil, nil, fmt.Errorf("%w: docker exec: %v: stderr=%s", ErrQueryFailed, err, stderr)
+		return nil, nil, fmt.Errorf(errDockerExec, ErrQueryFailed, err, stderr)
 	}
 
 	drawers, triples, parseErr := parseQueryResponses(stdout, window)
@@ -123,10 +134,10 @@ func (c *Client) Query(ctx context.Context, ticketIDText, wing string, window Ti
 // atomic writer supplies wing=<agent's palace_wing>, room="hall_events".
 func (c *Client) AddDrawer(ctx context.Context, wing, room, content string) error {
 	if c.MempalaceContainer == "" || c.PalacePath == "" {
-		return fmt.Errorf("%w: missing container or palace path", ErrQueryFailed)
+		return fmt.Errorf(errMissingContainer, ErrQueryFailed)
 	}
 	if c.Exec == nil {
-		return fmt.Errorf("%w: no DockerExec", ErrQueryFailed)
+		return fmt.Errorf(errNoDockerExec, ErrQueryFailed)
 	}
 	timeout := c.Timeout
 	if timeout == 0 {
@@ -138,12 +149,12 @@ func (c *Client) AddDrawer(ctx context.Context, wing, room, content string) erro
 	reqBody := buildAddDrawerRequests(wing, room, content)
 	args := []string{
 		"exec", "-i", c.MempalaceContainer,
-		"python", "-m", "mempalace.mcp_server",
-		"--palace", c.PalacePath,
+		"python", "-m", mcpServerModule,
+		mcpPalaceFlag, c.PalacePath,
 	}
 	stdout, stderr, err := c.Exec.Run(runCtx, args, bytes.NewReader(reqBody))
 	if err != nil {
-		return fmt.Errorf("%w: docker exec: %v: stderr=%s", ErrQueryFailed, err, stderr)
+		return fmt.Errorf(errDockerExec, ErrQueryFailed, err, stderr)
 	}
 	if err := expectOKResponses(stdout, []int{1, 2}); err != nil {
 		return fmt.Errorf("%w: add_drawer: %v", ErrQueryFailed, err)
@@ -169,10 +180,10 @@ func (c *Client) AddTriples(ctx context.Context, triples []Triple) error {
 		return nil
 	}
 	if c.MempalaceContainer == "" || c.PalacePath == "" {
-		return fmt.Errorf("%w: missing container or palace path", ErrQueryFailed)
+		return fmt.Errorf(errMissingContainer, ErrQueryFailed)
 	}
 	if c.Exec == nil {
-		return fmt.Errorf("%w: no DockerExec", ErrQueryFailed)
+		return fmt.Errorf(errNoDockerExec, ErrQueryFailed)
 	}
 	timeout := c.Timeout
 	if timeout == 0 {
@@ -184,12 +195,12 @@ func (c *Client) AddTriples(ctx context.Context, triples []Triple) error {
 	reqBody, expectIDs := buildAddTriplesRequests(triples)
 	args := []string{
 		"exec", "-i", c.MempalaceContainer,
-		"python", "-m", "mempalace.mcp_server",
-		"--palace", c.PalacePath,
+		"python", "-m", mcpServerModule,
+		mcpPalaceFlag, c.PalacePath,
 	}
 	stdout, stderr, err := c.Exec.Run(runCtx, args, bytes.NewReader(reqBody))
 	if err != nil {
-		return fmt.Errorf("%w: docker exec: %v: stderr=%s", ErrQueryFailed, err, stderr)
+		return fmt.Errorf(errDockerExec, ErrQueryFailed, err, stderr)
 	}
 	if err := expectOKResponses(stdout, expectIDs); err != nil {
 		return fmt.Errorf("%w: kg_add: %v", ErrQueryFailed, err)
@@ -208,13 +219,13 @@ func buildQueryRequests(ticketIDText, wing string) []byte {
 	init := map[string]any{
 		"jsonrpc": "2.0", "id": 1, "method": "initialize",
 		"params": map[string]any{
-			"protocolVersion": "2024-11-05",
+			"protocolVersion": mcpProtocolVersion,
 			"capabilities":    map[string]any{},
-			"clientInfo":      map[string]any{"name": "garrison-mempalace", "version": "0"},
+			"clientInfo":      map[string]any{"name": mcpClientName, "version": "0"},
 		},
 	}
 	search := map[string]any{
-		"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+		"jsonrpc": "2.0", "id": 2, "method": rpcMethodToolsCall,
 		"params": map[string]any{
 			"name": "mempalace_search",
 			"arguments": map[string]any{
@@ -224,7 +235,7 @@ func buildQueryRequests(ticketIDText, wing string) []byte {
 		},
 	}
 	kgQuery := map[string]any{
-		"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+		"jsonrpc": "2.0", "id": 3, "method": rpcMethodToolsCall,
 		"params": map[string]any{
 			"name": "mempalace_kg_query",
 			"arguments": map[string]any{
@@ -246,13 +257,13 @@ func buildAddDrawerRequests(wing, room, content string) []byte {
 	init := map[string]any{
 		"jsonrpc": "2.0", "id": 1, "method": "initialize",
 		"params": map[string]any{
-			"protocolVersion": "2024-11-05",
+			"protocolVersion": mcpProtocolVersion,
 			"capabilities":    map[string]any{},
-			"clientInfo":      map[string]any{"name": "garrison-mempalace", "version": "0"},
+			"clientInfo":      map[string]any{"name": mcpClientName, "version": "0"},
 		},
 	}
 	addDrawer := map[string]any{
-		"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+		"jsonrpc": "2.0", "id": 2, "method": rpcMethodToolsCall,
 		"params": map[string]any{
 			"name": "mempalace_add_drawer",
 			"arguments": map[string]any{
@@ -278,9 +289,9 @@ func buildAddTriplesRequests(triples []Triple) ([]byte, []int) {
 	init := map[string]any{
 		"jsonrpc": "2.0", "id": 1, "method": "initialize",
 		"params": map[string]any{
-			"protocolVersion": "2024-11-05",
+			"protocolVersion": mcpProtocolVersion,
 			"capabilities":    map[string]any{},
-			"clientInfo":      map[string]any{"name": "garrison-mempalace", "version": "0"},
+			"clientInfo":      map[string]any{"name": mcpClientName, "version": "0"},
 		},
 	}
 	_ = json.NewEncoder(&buf).Encode(init)
@@ -290,7 +301,7 @@ func buildAddTriplesRequests(triples []Triple) ([]byte, []int) {
 		id := i + 2
 		ids = append(ids, id)
 		call := map[string]any{
-			"jsonrpc": "2.0", "id": id, "method": "tools/call",
+			"jsonrpc": "2.0", "id": id, "method": rpcMethodToolsCall,
 			"params": map[string]any{
 				"name": "mempalace_kg_add",
 				"arguments": map[string]any{
@@ -333,33 +344,46 @@ func parseQueryResponses(stdout []byte, _ TimeWindow) ([]Drawer, []Triple, error
 
 	dec := json.NewDecoder(bytes.NewReader(stdout))
 	for dec.More() {
-		var resp rpcResponse
-		if err := dec.Decode(&resp); err != nil {
+		ds, ts, err := decodeOneQueryResponse(dec)
+		if err != nil {
 			return nil, nil, err
 		}
-		if resp.Error != nil {
-			return nil, nil, fmt.Errorf("mcp error (id=%d): %s", resp.ID, string(*resp.Error))
-		}
-		if resp.Result == nil || len(resp.Result.Content) == 0 {
-			continue
-		}
-		text := resp.Result.Content[0].Text
-		switch resp.ID {
-		case 2:
-			ds, err := parseSearchPayload(text)
-			if err != nil {
-				return nil, nil, fmt.Errorf("parse search: %w", err)
-			}
-			drawers = append(drawers, ds...)
-		case 3:
-			ts, err := parseKGQueryPayload(text)
-			if err != nil {
-				return nil, nil, fmt.Errorf("parse kg_query: %w", err)
-			}
-			triples = append(triples, ts...)
-		}
+		drawers = append(drawers, ds...)
+		triples = append(triples, ts...)
 	}
 	return drawers, triples, nil
+}
+
+// decodeOneQueryResponse consumes one rpcResponse off dec and dispatches
+// by resp.ID to the appropriate payload parser. Returns nil/nil/nil for
+// init responses and any response without content (the caller appends).
+func decodeOneQueryResponse(dec *json.Decoder) ([]Drawer, []Triple, error) {
+	var resp rpcResponse
+	if err := dec.Decode(&resp); err != nil {
+		return nil, nil, err
+	}
+	if resp.Error != nil {
+		return nil, nil, fmt.Errorf("mcp error (id=%d): %s", resp.ID, string(*resp.Error))
+	}
+	if resp.Result == nil || len(resp.Result.Content) == 0 {
+		return nil, nil, nil
+	}
+	text := resp.Result.Content[0].Text
+	switch resp.ID {
+	case 2:
+		ds, err := parseSearchPayload(text)
+		if err != nil {
+			return nil, nil, fmt.Errorf("parse search: %w", err)
+		}
+		return ds, nil, nil
+	case 3:
+		ts, err := parseKGQueryPayload(text)
+		if err != nil {
+			return nil, nil, fmt.Errorf("parse kg_query: %w", err)
+		}
+		return nil, ts, nil
+	}
+	return nil, nil, nil
 }
 
 // expectOKResponses verifies that the stdout carries a success rpcResponse

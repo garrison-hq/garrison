@@ -1,0 +1,221 @@
+{
+  "common": {
+    "loading": "loading…",
+    "refresh": "refresh",
+    "expand": "expand",
+    "collapse": "collapse",
+    "logOut": "Log out"
+  },
+  "a11y": {
+    "skipToContent": "Skip to main content"
+  },
+  "notFound": {
+    "title": "Page not found",
+    "description": "The page you tried to reach doesn't exist or has moved.",
+    "back": "Back to org overview"
+  },
+  "orgOverview": {
+    "openTickets": "open tickets",
+    "activeAgents": "active agents",
+    "transitions24h": "transitions 24h",
+    "hygieneWarnings": "hygiene warnings",
+    "departmentsHeading": "Departments",
+    "noDepartments": "No departments configured."
+  },
+  "kanban": {
+    "noTickets": "No open tickets in this department.",
+    "departmentNotFound": "Department not found."
+  },
+  "hygiene": {
+    "empty": "No hygiene issues to triage. Rows appear here when transitions land with a non-clean hygiene_status."
+  },
+  "agents": {
+    "empty": "No agents configured."
+  },
+  "activity": {
+    "empty": "No activity yet. Events appear here as agents spawn, transition tickets, and finalize."
+  },
+  "vault": {
+    "sectionsLabel": "Vault sections",
+    "secretsHeading": "Secrets",
+    "auditHeading": "Vault audit log",
+    "matrixHeading": "Role × secret grants",
+    "secretsTab": "secrets",
+    "auditTab": "audit",
+    "matrixTab": "matrix",
+    "emptySecrets": "No secrets registered.",
+    "emptyAudit": "No vault access events recorded.",
+    "emptyMatrix": "No agent-role-to-secret grants configured.",
+    "tracked": "tracked",
+    "events": "events",
+    "lastRotationSweep": "last rotation sweep",
+    "lastEvent": "last event",
+    "headers": {
+      "path": "path",
+      "roles": "roles",
+      "lastRotated": "last rotated",
+      "status": "status",
+      "timestamp": "timestamp",
+      "role": "role",
+      "secretPath": "secret path",
+      "outcome": "outcome",
+      "ticket": "ticket"
+    },
+    "legend": {
+      "granted": "granted",
+      "notGranted": "not granted"
+    },
+    "rolesCount": "roles",
+    "secretsCount": "secrets",
+    "grantsCount": "grants"
+  },
+  "activityMeta": {
+    "live": "live",
+    "reconnecting": "reconnecting",
+    "connecting": "connecting",
+    "events": "events",
+    "runs": "runs",
+    "filterAll": "all",
+    "filterCreated": "ticket.created",
+    "filterTransitioned": "ticket.transitioned",
+    "feedHeader": "live feed",
+    "empty": "No activity yet — events will stream in as agents transition tickets.",
+    "unattributed": "unattributed",
+    "ticketActivity": "ticket activity",
+    "emptyRun": "empty run",
+    "heartbeat": "heartbeat",
+    "lastHourLabel": "events in last hour",
+    "kpi": {
+      "events": "events",
+      "lastHour": "last hour",
+      "transitions": "transitions",
+      "creates": "creates"
+    }
+  },
+  "agentsMeta": {
+    "subtitleAgents": "agents",
+    "subtitleLive": "live now",
+    "subtitleSaturation": "cap saturation",
+    "running": "running",
+    "noAgentsInDept": "No agents configured for this department.",
+    "headers": {
+      "agent": "agent",
+      "department": "department",
+      "role": "role",
+      "model": "model",
+      "concurrency": "concurrency",
+      "listensFor": "listens for",
+      "lastSpawn": "last spawn",
+      "spawns7d": "spawns / 7d",
+      "skills": "skills"
+    },
+    "kpi": {
+      "agents": "agents",
+      "liveAgents": "live",
+      "concurrency": "concurrency",
+      "pctOfCap": "% of cap",
+      "spawns24h": "spawns / 24h",
+      "rolling24h": "rolling 24h",
+      "idleAgents": "idle agents",
+      "zeroLiveInstances": "zero live instances"
+    }
+  },
+  "hygieneMeta": {
+    "open": "open",
+    "newToday": "new today",
+    "gate": "gate",
+    "gateWarnOnly": "warn-only",
+    "all": "all",
+    "finalizePath": "finalize-path",
+    "sandboxEscape": "sandbox-escape",
+    "suspectedSecret": "suspected-secret",
+    "openFlags": "open flags",
+    "noFlags": "no open flags",
+    "headers": {
+      "time": "time",
+      "dept": "dept",
+      "transition": "transition",
+      "flag": "flag",
+      "detail": "detail",
+      "ticket": "ticket"
+    }
+  },
+  "ticketDetail": {
+    "history": "Transition history",
+    "noHistory": "No transitions yet.",
+    "agentInstances": "Agent instances",
+    "noInstances": "No agent instances have run for this ticket.",
+    "palaceLinks": "Palace links",
+    "palaceLinksHint": "Use the ticket id below as a search term in MemPalace to surface diary entries and KG triples written for this ticket.",
+    "role": "role",
+    "startedAt": "started at",
+    "duration": "duration",
+    "exitReason": "exit reason",
+    "cost": "cost",
+    "sandboxEscape": "sandbox-escape (artifact claimed vs on disk)"
+  },
+  "errors": {
+    "auth": {
+      "no_session": "You're not signed in.",
+      "invite_not_found": "Invite link does not exist.",
+      "invite_expired": "Invite link has expired.",
+      "invite_revoked": "Invite link was revoked.",
+      "invite_already_redeemed": "Invite link has already been used.",
+      "first_run_locked": "First-run setup is no longer available.",
+      "email_already_exists": "An account with this email already exists."
+    },
+    "cost_blind_spot": {
+      "tooltip": "Cost telemetry blind spot: clean-finalize runs report $0.00. See docs/issues/cost-telemetry-blind-spot.md."
+    },
+    "sandbox_escape": {
+      "tooltip": "Sandbox escape: the agent's claimed artifact path differs from what's on disk. See docs/issues/agent-workspace-sandboxing.md."
+    }
+  },
+  "nav": {
+    "primaryNavigationLabel": "Primary navigation",
+    "orgOverview": "Org overview",
+    "departments": "Departments",
+    "tickets": "Tickets",
+    "activity": "Activity",
+    "hygiene": "Hygiene",
+    "vault": "Vault",
+    "agents": "Agents",
+    "admin": "Admin"
+  },
+  "auth": {
+    "signIn": {
+      "heading": "Sign in",
+      "email": "Email",
+      "password": "Password",
+      "submit": "Sign in",
+      "submitting": "signing in…"
+    },
+    "setup": {
+      "heading": "First-run setup",
+      "description": "Create the inaugural operator account. This page disappears once an account exists.",
+      "name": "Name",
+      "email": "Email",
+      "password": "Password",
+      "submit": "Create operator account"
+    },
+    "invite": {
+      "heading": "Accept invite",
+      "description": "You were invited to join this Garrison instance as an operator. Set your account details to continue.",
+      "name": "Name",
+      "email": "Email",
+      "password": "Password",
+      "submit": "Create account",
+      "submitting": "redeeming…"
+    },
+    "admin": {
+      "heading": "Operator invites",
+      "description": "Generate a one-time link to invite an additional operator. Share the link out-of-band; it expires after 72 hours.",
+      "generate": "Generate invite",
+      "generating": "generating…",
+      "noPending": "No pending invites.",
+      "expires": "expires {when}",
+      "revoke": "revoke",
+      "revoking": "revoking…"
+    }
+  }
+}

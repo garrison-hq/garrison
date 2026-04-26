@@ -1,0 +1,26 @@
+import { getTranslations } from 'next-intl/server';
+import { HistoryRow } from './HistoryRow';
+import type { TransitionRow } from '@/lib/queries/ticketDetail';
+
+export async function HistoryBlock({
+  history,
+}: Readonly<{ history: TransitionRow[] }>) {
+  const t = await getTranslations('ticketDetail');
+  return (
+    <section className="space-y-2">
+      <h3 className="text-text-3 text-[10.5px] uppercase tracking-[0.08em] font-medium">
+        {t('history')}
+      </h3>
+      <div
+        className="rounded border border-border-1 divide-y divide-border-1 bg-surface-1"
+        data-testid="history-block"
+      >
+        {history.length === 0 ? (
+          <p className="text-text-3 text-xs px-3 py-3">{t('noHistory')}</p>
+        ) : (
+          history.map((row) => <HistoryRow key={row.id} row={row} />)
+        )}
+      </div>
+    </section>
+  );
+}

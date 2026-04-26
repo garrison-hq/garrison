@@ -1,0 +1,169 @@
+@import "tailwindcss";
+
+/*
+ * Garrison dashboard — token system.
+ *
+ * Tokens are defined under [data-theme="dark"] and [data-theme="light"]
+ * blocks; the [data-theme] attribute lives on <html> and is set by the
+ * server-component shell layout from the operator's theme_preference
+ * column on the better-auth user record (T009).
+ *
+ * Dark token values lifted verbatim from .workspace/m3-mocks/garrison-
+ * reference/styles.css; the surface/text/border ladders are renamed to
+ * the consistent X-1/X-2/... pattern (--surface → --surface-1, --border
+ * → --border-1, --border-strong → --border-2, --text → --text-1).
+ *
+ * Light tokens are derived for parity (FR-010): same hue/chroma on the
+ * accent + status colors via OKLCH so semantic-color meaning survives
+ * the theme flip; surface/text/border ladders are inverted lightness.
+ */
+
+/*
+ * :root holds the dark-default token values + the font-family
+ * tokens. MUST come before the [data-theme] blocks: `:root` and
+ * `[data-theme="X"]` have equal CSS specificity (0,1,0), so source
+ * order decides — putting :root last would let it override
+ * [data-theme="light"] and freeze the page on dark forever.
+ */
+:root {
+  --bg: #0A0A0A;
+  --surface-1: #141414;
+  --surface-2: #1C1C1C;
+  --surface-3: #232323;
+  --border-1: #262626;
+  --border-2: #333333;
+  --text-1: #EDEDED;
+  --text-2: #A1A1A1;
+  --text-3: #9A9A9A;
+  --text-4: #444444;
+  --accent: oklch(0.78 0.14 160);
+  --accent-dim: oklch(0.78 0.14 160 / 0.14);
+  --info: oklch(0.7 0.12 240);
+  --warn: oklch(0.78 0.14 75);
+  --err:  oklch(0.68 0.18 25);
+  --ok:   oklch(0.78 0.14 160);
+
+  --sans: 'Geist', 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  --mono: 'Geist Mono', 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+[data-theme="dark"] {
+  --bg: #0A0A0A;
+  --surface-1: #141414;
+  --surface-2: #1C1C1C;
+  --surface-3: #232323;
+  --border-1: #262626;
+  --border-2: #333333;
+  --text-1: #EDEDED;
+  --text-2: #A1A1A1;
+  --text-3: #9A9A9A;
+  --text-4: #444444;
+
+  --accent: oklch(0.78 0.14 160);
+  --accent-dim: oklch(0.78 0.14 160 / 0.14);
+  --info: oklch(0.7 0.12 240);
+  --warn: oklch(0.78 0.14 75);
+  --err:  oklch(0.68 0.18 25);
+  --ok:   oklch(0.78 0.14 160);
+}
+
+[data-theme="light"] {
+  --bg: #FAFAFA;
+  --surface-1: #FFFFFF;
+  --surface-2: #F4F4F5;
+  --surface-3: #E4E4E7;
+  --border-1: #D4D4D8;
+  --border-2: #A1A1AA;
+  --text-1: #18181B;
+  --text-2: #52525B;
+  --text-3: #71717A;
+  --text-4: #A1A1AA;
+
+  --accent: oklch(0.55 0.14 160);
+  --accent-dim: oklch(0.55 0.14 160 / 0.14);
+  --info: oklch(0.5 0.14 240);
+  --warn: oklch(0.55 0.16 75);
+  --err:  oklch(0.5 0.2 25);
+  --ok:   oklch(0.55 0.14 160);
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface-1: var(--surface-1);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+  --color-border-1: var(--border-1);
+  --color-border-2: var(--border-2);
+  --color-text-1: var(--text-1);
+  --color-text-2: var(--text-2);
+  --color-text-3: var(--text-3);
+  --color-text-4: var(--text-4);
+  --color-accent: var(--accent);
+  --color-info: var(--info);
+  --color-warn: var(--warn);
+  --color-err: var(--err);
+  --color-ok: var(--ok);
+}
+
+html, body {
+  background: var(--bg);
+  color: var(--text-1);
+  font-family: var(--sans);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/*
+ * Numeric columns + KPI values use tabular figures so digits in
+ * stacked rows align column-wise (1.0  vs  1.1, 100 vs 99).
+ */
+.font-tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+/*
+ * Theme-aware brand assets. Two <img> tags ship in the DOM (one dark
+ * lockup, one light); CSS hides the wrong one based on the active
+ * data-theme. Avoids a flash on theme-flip and means a single
+ * Image-from-disk per theme regardless of how often the user toggles.
+ */
+[data-theme="dark"] .theme-asset-light,
+[data-theme="light"] .theme-asset-dark {
+  display: none;
+}
+
+/*
+ * Slide-in animations for the ticket-detail @panel intercept.
+ * `garrison-slide-in-right` runs once on mount; the panel's exit
+ * is handled by router.back() unmounting the slot (no exit anim).
+ */
+@keyframes garrison-slide-in-right {
+  from {
+    transform: translateX(100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+@keyframes garrison-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.garrison-slide-in-right {
+  animation: garrison-slide-in-right 220ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+.garrison-fade-in {
+  animation: garrison-fade-in 220ms ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  .garrison-slide-in-right,
+  .garrison-fade-in {
+    animation: none;
+  }
+}

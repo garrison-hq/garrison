@@ -7,9 +7,16 @@
 
 # Garrison
 
-[![Build](https://img.shields.io/badge/build-local-lightgrey)](#running-the-supervisor-locally)
+[![CI](https://github.com/garrison-hq/garrison/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/garrison-hq/garrison/actions/workflows/ci.yml)
+[![Quality Gate](https://sonarcloud.io/api/project_badges/measure?project=garrison-hq_garrison&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=garrison-hq_garrison)
+[![Coverage](https://sonarcloud.io/api/project_badges/measure?project=garrison-hq_garrison&metric=coverage)](https://sonarcloud.io/component_measures?id=garrison-hq_garrison&metric=coverage)
+[![Reliability](https://sonarcloud.io/api/project_badges/measure?project=garrison-hq_garrison&metric=reliability_rating)](https://sonarcloud.io/component_measures?id=garrison-hq_garrison&metric=reliability_rating)
+[![Maintainability](https://sonarcloud.io/api/project_badges/measure?project=garrison-hq_garrison&metric=sqale_rating)](https://sonarcloud.io/component_measures?id=garrison-hq_garrison&metric=sqale_rating)
+[![Security](https://sonarcloud.io/api/project_badges/measure?project=garrison-hq_garrison&metric=security_rating)](https://sonarcloud.io/component_measures?id=garrison-hq_garrison&metric=security_rating)
 [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](./LICENSE)
 [![Go 1.25](https://img.shields.io/badge/go-1.25-00ADD8.svg)](https://go.dev/dl/)
+[![Next.js 16](https://img.shields.io/badge/next.js-16-black.svg)](https://nextjs.org/)
+[![Postgres 17](https://img.shields.io/badge/postgres-17-336791.svg)](https://www.postgresql.org/)
 
 Most agent orchestrators either burn tokens on idle heartbeats or lose
 everything between sessions. Garrison does neither.
@@ -24,10 +31,10 @@ wake on an event, do the work, commit through a single
 `finalize_ticket` MCP tool that atomically writes both the Postgres
 transition and the MemPalace diary + KG triples, then exit.
 
-**Status:** M1, M2.1, M2.2, M2.2.1, M2.2.2, and M2.3 shipped
-(2026-04-22 → 2026-04-24). **M3 (read-only dashboard) is the active
-milestone.** Built alongside other work by one person. Production
-use at your own risk.
+**Status:** M1, M2.1, M2.2, M2.2.1, M2.2.2, M2.3, and M3 shipped
+(2026-04-22 → 2026-04-26). **M4 (mutations + CEO chat scaffolding)
+is the next milestone.** Built alongside other work by one person.
+Production use at your own risk.
 
 ---
 
@@ -102,8 +109,8 @@ Components:
   `sh -c` placeholder is preserved as `GARRISON_FAKE_AGENT_CMD` for
   fast tests.
 
-Not yet shipped: the operator dashboard (M3, active), CEO chat
-(M5), and hiring flow (M7). See [Milestones](#milestones).
+Not yet shipped: dashboard mutations (M4), CEO chat (M5), and
+hiring flow (M7). See [Milestones](#milestones).
 
 For the full system picture (data model, event flow, dashboard
 surfaces) see `ARCHITECTURE.md`. For the reasoning behind every
@@ -153,13 +160,14 @@ three-bug-chain.md`); the M2.2.x arc retro at
 documents the full recovery shape and is essential reading before
 any M2-area work.
 
-What M1 + M2 **do not** include: the operator dashboard (M3,
-active), CEO chat (M5), the memory hygiene UI (M3/M6), hiring
-(M7), agent-spawned tickets (M8). Two open follow-ups are tracked
-under [`docs/issues/`](./docs/issues/): workspace sandboxing
+What M1 + M2 + M3 **do not** include: dashboard mutations (M4),
+CEO chat (M5), the memory hygiene UI (M6), hiring (M7),
+agent-spawned tickets (M8). Two open follow-ups are tracked under
+[`docs/issues/`](./docs/issues/): workspace sandboxing
 (Docker-per-agent, planned post-M3) and the cost-telemetry blind
 spot (supervisor signal-handling fix that lets `result` event land
-before kill).
+before kill). M3 surfaces both in the dashboard but does not fix
+either.
 
 ---
 
@@ -173,7 +181,7 @@ before kill).
 | **M2.2.1** | `finalize_ticket` MCP tool as the only commit path. Atomic transaction bracketing two MemPalace writes + four Postgres writes. | Shipped 2026-04-23. |
 | **M2.2.2** | Richer structured errors + Adjudicate precedence fix + calibrated seed agent.md. Closed by the post-ship pgmcp three-bug-chain investigation; see arc retro. | Shipped 2026-04-24. |
 | **M2.3** | Self-hosted Infisical vault. `SecretValue` opaque type. `vaultlog` go vet analyzer. Four vault rules. First PL/pgSQL trigger. | Shipped 2026-04-24. |
-| **M3** | Next.js 16 dashboard, read-only. Kanban, ticket detail, agent activity feed. Surfaces hygiene status and the cost-telemetry blind spot. | **Active.** |
+| **M3** | Next.js 16 dashboard, read-only. Kanban, ticket detail, agent activity feed, hygiene table, vault sub-views, agents registry, operator-invite admin. Surfaces hygiene status and the cost-telemetry blind spot. | Shipped 2026-04-26. |
 | **M4** | Dashboard mutations. Create/drag tickets, edit agent configs. | Not started. |
 | **M5** | CEO chat, summoned per-message, read-only. | Not started. |
 | **M6** | CEO ticket decomposition + memory hygiene dashboard + cost-based throttling. | Not started. |

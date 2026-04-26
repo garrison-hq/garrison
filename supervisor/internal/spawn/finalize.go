@@ -47,6 +47,9 @@ import (
 // on the happy path (per FR-261 step c/e and FR-267).
 const FinalizeDiaryHygieneStatus = "clean"
 
+// diaryListItemFmt is the YAML list-item line format used in serializeDiary.
+const diaryListItemFmt = "  - %s\n"
+
 // FinalizeDeps bundles everything WriteFinalize needs that isn't in
 // the payload itself. The caller (pipeline's onCommit) wires these from
 // spawn.Deps + per-spawn metadata at invocation time.
@@ -116,12 +119,9 @@ func WriteFinalize(parentCtx context.Context, deps FinalizeWriteDeps, payload *f
 	// Step 0: begin tx + read ticket objective.
 	tx, err := deps.Pool.Begin(ctx)
 	if err != nil {
-		return writeFinalizeFailure(parentCtx, deps, meta, writeTerminalOutcome{
-			ExitReason:    classifyCtxErr(ctx, ExitFinalizePalaceWriteFailed),
-			HygieneStatus: "finalize_partial",
-			FailureClass:  "palace_write",
-			UnderlyingErr: fmt.Errorf("begin tx: %w", err),
-		}, logger)
+		return failWithoutOrphan(parentCtx, deps, meta, logger,
+			classifyCtxErr(ctx, ExitFinalizePalaceWriteFailed), "palace_write",
+			fmt.Errorf("begin tx: %w", err))
 	}
 	committed := false
 	defer func() {
@@ -133,12 +133,9 @@ func WriteFinalize(parentCtx context.Context, deps FinalizeWriteDeps, payload *f
 	q := deps.Queries.WithTx(tx)
 	objective, err := q.SelectTicketObjective(ctx, meta.TicketID)
 	if err != nil {
-		return writeFinalizeFailure(parentCtx, deps, meta, writeTerminalOutcome{
-			ExitReason:    ExitFinalizePalaceWriteFailed,
-			HygieneStatus: "finalize_partial",
-			FailureClass:  "palace_write",
-			UnderlyingErr: fmt.Errorf("SelectTicketObjective: %w", err),
-		}, logger)
+		return failWithoutOrphan(parentCtx, deps, meta, logger,
+			ExitFinalizePalaceWriteFailed, "palace_write",
+			fmt.Errorf("SelectTicketObjective: %w", err))
 	}
 
 	// M2.3 T009: pattern-scanner hook (FR-418 / FR-419 / D7.3). Scan and
@@ -152,123 +149,14 @@ func WriteFinalize(parentCtx context.Context, deps FinalizeWriteDeps, payload *f
 			"labels", matched)
 	}
 
-	// Step 1: MemPalace diary write. The serialization shape is per
-	// FR-263 + clarify Q6: `<ticket_objective>\n\n---\n<yaml>\n---\n\n<rationale>`.
-	body := serializeDiary(objective, meta.TicketID, payload, time.Now().UTC())
-	if err := deps.Palace.AddDrawer(ctx, meta.Wing, "hall_events", body); err != nil {
-		class := "palace_write"
-		reason := ExitFinalizePalaceWriteFailed
-		if errors.Is(err, context.DeadlineExceeded) || isCtxDeadlineExceeded(ctx) {
-			reason = ExitFinalizeWriteTimeout
-			class = "timeout"
-		}
-		return writeFinalizeFailure(parentCtx, deps, meta, writeTerminalOutcome{
-			ExitReason:    reason,
-			HygieneStatus: "finalize_partial",
-			FailureClass:  class,
-			UnderlyingErr: fmt.Errorf("AddDrawer: %w", err),
-		}, logger)
+	if err := writePalaceArtifacts(ctx, parentCtx, deps, meta, payload, objective, logger); err != nil {
+		return err
 	}
-	// From here on, a failure means MemPalace has an orphan drawer.
-
-	// Step 2: MemPalace triples.
-	triples := toMempalaceTriples(payload.KGTriples)
-	if err := deps.Palace.AddTriples(ctx, triples); err != nil {
-		class := "palace_write"
-		reason := ExitFinalizePalaceWriteFailed
-		if errors.Is(err, context.DeadlineExceeded) || isCtxDeadlineExceeded(ctx) {
-			reason = ExitFinalizeWriteTimeout
-			class = "timeout"
-		}
-		return writeFinalizeFailure(parentCtx, deps, meta, writeTerminalOutcome{
-			ExitReason:    reason,
-			HygieneStatus: "finalize_partial",
-			FailureClass:  class,
-			OrphanWarn:    true, // AddDrawer succeeded, AddTriples partially succeeded
-			UnderlyingErr: fmt.Errorf("AddTriples: %w", err),
-		}, logger)
+	if err := writeTransitionRows(ctx, parentCtx, deps, q, meta, hygieneStatus, logger); err != nil {
+		return err
 	}
-
-	// Step 3: ticket_transitions insert. hygieneStatus is 'clean' unless the
-	// pattern scanner flagged secrets above (D7.3 / FR-419).
-	clean := hygieneStatus
-	transitionID, err := q.InsertTicketTransition(ctx, store.InsertTicketTransitionParams{
-		TicketID:                   meta.TicketID,
-		FromColumn:                 &meta.FromColumn,
-		ToColumn:                   meta.ToColumn,
-		TriggeredByAgentInstanceID: meta.AgentInstanceID,
-	})
-	if err != nil {
-		class := "palace_write" // closest existing class; semantic: transition_write
-		return writeFinalizeFailure(parentCtx, deps, meta, writeTerminalOutcome{
-			ExitReason:    ExitFinalizePalaceWriteFailed,
-			HygieneStatus: "finalize_partial",
-			FailureClass:  class,
-			OrphanWarn:    true,
-			UnderlyingErr: fmt.Errorf("InsertTicketTransition: %w", err),
-		}, logger)
-	}
-	// The transition row's hygiene_status default is NULL; we need to
-	// update it to 'clean' in the same tx. Use the existing
-	// UpdateTicketTransitionHygiene for at-most-once discipline.
-	if err := q.UpdateTicketTransitionHygiene(ctx, store.UpdateTicketTransitionHygieneParams{
-		ID:            transitionID,
-		HygieneStatus: &clean,
-	}); err != nil {
-		return writeFinalizeFailure(parentCtx, deps, meta, writeTerminalOutcome{
-			ExitReason:    ExitFinalizePalaceWriteFailed,
-			HygieneStatus: "finalize_partial",
-			FailureClass:  "palace_write",
-			OrphanWarn:    true,
-			UnderlyingErr: fmt.Errorf("UpdateTicketTransitionHygiene: %w", err),
-		}, logger)
-	}
-
-	// Step 4: update tickets.column_slug.
-	if err := q.UpdateTicketColumnSlug(ctx, store.UpdateTicketColumnSlugParams{
-		ID:         meta.TicketID,
-		ColumnSlug: meta.ToColumn,
-	}); err != nil {
-		return writeFinalizeFailure(parentCtx, deps, meta, writeTerminalOutcome{
-			ExitReason:    ExitFinalizePalaceWriteFailed,
-			HygieneStatus: "finalize_partial",
-			FailureClass:  "palace_write",
-			OrphanWarn:    true,
-			UnderlyingErr: fmt.Errorf("UpdateTicketColumnSlug: %w", err),
-		}, logger)
-	}
-
-	// Step 5: terminal agent_instances row.
-	completedReason := ExitCompleted
-	var wakeUpPtr *string
-	if meta.WakeUpStatus != "" {
-		wakeUpPtr = &meta.WakeUpStatus
-	}
-	if err := q.UpdateInstanceTerminalWithCostAndWakeup(ctx, store.UpdateInstanceTerminalWithCostAndWakeupParams{
-		ID:           meta.AgentInstanceID,
-		Status:       "succeeded",
-		ExitReason:   &completedReason,
-		TotalCostUsd: meta.Cost,
-		WakeUpStatus: wakeUpPtr,
-	}); err != nil {
-		return writeFinalizeFailure(parentCtx, deps, meta, writeTerminalOutcome{
-			ExitReason:    ExitFinalizePalaceWriteFailed,
-			HygieneStatus: "finalize_partial",
-			FailureClass:  "palace_write",
-			OrphanWarn:    true,
-			UnderlyingErr: fmt.Errorf("UpdateInstanceTerminalWithCostAndWakeup: %w", err),
-		}, logger)
-	}
-
-	// Step 6: mark the inbound event processed.
-	if err := q.MarkEventProcessed(ctx, meta.EventID); err != nil {
-		return writeFinalizeFailure(parentCtx, deps, meta, writeTerminalOutcome{
-			ExitReason:    ExitFinalizePalaceWriteFailed,
-			HygieneStatus: "finalize_partial",
-			FailureClass:  "palace_write",
-			OrphanWarn:    true,
-			UnderlyingErr: fmt.Errorf("MarkEventProcessed: %w", err),
-		}, logger)
+	if err := writeTerminalAndMark(ctx, parentCtx, deps, q, meta, logger); err != nil {
+		return err
 	}
 
 	// Step 7: commit. Post-commit failures are the FR-265 palace_write_
@@ -281,13 +169,8 @@ func WriteFinalize(parentCtx context.Context, deps FinalizeWriteDeps, payload *f
 			reason = ExitFinalizeWriteTimeout
 			class = "timeout"
 		}
-		return writeFinalizeFailure(parentCtx, deps, meta, writeTerminalOutcome{
-			ExitReason:    reason,
-			HygieneStatus: "finalize_partial",
-			FailureClass:  class,
-			OrphanWarn:    true,
-			UnderlyingErr: fmt.Errorf("Commit: %w", err),
-		}, logger)
+		return failOrphan(parentCtx, deps, meta, logger, reason, class,
+			fmt.Errorf("Commit: %w", err))
 	}
 	committed = true
 
@@ -299,6 +182,134 @@ func WriteFinalize(parentCtx context.Context, deps FinalizeWriteDeps, payload *f
 		"to_column", meta.ToColumn,
 	)
 	return nil
+}
+
+// writePalaceArtifacts performs the M2.2 MemPalace writes (drawer +
+// triples). After AddDrawer succeeds and AddTriples is reached, any
+// failure leaves MemPalace with an orphan drawer.
+func writePalaceArtifacts(
+	ctx, parentCtx context.Context,
+	deps FinalizeWriteDeps,
+	meta FinalizeMeta,
+	payload *finalize.FinalizePayload,
+	objective string,
+	logger *slog.Logger,
+) error {
+	body := serializeDiary(objective, meta.TicketID, payload, time.Now().UTC())
+	if err := deps.Palace.AddDrawer(ctx, meta.Wing, "hall_events", body); err != nil {
+		reason, class := classifyPalaceErr(ctx, err)
+		return failWithoutOrphan(parentCtx, deps, meta, logger, reason, class,
+			fmt.Errorf("AddDrawer: %w", err))
+	}
+	triples := toMempalaceTriples(payload.KGTriples)
+	if err := deps.Palace.AddTriples(ctx, triples); err != nil {
+		reason, class := classifyPalaceErr(ctx, err)
+		return failOrphan(parentCtx, deps, meta, logger, reason, class,
+			fmt.Errorf("AddTriples: %w", err))
+	}
+	return nil
+}
+
+// writeTransitionRows performs Step 3+4 (InsertTicketTransition,
+// UpdateTicketTransitionHygiene, UpdateTicketColumnSlug). Any failure
+// here leaves a palace orphan because Step 1+2 already succeeded.
+func writeTransitionRows(
+	ctx, parentCtx context.Context,
+	deps FinalizeWriteDeps,
+	q *store.Queries,
+	meta FinalizeMeta,
+	hygieneStatus string,
+	logger *slog.Logger,
+) error {
+	clean := hygieneStatus
+	transitionID, err := q.InsertTicketTransition(ctx, store.InsertTicketTransitionParams{
+		TicketID:                   meta.TicketID,
+		FromColumn:                 &meta.FromColumn,
+		ToColumn:                   meta.ToColumn,
+		TriggeredByAgentInstanceID: meta.AgentInstanceID,
+	})
+	if err != nil {
+		return failOrphan(parentCtx, deps, meta, logger, ExitFinalizePalaceWriteFailed, "palace_write",
+			fmt.Errorf("InsertTicketTransition: %w", err))
+	}
+	if err := q.UpdateTicketTransitionHygiene(ctx, store.UpdateTicketTransitionHygieneParams{
+		ID:            transitionID,
+		HygieneStatus: &clean,
+	}); err != nil {
+		return failOrphan(parentCtx, deps, meta, logger, ExitFinalizePalaceWriteFailed, "palace_write",
+			fmt.Errorf("UpdateTicketTransitionHygiene: %w", err))
+	}
+	if err := q.UpdateTicketColumnSlug(ctx, store.UpdateTicketColumnSlugParams{
+		ID:         meta.TicketID,
+		ColumnSlug: meta.ToColumn,
+	}); err != nil {
+		return failOrphan(parentCtx, deps, meta, logger, ExitFinalizePalaceWriteFailed, "palace_write",
+			fmt.Errorf("UpdateTicketColumnSlug: %w", err))
+	}
+	return nil
+}
+
+// writeTerminalAndMark performs Step 5+6 (UpdateInstanceTerminal*,
+// MarkEventProcessed). Any failure here leaves a palace orphan.
+func writeTerminalAndMark(
+	ctx, parentCtx context.Context,
+	deps FinalizeWriteDeps,
+	q *store.Queries,
+	meta FinalizeMeta,
+	logger *slog.Logger,
+) error {
+	completedReason := ExitCompleted
+	var wakeUpPtr *string
+	if meta.WakeUpStatus != "" {
+		wakeUpPtr = &meta.WakeUpStatus
+	}
+	if err := q.UpdateInstanceTerminalWithCostAndWakeup(ctx, store.UpdateInstanceTerminalWithCostAndWakeupParams{
+		ID:           meta.AgentInstanceID,
+		Status:       "succeeded",
+		ExitReason:   &completedReason,
+		TotalCostUsd: meta.Cost,
+		WakeUpStatus: wakeUpPtr,
+	}); err != nil {
+		return failOrphan(parentCtx, deps, meta, logger, ExitFinalizePalaceWriteFailed, "palace_write",
+			fmt.Errorf("UpdateInstanceTerminalWithCostAndWakeup: %w", err))
+	}
+	if err := q.MarkEventProcessed(ctx, meta.EventID); err != nil {
+		return failOrphan(parentCtx, deps, meta, logger, ExitFinalizePalaceWriteFailed, "palace_write",
+			fmt.Errorf("MarkEventProcessed: %w", err))
+	}
+	return nil
+}
+
+// classifyPalaceErr maps an error from AddDrawer/AddTriples to the
+// (exit_reason, failure_class) pair: timeout vs. generic palace write.
+func classifyPalaceErr(ctx context.Context, err error) (string, string) {
+	if errors.Is(err, context.DeadlineExceeded) || isCtxDeadlineExceeded(ctx) {
+		return ExitFinalizeWriteTimeout, "timeout"
+	}
+	return ExitFinalizePalaceWriteFailed, "palace_write"
+}
+
+// failWithoutOrphan + failOrphan are thin wrappers that build the
+// writeTerminalOutcome and call writeFinalizeFailure. The OrphanWarn
+// flag is the only meaningful difference and tracks "did the MemPalace
+// drawer write succeed before this failure?".
+func failWithoutOrphan(parentCtx context.Context, deps FinalizeWriteDeps, meta FinalizeMeta, logger *slog.Logger, reason, class string, underlying error) error {
+	return writeFinalizeFailure(parentCtx, deps, meta, writeTerminalOutcome{
+		ExitReason:    reason,
+		HygieneStatus: "finalize_partial",
+		FailureClass:  class,
+		UnderlyingErr: underlying,
+	}, logger)
+}
+
+func failOrphan(parentCtx context.Context, deps FinalizeWriteDeps, meta FinalizeMeta, logger *slog.Logger, reason, class string, underlying error) error {
+	return writeFinalizeFailure(parentCtx, deps, meta, writeTerminalOutcome{
+		ExitReason:    reason,
+		HygieneStatus: "finalize_partial",
+		FailureClass:  class,
+		OrphanWarn:    true,
+		UnderlyingErr: underlying,
+	}, logger)
 }
 
 // writeFinalizeFailure emits the FR-277 failure log, writes the terminal
@@ -377,15 +388,15 @@ func serializeDiary(objective string, ticketID pgtype.UUID, payload *finalize.Fi
 	fmt.Fprintf(&b, "outcome: %s\n", escapeYAML(payload.Outcome))
 	b.WriteString("artifacts:\n")
 	for _, a := range payload.DiaryEntry.Artifacts {
-		fmt.Fprintf(&b, "  - %s\n", escapeYAML(a))
+		fmt.Fprintf(&b, diaryListItemFmt, escapeYAML(a))
 	}
 	b.WriteString("blockers:\n")
 	for _, a := range payload.DiaryEntry.Blockers {
-		fmt.Fprintf(&b, "  - %s\n", escapeYAML(a))
+		fmt.Fprintf(&b, diaryListItemFmt, escapeYAML(a))
 	}
 	b.WriteString("discoveries:\n")
 	for _, a := range payload.DiaryEntry.Discoveries {
-		fmt.Fprintf(&b, "  - %s\n", escapeYAML(a))
+		fmt.Fprintf(&b, diaryListItemFmt, escapeYAML(a))
 	}
 	fmt.Fprintf(&b, "completed_at: %s\n", completedAt.Format(time.RFC3339))
 	b.WriteString("---\n\n")

@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" fill="none" role="img" aria-label="garrison mark">
+  <path d="M10 18 V10 H18" stroke="#0A0A0A" stroke-width="4"></path>
+  <path d="M46 10 H54 V18" stroke="#0A0A0A" stroke-width="4"></path>
+  <path d="M54 46 V54 H46" stroke="#0A0A0A" stroke-width="4"></path>
+  <path d="M18 54 H10 V46" stroke="#0A0A0A" stroke-width="4"></path>
+  <rect x="28" y="28" width="8" height="8" fill="#1F8E63"></rect>
+</svg>

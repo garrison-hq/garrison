@@ -28,12 +28,12 @@ RUN apt-get update \
 
 # Hash-verified install via pip-compile'd lockfile. Mempalace 3.3.2 and
 # every transitive dep have pinned versions and sha256 hashes.
-COPY requirements-lock.txt /tmp/requirements-lock.txt
-RUN pip install --no-cache-dir --require-hashes -r /tmp/requirements-lock.txt
-
 # Palace lives on a named volume mounted at /palace (see docker-compose.yml).
 # Supervisor writes via docker exec; this image does not own palace state.
-RUN mkdir -p /palace && chown -R nobody:nogroup /palace
+COPY requirements-lock.txt /tmp/requirements-lock.txt
+RUN pip install --no-cache-dir --require-hashes -r /tmp/requirements-lock.txt \
+ && mkdir -p /palace \
+ && chown -R nobody:nogroup /palace
 
 USER nobody
 WORKDIR /palace

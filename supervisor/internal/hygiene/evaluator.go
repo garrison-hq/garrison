@@ -84,12 +84,7 @@ func EvaluateFinalizeOutcome(sig AgentInstanceFinalizeSignal) Status {
 		"finalize_commit_failed",
 		"finalize_write_timeout":
 		return StatusFinalizePartial
-	case "finalize_never_called":
-		if !sig.HasTransition {
-			return StatusStuck
-		}
-		return StatusPending
-	case "timeout":
+	case "finalize_never_called", "timeout":
 		if !sig.HasTransition {
 			return StatusStuck
 		}
@@ -165,8 +160,23 @@ func Evaluate(in EvaluationInput) Status {
 	if in.PalaceErr != nil {
 		return StatusPending
 	}
+	matchingDiary := findMatchingDiary(in)
+	if matchingDiary == nil {
+		return StatusMissingDiary
+	}
+	if len(matchingDiary.Body) < ThinBodyThreshold {
+		return StatusThin
+	}
+	if hasMatchingKGTriple(in) {
+		return StatusClean
+	}
+	return StatusMissingKG
+}
 
-	var matchingDiary *PalaceDrawer
+// findMatchingDiary returns the first drawer whose wing, creation
+// window, and body-substring all match the evaluation input. Pulled out
+// of Evaluate so the top-level decision tree stays readable.
+func findMatchingDiary(in EvaluationInput) *PalaceDrawer {
 	for i := range in.Drawers {
 		d := &in.Drawers[i]
 		if d.Wing != in.PalaceWing {
@@ -178,27 +188,24 @@ func Evaluate(in EvaluationInput) Status {
 		if !containsSubstring(d.Body, in.TicketIDText) {
 			continue
 		}
-		matchingDiary = d
-		break
+		return d
 	}
+	return nil
+}
 
-	if matchingDiary == nil {
-		return StatusMissingDiary
-	}
-	if len(matchingDiary.Body) < ThinBodyThreshold {
-		return StatusThin
-	}
-
+// hasMatchingKGTriple reports whether any KG triple within the run
+// window references the ticket id as subject or object.
+func hasMatchingKGTriple(in EvaluationInput) bool {
 	for i := range in.KGTriples {
 		tr := &in.KGTriples[i]
 		if !withinWindow(tr.ValidFrom, in.RunWindowStart, in.RunWindowEnd) {
 			continue
 		}
 		if tr.Subject == in.TicketIDText || tr.Object == in.TicketIDText {
-			return StatusClean
+			return true
 		}
 	}
-	return StatusMissingKG
+	return false
 }
 
 // withinWindow is an inclusive [start, end] check. Zero-valued end is

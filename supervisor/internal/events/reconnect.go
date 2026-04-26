@@ -74,19 +74,8 @@ func Run(ctx context.Context, deps Deps) error {
 			return nil
 		}
 
-		// Step 4 (initial) and "poll before LISTEN" (reconnect): one poll
-		// drain before (re-)issuing LISTEN so events that arrived during the
-		// outage are not missed (FR-007 + acceptance scenario US3 step 2).
-		if _, err := pollOnce(ctx, deps.Queries, deps.State, deps.Dispatcher); err != nil {
-			deps.Logger.Error("initial poll failed", "error", err)
-			// Fall through to LISTEN; the ticker in runPollTicker will retry.
-		} else if initial {
-			deps.Logger.Info("initial fallback poll ran")
-		}
+		runOneListenCycle(ctx, deps, conn, initial)
 
-		// Step 5–6: LISTEN until error or ctx cancel; ticker-driven polls
-		// continue in a sibling goroutine.
-		listenErr := runListenWithPollTicker(ctx, conn, deps)
 		if conn != nil {
 			_ = conn.Close(context.Background())
 			conn = nil
@@ -95,32 +84,55 @@ func Run(ctx context.Context, deps Deps) error {
 			return nil
 		}
 
-		// LISTEN returned an error — treat as a reconnect signal.
-		deps.Logger.Warn("LISTEN loop exited; will reconnect", "error", listenErr)
-
-		// Dial loop: back off, dial, repeat until we get a conn or ctx is
-		// cancelled. A dial failure must NOT fall through to pollOnce/listen
-		// with a nil conn — that would deref and panic.
-		for conn == nil {
-			wait := bo.Next()
-			deps.Logger.Info("reconnect backoff", "wait", wait)
-			timer := time.NewTimer(wait)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return nil
-			case <-timer.C:
-			}
-
-			newConn, err := deps.Dialer.DialConn(ctx, deps.DatabaseURL)
-			if err != nil {
-				deps.Logger.Error("reconnect dial failed", "error", err)
-				continue
-			}
-			bo.Reset()
-			conn = newConn
+		conn = redialUntilSuccess(ctx, deps, &bo)
+		if conn == nil {
+			return nil
 		}
 		initial = false
+	}
+}
+
+// runOneListenCycle runs the pre-LISTEN drain poll and the LISTEN +
+// poll-ticker pair until one of them exits. Errors are logged but not
+// returned: the caller decides how to recover (always: redial).
+func runOneListenCycle(ctx context.Context, deps Deps, conn *pgx.Conn, initial bool) {
+	// Step 4 (initial) and "poll before LISTEN" (reconnect): one poll
+	// drain before (re-)issuing LISTEN so events that arrived during the
+	// outage are not missed (FR-007 + acceptance scenario US3 step 2).
+	if _, err := pollOnce(ctx, deps.Queries, deps.State, deps.Dispatcher); err != nil {
+		deps.Logger.Error("initial poll failed", "error", err)
+	} else if initial {
+		deps.Logger.Info("initial fallback poll ran")
+	}
+	// Step 5–6: LISTEN until error or ctx cancel; ticker-driven polls
+	// continue in a sibling goroutine.
+	listenErr := runListenWithPollTicker(ctx, conn, deps)
+	deps.Logger.Warn("LISTEN loop exited; will reconnect", "error", listenErr)
+}
+
+// redialUntilSuccess backs off and retries DialConn until either a
+// connection is established (returned) or ctx is cancelled (returns
+// nil). A dial failure must NOT fall through to pollOnce/listen with a
+// nil conn — that would deref and panic — so this helper guarantees the
+// returned value is non-nil unless ctx is done.
+func redialUntilSuccess(ctx context.Context, deps Deps, bo *pgdb.Backoff) *pgx.Conn {
+	for {
+		wait := bo.Next()
+		deps.Logger.Info("reconnect backoff", "wait", wait)
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil
+		case <-timer.C:
+		}
+		newConn, err := deps.Dialer.DialConn(ctx, deps.DatabaseURL)
+		if err != nil {
+			deps.Logger.Error("reconnect dial failed", "error", err)
+			continue
+		}
+		bo.Reset()
+		return newConn
 	}
 }
 

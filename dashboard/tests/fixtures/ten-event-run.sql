@@ -1,0 +1,20 @@
+-- Test fixture for the 10-event-run acceptance check (FR-062 +
+-- SC-002). Seeds a single agent_instance + a sequence of 10
+-- ticket-transition rows pointing at the same instance, all
+-- belonging to the same ticket — simulating one Claude Code run
+-- that emitted 10 assistant events plus its lifecycle.
+--
+-- Used by tests/integration/activity-feed.spec.ts. The seeding
+-- code is JS-side; this file documents the shape for human
+-- review.
+
+-- 1. company + department + ticket + agent (assumed seeded by
+--    the test's local helper, not this file).
+-- 2. agent_instance with id=$instance_id, role_slug='engineer',
+--    ticket_id=$ticket_id.
+-- 3. 10 ticket_transitions on the same ticket, all triggered by
+--    $instance_id, with progressing to_columns:
+--      todo → in_dev (×3)  // 3 assistant-style mid-run notes
+--      in_dev → qa_review  // finalize
+--      qa_review → done
+--    plus a few intermediate same-column re-emits to reach 10.

@@ -221,58 +221,64 @@ func (p *pipelineRouter) OnAssistant(_ context.Context, e claudeproto.AssistantE
 	// Observational only (FR-218a); no dispatch consequence. Paired with
 	// a follow-up "outcome" line in OnUser when the tool_result arrives.
 	for _, tu := range e.ToolUses {
-		if isMempalaceToolName(tu.Name) {
-			if p.mempalaceToolUse == nil {
-				p.mempalaceToolUse = make(map[string]string, 4)
-			}
-			p.mempalaceToolUse[tu.ToolUseID] = tu.Name
-			p.logger.Info("mempalace tool_use",
-				"instance_id", uuidString(p.instanceID),
-				"ticket_id", uuidString(p.ticketID),
-				"tool_name", tu.Name,
-				"tool_use_id", tu.ToolUseID,
-				"outcome", "pending",
-			)
-			continue
+		switch {
+		case isMempalaceToolName(tu.Name):
+			p.recordMempalaceToolUse(tu)
+		case isFinalizeToolName(tu.Name) && p.finalize != nil && p.finalize.state != nil:
+			p.recordFinalizeToolUse(tu)
 		}
-		// M2.2.1 FR-276: info-level structured log for every
-		// finalize_ticket tool_use. Counter increments only while
-		// committed==false (post-commit tool_use events are logged but
-		// do not increment per FR-257). Track tool_use_id so OnUser
-		// can match the paired tool_result.
-		if isFinalizeToolName(tu.Name) && p.finalize != nil && p.finalize.state != nil {
-			if p.finalizeToolUse == nil {
-				p.finalizeToolUse = make(map[string]struct{}, 4)
-			}
-			p.finalizeToolUse[tu.ToolUseID] = struct{}{}
-			if p.finalize.toolUseInputs == nil {
-				p.finalize.toolUseInputs = make(map[string][]byte, 4)
-			}
-			// Copy the input raw bytes; claudeproto may reuse buffers.
-			if len(tu.InputRaw) > 0 {
-				buf := make([]byte, len(tu.InputRaw))
-				copy(buf, tu.InputRaw)
-				p.finalize.toolUseInputs[tu.ToolUseID] = buf
-			}
-			if !p.finalize.state.Committed {
-				p.finalize.state.Attempted = true
-				// Counter ticks on the matching tool_result (OnUser),
-				// not here — a tool_use without a tool_result is
-				// incomplete and should not consume an attempt per
-				// plan §"Subsystem state machines > Finalize attempt
-				// state machine".
-			}
-			p.logger.Info("finalize tool_use",
-				"instance_id", uuidString(p.instanceID),
-				"ticket_id", uuidString(p.ticketID),
-				"tool_use_id", tu.ToolUseID,
-				"attempt_pending", p.finalize.attempts+1,
-				"committed", p.finalize.state.Committed,
-			)
-			if p.finalize.onObserve != nil {
-				p.finalize.onObserve()
-			}
-		}
+	}
+}
+
+// recordMempalaceToolUse logs a pending mempalace_* tool_use and tracks
+// its tool_use_id so OnUser can pair the matching tool_result. Pure
+// observational path per FR-218a.
+func (p *pipelineRouter) recordMempalaceToolUse(tu claudeproto.ToolUseBlock) {
+	if p.mempalaceToolUse == nil {
+		p.mempalaceToolUse = make(map[string]string, 4)
+	}
+	p.mempalaceToolUse[tu.ToolUseID] = tu.Name
+	p.logger.Info("mempalace tool_use",
+		"instance_id", uuidString(p.instanceID),
+		"ticket_id", uuidString(p.ticketID),
+		"tool_name", tu.Name,
+		"tool_use_id", tu.ToolUseID,
+		"outcome", "pending",
+	)
+}
+
+// recordFinalizeToolUse handles M2.2.1 FR-276: info-level structured log
+// for every finalize_ticket tool_use plus the Attempted-flag bookkeeping.
+// Counter increments only on the matching tool_result (OnUser); a
+// tool_use without a tool_result is incomplete and should not consume an
+// attempt per plan §"Subsystem state machines > Finalize attempt state
+// machine".
+func (p *pipelineRouter) recordFinalizeToolUse(tu claudeproto.ToolUseBlock) {
+	if p.finalizeToolUse == nil {
+		p.finalizeToolUse = make(map[string]struct{}, 4)
+	}
+	p.finalizeToolUse[tu.ToolUseID] = struct{}{}
+	if p.finalize.toolUseInputs == nil {
+		p.finalize.toolUseInputs = make(map[string][]byte, 4)
+	}
+	if len(tu.InputRaw) > 0 {
+		// Copy the input raw bytes; claudeproto may reuse buffers.
+		buf := make([]byte, len(tu.InputRaw))
+		copy(buf, tu.InputRaw)
+		p.finalize.toolUseInputs[tu.ToolUseID] = buf
+	}
+	if !p.finalize.state.Committed {
+		p.finalize.state.Attempted = true
+	}
+	p.logger.Info("finalize tool_use",
+		"instance_id", uuidString(p.instanceID),
+		"ticket_id", uuidString(p.ticketID),
+		"tool_use_id", tu.ToolUseID,
+		"attempt_pending", p.finalize.attempts+1,
+		"committed", p.finalize.state.Committed,
+	)
+	if p.finalize.onObserve != nil {
+		p.finalize.onObserve()
 	}
 }
 
@@ -460,25 +466,7 @@ func Run(
 		return Result{}, errors.New("pipeline: logger is required")
 	}
 	result := Result{}
-	r := &pipelineRouter{
-		logger:     logger,
-		instanceID: instanceID,
-		ticketID:   ticketID,
-		result:     &result,
-	}
-	// M2.2.1 T006: wire the finalize observer when the role expects
-	// finalize. finalize.State must be non-nil so spawn.go's Adjudicate
-	// call can read the populated state after Run returns. OnBail
-	// defaults to the outer onBail so the counter-driven cap-exhaustion
-	// path reuses the same SIGTERM infra as MCP-bail.
-	if finalize.Expected && finalize.State != nil {
-		r.finalize = &finalizeHook{
-			state:    finalize.State,
-			onCommit: finalize.OnCommit,
-			onBail:   onBail,
-		}
-		finalize.State.Expected = true
-	}
+	r := newPipelineRouter(logger, instanceID, ticketID, &result, finalize, onBail)
 
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64<<10), stdoutBufferMax)
@@ -494,37 +482,83 @@ func Run(
 		buf := make([]byte, len(line))
 		copy(buf, line)
 
-		action, err := claudeproto.Route(ctx, buf, r)
-		if err != nil {
-			result.ParseError = true
-			logger.Error("claude stream parse error; bailing",
-				"instance_id", uuidString(instanceID),
-				"err", err,
-				"line", string(buf))
-			if onBail != nil {
-				onBail("parse_error")
-			}
-			return result, fmt.Errorf("pipeline: %w", err)
+		if err := dispatchStreamLine(ctx, buf, r, &result, instanceID, logger, onBail); err != nil {
+			return result, err
 		}
-		if action == claudeproto.RouterActionBail {
-			reason := "bail"
-			if result.MCPBailed {
-				reason = FormatMCPFailure(result.MCPOffenderName, result.MCPOffenderStatus)
-			}
-			if onBail != nil {
-				onBail(reason)
-			}
-			// Keep draining so we collect any follow-on events the
-			// subprocess may emit before it exits — but stop on the next
-			// read error, which is how the drain naturally terminates once
-			// the process dies.
-			continue
-		}
+		// On bail we keep draining so we collect any follow-on events the
+		// subprocess may emit before it exits — but stop on the next
+		// read error, which is how the drain naturally terminates once
+		// the process dies.
 	}
 	if err := scanner.Err(); err != nil && !errors.Is(err, io.EOF) {
 		return result, fmt.Errorf("pipeline: scan: %w", err)
 	}
 	return result, nil
+}
+
+// newPipelineRouter constructs the *pipelineRouter the scanner loop
+// dispatches into, including wiring the finalize observer when the role
+// expects finalize. finalize.State must be non-nil so spawn.go's
+// Adjudicate call can read the populated state after Run returns.
+// OnBail defaults to the outer onBail so the counter-driven
+// cap-exhaustion path reuses the same SIGTERM infra as MCP-bail.
+func newPipelineRouter(
+	logger *slog.Logger,
+	instanceID, ticketID pgtype.UUID,
+	result *Result,
+	finalize FinalizeDeps,
+	onBail func(reason string),
+) *pipelineRouter {
+	r := &pipelineRouter{
+		logger:     logger,
+		instanceID: instanceID,
+		ticketID:   ticketID,
+		result:     result,
+	}
+	if finalize.Expected && finalize.State != nil {
+		r.finalize = &finalizeHook{
+			state:    finalize.State,
+			onCommit: finalize.OnCommit,
+			onBail:   onBail,
+		}
+		finalize.State.Expected = true
+	}
+	return r
+}
+
+// dispatchStreamLine routes one stream-json line through claudeproto and
+// invokes onBail with the appropriate reason on parse error or bail.
+// Returns a non-nil error only on parse failure; bail signals fall
+// through so the scanner keeps draining.
+func dispatchStreamLine(
+	ctx context.Context,
+	buf []byte,
+	r *pipelineRouter,
+	result *Result,
+	instanceID pgtype.UUID,
+	logger *slog.Logger,
+	onBail func(reason string),
+) error {
+	action, err := claudeproto.Route(ctx, buf, r)
+	if err != nil {
+		result.ParseError = true
+		logger.Error("claude stream parse error; bailing",
+			"instance_id", uuidString(instanceID),
+			"err", err,
+			"line", string(buf))
+		if onBail != nil {
+			onBail("parse_error")
+		}
+		return fmt.Errorf("pipeline: %w", err)
+	}
+	if action == claudeproto.RouterActionBail && onBail != nil {
+		reason := "bail"
+		if result.MCPBailed {
+			reason = FormatMCPFailure(result.MCPOffenderName, result.MCPOffenderStatus)
+		}
+		onBail(reason)
+	}
+	return nil
 }
 
 // Adjudicate maps (observed stream state, wait-side detail, post-run hello

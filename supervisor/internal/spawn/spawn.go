@@ -47,6 +47,51 @@ const TerminalWriteGrace = 5 * time.Second
 // escalating. 2 seconds is a deliberate parity with the total NFR budget.
 const MCPBailSignalGrace = 2 * time.Second
 
+const (
+	roleQAEngineer     = "qa-engineer"
+	errBeginTerminalTx = "spawn: begin terminal tx: %w"
+	errMarkEventProcd  = "spawn: MarkEventProcessed: %w"
+	errCommitTerminal  = "spawn: commit terminal: %w"
+)
+
+// spawnPayload is the JSON shape every event payload carries. Extracted
+// to a named type so the anonymous struct doesn't have to be redeclared
+// at every site that reads it (lock-tx body, runFakeAgent, runRealClaude).
+type spawnPayload struct {
+	TicketID     string `json:"ticket_id"`
+	DepartmentID string `json:"department_id"`
+	ColumnSlug   string `json:"column_slug"`
+}
+
+// realClaudeInvocation bundles the per-event identifiers + role context
+// runRealClaude needs. Kept as a struct so the function signature stays
+// readable (S107: ≤ 7 params) without losing the fact that all four IDs
+// + dept + payload + role refer to the same spawn invocation.
+type realClaudeInvocation struct {
+	InstanceID pgtype.UUID
+	EventID    pgtype.UUID
+	TicketUUID pgtype.UUID
+	Dept       store.Department
+	Payload    spawnPayload
+	RoleSlug   string
+}
+
+// terminalWriteParams bundles every column writeTerminalCostAndWakeup
+// updates inside its single transaction. Extracted to keep the function
+// at S107-compliant arity while making call-site intent explicit.
+type terminalWriteParams struct {
+	InstanceID       pgtype.UUID
+	EventID          pgtype.UUID
+	TicketID         pgtype.UUID
+	Status           string
+	ExitReason       string
+	Cost             pgtype.Numeric
+	WakeUpStatus     string
+	InsertTransition bool
+	FromCol          string
+	ToCol            string
+}
+
 // Deps bundles Spawn's runtime collaborators. Constructed once in
 // cmd/supervisor and handed to the dispatcher so every event invocation
 // shares the same pool, logger, and config.
@@ -122,6 +167,19 @@ func (d Deps) UseFake() bool {
 	return d.UseFakeAgent || d.FakeAgentCmd != ""
 }
 
+// spawnPrep is the result of Spawn's first short transaction. When
+// done is true, Spawn returns immediately (already-processed dedupe,
+// missing-department mark-and-skip, or capacity-deferred path) — there
+// is no agent_instances row to drive. Otherwise the caller proceeds to
+// the fake-agent or real-Claude branch with the populated fields.
+type spawnPrep struct {
+	done       bool
+	instanceID pgtype.UUID
+	ticketUUID pgtype.UUID
+	dept       store.Department
+	payload    spawnPayload
+}
+
 // Spawn handles one work.ticket.created event end-to-end. Idempotent: a
 // second call with the same event_id is a no-op via the
 // LockEventForProcessing dedupe check, which is the guard against the
@@ -136,70 +194,64 @@ func Spawn(ctx context.Context, deps Deps, eventID pgtype.UUID, roleSlug string)
 	if roleSlug == "" {
 		roleSlug = "engineer" // M1/M2.1 back-compat default for fake-agent test paths
 	}
+	prep, err := prepareSpawn(ctx, deps, eventID, roleSlug)
+	if err != nil || prep.done {
+		return err
+	}
+	if deps.UseFake() {
+		return runFakeAgent(ctx, deps, prep.instanceID, eventID, prep.ticketUUID, prep.payload)
+	}
+	return runRealClaude(ctx, deps, realClaudeInvocation{
+		InstanceID: prep.instanceID,
+		EventID:    eventID,
+		TicketUUID: prep.ticketUUID,
+		Dept:       prep.dept,
+		Payload:    prep.payload,
+		RoleSlug:   roleSlug,
+	})
+}
+
+// prepareSpawn runs the dedupe transaction shared by the fake-agent and
+// real-Claude paths: LockEventForProcessing → decode payload → resolve
+// department → CheckCap → InsertRunningInstance → commit. Returns
+// spawnPrep{done:true} for the three terminal-without-agent_instance
+// outcomes (already-processed, deleted department, capacity-cap
+// deferred); a populated prep otherwise.
+func prepareSpawn(ctx context.Context, deps Deps, eventID pgtype.UUID, roleSlug string) (spawnPrep, error) {
 	tx, err := deps.Pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("spawn: begin dedupe tx: %w", err)
+		return spawnPrep{}, fmt.Errorf("spawn: begin dedupe tx: %w", err)
 	}
 	q := deps.Queries.WithTx(tx)
 
 	evt, err := q.LockEventForProcessing(ctx, eventID)
 	if err != nil {
 		_ = tx.Rollback(ctx)
-		return fmt.Errorf("spawn: LockEventForProcessing: %w", err)
+		return spawnPrep{}, fmt.Errorf("spawn: LockEventForProcessing: %w", err)
 	}
 	if evt.ProcessedAt.Valid {
 		_ = tx.Rollback(ctx)
-		return nil
+		return spawnPrep{done: true}, nil
 	}
 
-	var payload struct {
-		TicketID     string `json:"ticket_id"`
-		DepartmentID string `json:"department_id"`
-		ColumnSlug   string `json:"column_slug"`
-	}
-	if err := json.Unmarshal(evt.Payload, &payload); err != nil {
-		_ = tx.Rollback(ctx)
-		return fmt.Errorf("spawn: decode payload: %w", err)
-	}
-	ticketUUID, err := parseUUID(payload.TicketID)
+	payload, ticketUUID, deptUUID, err := decodeSpawnPayload(evt.Payload)
 	if err != nil {
 		_ = tx.Rollback(ctx)
-		return fmt.Errorf("spawn: ticket_id: %w", err)
-	}
-	deptUUID, err := parseUUID(payload.DepartmentID)
-	if err != nil {
-		_ = tx.Rollback(ctx)
-		return fmt.Errorf("spawn: department_id: %w", err)
+		return spawnPrep{}, err
 	}
 
-	dept, err := q.GetDepartmentByID(ctx, deptUUID)
+	dept, missing, err := resolveDeptOrSkip(ctx, q, deptUUID, eventID, payload, deps.Logger, tx)
 	if err != nil {
-		if !errors.Is(err, pgx.ErrNoRows) {
-			_ = tx.Rollback(ctx)
-			return fmt.Errorf("spawn: GetDepartmentByID: %w", err)
-		}
-		// Deleted-department edge: mark the event processed with no
-		// agent_instances row, log once at error level, return.
-		if err := q.MarkEventProcessed(ctx, eventID); err != nil {
-			_ = tx.Rollback(ctx)
-			return fmt.Errorf("spawn: MarkEventProcessed missing-dept: %w", err)
-		}
-		if err := tx.Commit(ctx); err != nil {
-			return fmt.Errorf("spawn: commit missing-dept: %w", err)
-		}
-		deps.Logger.Error("department missing for event",
-			"event_id", formatUUID(eventID),
-			"ticket_id", payload.TicketID,
-			"department_id", payload.DepartmentID,
-			"reason", ExitDepartmentMissing,
-		)
-		return nil
+		return spawnPrep{}, err
+	}
+	if missing {
+		return spawnPrep{done: true}, nil
 	}
 
 	allowed, capN, running, err := concurrency.CheckCap(ctx, q, deptUUID)
 	if err != nil {
 		_ = tx.Rollback(ctx)
-		return fmt.Errorf("spawn: CheckCap: %w", err)
+		return spawnPrep{}, fmt.Errorf("spawn: CheckCap: %w", err)
 	}
 	if !allowed {
 		_ = tx.Rollback(ctx)
@@ -209,7 +261,7 @@ func Spawn(ctx context.Context, deps Deps, eventID pgtype.UUID, roleSlug string)
 			"cap", capN,
 			"running", running,
 		)
-		return nil
+		return spawnPrep{done: true}, nil
 	}
 
 	instanceID, err := q.InsertRunningInstance(ctx, store.InsertRunningInstanceParams{
@@ -219,16 +271,72 @@ func Spawn(ctx context.Context, deps Deps, eventID pgtype.UUID, roleSlug string)
 	})
 	if err != nil {
 		_ = tx.Rollback(ctx)
-		return fmt.Errorf("spawn: InsertRunningInstance: %w", err)
+		return spawnPrep{}, fmt.Errorf("spawn: InsertRunningInstance: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("spawn: commit dedupe+running: %w", err)
+		return spawnPrep{}, fmt.Errorf("spawn: commit dedupe+running: %w", err)
 	}
+	return spawnPrep{
+		instanceID: instanceID,
+		ticketUUID: ticketUUID,
+		dept:       dept,
+		payload:    payload,
+	}, nil
+}
 
-	if deps.UseFake() {
-		return runFakeAgent(ctx, deps, instanceID, eventID, ticketUUID, payload)
+// decodeSpawnPayload unmarshals the event payload and parses both
+// referenced UUIDs. All three errors share the same caller-side handling
+// (tx rollback + return), so they're collapsed here.
+func decodeSpawnPayload(raw []byte) (spawnPayload, pgtype.UUID, pgtype.UUID, error) {
+	var payload spawnPayload
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return spawnPayload{}, pgtype.UUID{}, pgtype.UUID{}, fmt.Errorf("spawn: decode payload: %w", err)
 	}
-	return runRealClaude(ctx, deps, instanceID, eventID, ticketUUID, dept, payload, roleSlug)
+	ticketUUID, err := parseUUID(payload.TicketID)
+	if err != nil {
+		return spawnPayload{}, pgtype.UUID{}, pgtype.UUID{}, fmt.Errorf("spawn: ticket_id: %w", err)
+	}
+	deptUUID, err := parseUUID(payload.DepartmentID)
+	if err != nil {
+		return spawnPayload{}, pgtype.UUID{}, pgtype.UUID{}, fmt.Errorf("spawn: department_id: %w", err)
+	}
+	return payload, ticketUUID, deptUUID, nil
+}
+
+// resolveDeptOrSkip looks up the department row, handling the deleted-
+// department edge: mark the event processed, commit the tx, log once,
+// and signal the caller via missing=true to bail out cleanly.
+func resolveDeptOrSkip(
+	ctx context.Context,
+	q *store.Queries,
+	deptUUID pgtype.UUID,
+	eventID pgtype.UUID,
+	payload spawnPayload,
+	logger *slog.Logger,
+	tx pgx.Tx,
+) (store.Department, bool, error) {
+	dept, err := q.GetDepartmentByID(ctx, deptUUID)
+	if err == nil {
+		return dept, false, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		_ = tx.Rollback(ctx)
+		return store.Department{}, false, fmt.Errorf("spawn: GetDepartmentByID: %w", err)
+	}
+	if err := q.MarkEventProcessed(ctx, eventID); err != nil {
+		_ = tx.Rollback(ctx)
+		return store.Department{}, false, fmt.Errorf("spawn: MarkEventProcessed missing-dept: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return store.Department{}, false, fmt.Errorf("spawn: commit missing-dept: %w", err)
+	}
+	logger.Error("department missing for event",
+		"event_id", formatUUID(eventID),
+		"ticket_id", payload.TicketID,
+		"department_id", payload.DepartmentID,
+		"reason", ExitDepartmentMissing,
+	)
+	return store.Department{}, true, nil
 }
 
 // -----------------------------------------------------------------------
@@ -244,13 +352,9 @@ func runFakeAgent(
 	ctx context.Context,
 	deps Deps,
 	instanceID, eventID, _ pgtype.UUID,
-	payload struct {
-		TicketID     string `json:"ticket_id"`
-		DepartmentID string `json:"department_id"`
-		ColumnSlug   string `json:"column_slug"`
-	},
+	payload spawnPayload,
 ) error {
-	execCtx, execCancel := context.WithTimeout(context.Background(), deps.SubprocessTimeout)
+	execCtx, execCancel := context.WithTimeout(context.WithoutCancel(ctx), deps.SubprocessTimeout)
 	defer execCancel()
 
 	cmd, err := BuildCommand(execCtx, deps.FakeAgentCmd, payload.TicketID, payload.DepartmentID)
@@ -337,15 +441,15 @@ func runFakeAgent(
 func runRealClaude(
 	ctx context.Context,
 	deps Deps,
-	instanceID, eventID, ticketUUID pgtype.UUID,
-	dept store.Department,
-	payload struct {
-		TicketID     string `json:"ticket_id"`
-		DepartmentID string `json:"department_id"`
-		ColumnSlug   string `json:"column_slug"`
-	},
-	roleSlug string,
+	inv realClaudeInvocation,
 ) error {
+	instanceID := inv.InstanceID
+	eventID := inv.EventID
+	ticketUUID := inv.TicketUUID
+	dept := inv.Dept
+	payload := inv.Payload
+	roleSlug := inv.RoleSlug
+
 	logger := deps.Logger.With(
 		"event_id", formatUUID(eventID),
 		"instance_id", formatUUID(instanceID),
@@ -359,8 +463,13 @@ func runRealClaude(
 	// M2.2 terminal-write helper closure: always captures wake_up_status
 	// (possibly "" for pre-wake-up bailouts) + fromColumn/toColumn pair.
 	writeFail := func(exitReason string) error {
-		return writeTerminalCostAndWakeup(ctx, deps, instanceID, eventID, ticketUUID,
-			"failed", exitReason, pgtype.Numeric{}, "", false, "", "")
+		return writeTerminalCostAndWakeup(ctx, deps, terminalWriteParams{
+			InstanceID: instanceID,
+			EventID:    eventID,
+			TicketID:   ticketUUID,
+			Status:     "failed",
+			ExitReason: exitReason,
+		})
 	}
 
 	// Step 3: resolve agent row from the startup cache. Role-slug
@@ -469,7 +578,7 @@ func runRealClaude(
 	}()
 
 	// Step 5 + 6: build argv + configure exec.Cmd.
-	execCtx, execCancel := context.WithTimeout(context.Background(), deps.SubprocessTimeout)
+	execCtx, execCancel := context.WithTimeout(context.WithoutCancel(ctx), deps.SubprocessTimeout)
 	defer execCancel()
 
 	model := agent.Model
@@ -779,8 +888,18 @@ func runRealClaude(
 	// other role (fake-agent M2.1 tests that default to "engineer" via
 	// Spawn's backward-compat branch) lands on the M2.1 todo → done path.
 	// fromCol, toCol were computed earlier for the finalize onCommit; reuse.
-	return writeTerminalCostAndWakeup(termCtx, deps, instanceID, eventID, ticketUUID,
-		status, exitReason, cost, string(wakeUpStatus), insertTransition, fromCol, toCol)
+	return writeTerminalCostAndWakeup(termCtx, deps, terminalWriteParams{
+		InstanceID:       instanceID,
+		EventID:          eventID,
+		TicketID:         ticketUUID,
+		Status:           status,
+		ExitReason:       exitReason,
+		Cost:             cost,
+		WakeUpStatus:     string(wakeUpStatus),
+		InsertTransition: insertTransition,
+		FromCol:          fromCol,
+		ToCol:            toCol,
+	})
 }
 
 // acceptanceGateSatisfied returns true for (role, origin-column) pairs
@@ -798,7 +917,7 @@ func acceptanceGateSatisfied(roleSlug, fromColumn string) bool {
 		// in_dev workflow. M2.1 engineer@todo and any call without
 		// column info fall through to the M1 hello.txt check.
 		return fromColumn == "in_dev"
-	case "qa-engineer":
+	case roleQAEngineer:
 		return true
 	default:
 		return false
@@ -817,7 +936,7 @@ func finalizeExpectedForRole(roleSlug, fromColumn string) bool {
 	switch roleSlug {
 	case "engineer":
 		return fromColumn == "in_dev"
-	case "qa-engineer":
+	case roleQAEngineer:
 		return true
 	default:
 		return false
@@ -841,7 +960,7 @@ func transitionColumns(roleSlug, fromColumn string) (from, to string) {
 			return "todo", "done"
 		}
 		return "in_dev", "qa_review"
-	case "qa-engineer":
+	case roleQAEngineer:
 		return "qa_review", "done"
 	default:
 		return "todo", "done"
@@ -944,7 +1063,7 @@ func Classify(exitCode int, sigName string, ctxErr error, shutdownSigkilled bool
 func writeTerminal(ctx context.Context, deps Deps, instanceID, eventID pgtype.UUID, status, exitReason string) error {
 	tx, err := deps.Pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("spawn: begin terminal tx: %w", err)
+		return fmt.Errorf(errBeginTerminalTx, err)
 	}
 	q := deps.Queries.WithTx(tx)
 	reason := exitReason
@@ -958,67 +1077,10 @@ func writeTerminal(ctx context.Context, deps Deps, instanceID, eventID pgtype.UU
 	}
 	if err := q.MarkEventProcessed(ctx, eventID); err != nil {
 		_ = tx.Rollback(ctx)
-		return fmt.Errorf("spawn: MarkEventProcessed: %w", err)
+		return fmt.Errorf(errMarkEventProcd, err)
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("spawn: commit terminal: %w", err)
-	}
-	return nil
-}
-
-// writeTerminalCost is the M2.1 widened terminal tx: UpdateInstanceTerminal
-// WithCost + (optional) InsertTicketTransition + (optional)
-// UpdateTicketColumnSlug + MarkEventProcessed, all in a single
-// transaction. The transition + column update only fire when
-// insertTransition is true — i.e. on the succeeded path, per FR-114.
-func writeTerminalCost(
-	ctx context.Context,
-	deps Deps,
-	instanceID, eventID, ticketID pgtype.UUID,
-	status, exitReason string,
-	cost pgtype.Numeric,
-	insertTransition bool,
-) error {
-	tx, err := deps.Pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("spawn: begin terminal tx: %w", err)
-	}
-	q := deps.Queries.WithTx(tx)
-	reason := exitReason
-	if err := q.UpdateInstanceTerminalWithCost(ctx, store.UpdateInstanceTerminalWithCostParams{
-		ID:           instanceID,
-		Status:       status,
-		ExitReason:   &reason,
-		TotalCostUsd: cost,
-	}); err != nil {
-		_ = tx.Rollback(ctx)
-		return fmt.Errorf("spawn: UpdateInstanceTerminalWithCost: %w", err)
-	}
-	if insertTransition && ticketID.Valid {
-		fromCol := "todo"
-		if _, err := q.InsertTicketTransition(ctx, store.InsertTicketTransitionParams{
-			TicketID:                   ticketID,
-			FromColumn:                 &fromCol,
-			ToColumn:                   "done",
-			TriggeredByAgentInstanceID: instanceID,
-		}); err != nil {
-			_ = tx.Rollback(ctx)
-			return fmt.Errorf("spawn: InsertTicketTransition: %w", err)
-		}
-		if err := q.UpdateTicketColumnSlug(ctx, store.UpdateTicketColumnSlugParams{
-			ID:         ticketID,
-			ColumnSlug: "done",
-		}); err != nil {
-			_ = tx.Rollback(ctx)
-			return fmt.Errorf("spawn: UpdateTicketColumnSlug: %w", err)
-		}
-	}
-	if err := q.MarkEventProcessed(ctx, eventID); err != nil {
-		_ = tx.Rollback(ctx)
-		return fmt.Errorf("spawn: MarkEventProcessed: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("spawn: commit terminal: %w", err)
+		return fmt.Errorf(errCommitTerminal, err)
 	}
 	return nil
 }
@@ -1028,67 +1090,58 @@ func writeTerminalCost(
 // supports role-slug-configurable transition column pairs, and commits
 // everything in one tx with MarkEventProcessed.
 //
-// wakeUpStatus is a typed string ("ok" / "failed" / "skipped"); empty
+// p.WakeUpStatus is a typed string ("ok" / "failed" / "skipped"); empty
 // string writes NULL to the column (pre-wake-up bailout paths).
 //
-// fromCol / toCol: empty strings skip the transition writes entirely.
+// p.FromCol / p.ToCol: empty strings skip the transition writes entirely.
 // Non-empty on the succeeded path insert a ticket_transitions row and
-// update tickets.column_slug to toCol.
-func writeTerminalCostAndWakeup(
-	ctx context.Context,
-	deps Deps,
-	instanceID, eventID, ticketID pgtype.UUID,
-	status, exitReason string,
-	cost pgtype.Numeric,
-	wakeUpStatus string,
-	insertTransition bool,
-	fromCol, toCol string,
-) error {
+// update tickets.column_slug to p.ToCol.
+func writeTerminalCostAndWakeup(ctx context.Context, deps Deps, p terminalWriteParams) error {
 	tx, err := deps.Pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("spawn: begin terminal tx: %w", err)
+		return fmt.Errorf(errBeginTerminalTx, err)
 	}
 	q := deps.Queries.WithTx(tx)
-	reason := exitReason
+	reason := p.ExitReason
 	var wakeUpPtr *string
-	if wakeUpStatus != "" {
-		wakeUpPtr = &wakeUpStatus
+	if p.WakeUpStatus != "" {
+		wakeUpPtr = &p.WakeUpStatus
 	}
 	if err := q.UpdateInstanceTerminalWithCostAndWakeup(ctx, store.UpdateInstanceTerminalWithCostAndWakeupParams{
-		ID:           instanceID,
-		Status:       status,
+		ID:           p.InstanceID,
+		Status:       p.Status,
 		ExitReason:   &reason,
-		TotalCostUsd: cost,
+		TotalCostUsd: p.Cost,
 		WakeUpStatus: wakeUpPtr,
 	}); err != nil {
 		_ = tx.Rollback(ctx)
 		return fmt.Errorf("spawn: UpdateInstanceTerminalWithCostAndWakeup: %w", err)
 	}
-	if insertTransition && ticketID.Valid && fromCol != "" && toCol != "" {
-		from := fromCol
+	if p.InsertTransition && p.TicketID.Valid && p.FromCol != "" && p.ToCol != "" {
+		from := p.FromCol
 		if _, err := q.InsertTicketTransition(ctx, store.InsertTicketTransitionParams{
-			TicketID:                   ticketID,
+			TicketID:                   p.TicketID,
 			FromColumn:                 &from,
-			ToColumn:                   toCol,
-			TriggeredByAgentInstanceID: instanceID,
+			ToColumn:                   p.ToCol,
+			TriggeredByAgentInstanceID: p.InstanceID,
 		}); err != nil {
 			_ = tx.Rollback(ctx)
 			return fmt.Errorf("spawn: InsertTicketTransition: %w", err)
 		}
 		if err := q.UpdateTicketColumnSlug(ctx, store.UpdateTicketColumnSlugParams{
-			ID:         ticketID,
-			ColumnSlug: toCol,
+			ID:         p.TicketID,
+			ColumnSlug: p.ToCol,
 		}); err != nil {
 			_ = tx.Rollback(ctx)
 			return fmt.Errorf("spawn: UpdateTicketColumnSlug: %w", err)
 		}
 	}
-	if err := q.MarkEventProcessed(ctx, eventID); err != nil {
+	if err := q.MarkEventProcessed(ctx, p.EventID); err != nil {
 		_ = tx.Rollback(ctx)
-		return fmt.Errorf("spawn: MarkEventProcessed: %w", err)
+		return fmt.Errorf(errMarkEventProcd, err)
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("spawn: commit terminal: %w", err)
+		return fmt.Errorf(errCommitTerminal, err)
 	}
 	return nil
 }

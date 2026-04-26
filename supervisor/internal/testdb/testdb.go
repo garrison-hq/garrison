@@ -20,6 +20,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
+	// Registers the pgx database/sql driver (used by goose for migrations).
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
 	"github.com/testcontainers/testcontainers-go"
@@ -35,6 +36,8 @@ var (
 	sharedContainer testcontainers.Container
 )
 
+const errTestdbInit = "testdb: init: %v"
+
 // Start returns a migrated *pgxpool.Pool backed by a shared postgres:17
 // container. The first call boots the container and applies every
 // migration (M1 + M2.1); later calls reuse the same pool. Each Start
@@ -47,7 +50,7 @@ func Start(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	initOnce.Do(func() { initErr = bootContainer() })
 	if initErr != nil {
-		t.Fatalf("testdb: init: %v", initErr)
+		t.Fatalf(errTestdbInit, initErr)
 	}
 	truncate := func() {
 		_, _ = sharedPool.Exec(context.Background(),
@@ -72,7 +75,7 @@ func SetAgentROPassword(t *testing.T, password string) {
 	t.Helper()
 	initOnce.Do(func() { initErr = bootContainer() })
 	if initErr != nil {
-		t.Fatalf("testdb: init: %v", initErr)
+		t.Fatalf(errTestdbInit, initErr)
 	}
 	if _, err := sharedPool.Exec(context.Background(),
 		fmt.Sprintf(`ALTER ROLE garrison_agent_ro WITH PASSWORD '%s'`, password),
@@ -136,7 +139,7 @@ func SetAgentMempalacePassword(t *testing.T, password string) {
 	t.Helper()
 	initOnce.Do(func() { initErr = bootContainer() })
 	if initErr != nil {
-		t.Fatalf("testdb: init: %v", initErr)
+		t.Fatalf(errTestdbInit, initErr)
 	}
 	if _, err := sharedPool.Exec(context.Background(),
 		fmt.Sprintf(`ALTER ROLE garrison_agent_mempalace WITH PASSWORD '%s'`, password),
@@ -231,7 +234,7 @@ func URL(t *testing.T) string {
 	t.Helper()
 	initOnce.Do(func() { initErr = bootContainer() })
 	if initErr != nil {
-		t.Fatalf("testdb: init: %v", initErr)
+		t.Fatalf(errTestdbInit, initErr)
 	}
 	return sharedURL
 }
@@ -244,7 +247,7 @@ func Container(t *testing.T) testcontainers.Container {
 	t.Helper()
 	initOnce.Do(func() { initErr = bootContainer() })
 	if initErr != nil {
-		t.Fatalf("testdb: init: %v", initErr)
+		t.Fatalf(errTestdbInit, initErr)
 	}
 	return sharedContainer
 }

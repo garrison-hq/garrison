@@ -61,74 +61,89 @@ func Route(ctx context.Context, raw []byte, r Router) (RouterAction, error) {
 
 	switch env.Type {
 	case "system":
-		switch env.Subtype {
-		case "init":
-			var e InitEvent
-			if err := json.Unmarshal(raw, &e); err != nil {
-				return RouterActionBail, fmt.Errorf("claudeproto: decode init: %w", err)
-			}
-			e.Raw = raw
-			return r.OnInit(ctx, e), nil
-		case "task_started":
-			r.OnTaskStarted(ctx, TaskStartedEvent{Raw: raw})
-			return RouterActionContinue, nil
-		default:
-			r.OnUnknown(ctx, UnknownEvent{Type: env.Type, Subtype: env.Subtype, Raw: raw})
-			return RouterActionContinue, nil
-		}
-
+		return routeSystem(ctx, raw, env, r)
 	case "assistant":
-		e, err := decodeAssistant(raw)
-		if err != nil {
-			return RouterActionBail, fmt.Errorf("claudeproto: decode assistant: %w", err)
-		}
-		r.OnAssistant(ctx, e)
-		return RouterActionContinue, nil
-
+		return routeAssistant(ctx, raw, r)
 	case "user":
-		e, err := decodeUser(raw)
-		if err != nil {
-			return RouterActionBail, fmt.Errorf("claudeproto: decode user: %w", err)
-		}
-		r.OnUser(ctx, e)
-		return RouterActionContinue, nil
-
+		return routeUser(ctx, raw, r)
 	case "rate_limit_event":
-		var e RateLimitEvent
-		if err := json.Unmarshal(raw, &e); err != nil {
-			return RouterActionBail, fmt.Errorf("claudeproto: decode rate_limit_event: %w", err)
-		}
-		e.Raw = raw
-		r.OnRateLimit(ctx, e)
-		return RouterActionContinue, nil
-
+		return routeRateLimit(ctx, raw, r)
 	case "result":
-		// Use decoder.UseNumber so total_cost_usd round-trips with full
-		// decimal precision into json.Number (no float64 conversion).
-		dec := json.NewDecoder(bytes.NewReader(raw))
-		dec.UseNumber()
-		var e ResultEvent
-		if err := dec.Decode(&e); err != nil {
-			return RouterActionBail, fmt.Errorf("claudeproto: decode result: %w", err)
-		}
-		e.Raw = raw
-		// Derive a single-word TerminalReason from subtype (+ stop_reason
-		// fallback). On 2.1.117 the value is "success" on happy paths.
-		switch {
-		case e.Subtype != "":
-			e.TerminalReason = e.Subtype
-		case e.StopReason != "":
-			e.TerminalReason = e.StopReason
-		default:
-			e.TerminalReason = "completed"
-		}
-		r.OnResult(ctx, e)
-		return RouterActionContinue, nil
-
+		return routeResult(ctx, raw, r)
 	default:
 		r.OnUnknown(ctx, UnknownEvent{Type: env.Type, Subtype: env.Subtype, Raw: raw})
 		return RouterActionContinue, nil
 	}
+}
+
+func routeSystem(ctx context.Context, raw []byte, env envelope, r Router) (RouterAction, error) {
+	switch env.Subtype {
+	case "init":
+		var e InitEvent
+		if err := json.Unmarshal(raw, &e); err != nil {
+			return RouterActionBail, fmt.Errorf("claudeproto: decode init: %w", err)
+		}
+		e.Raw = raw
+		return r.OnInit(ctx, e), nil
+	case "task_started":
+		r.OnTaskStarted(ctx, TaskStartedEvent{Raw: raw})
+		return RouterActionContinue, nil
+	default:
+		r.OnUnknown(ctx, UnknownEvent{Type: env.Type, Subtype: env.Subtype, Raw: raw})
+		return RouterActionContinue, nil
+	}
+}
+
+func routeAssistant(ctx context.Context, raw []byte, r Router) (RouterAction, error) {
+	e, err := decodeAssistant(raw)
+	if err != nil {
+		return RouterActionBail, fmt.Errorf("claudeproto: decode assistant: %w", err)
+	}
+	r.OnAssistant(ctx, e)
+	return RouterActionContinue, nil
+}
+
+func routeUser(ctx context.Context, raw []byte, r Router) (RouterAction, error) {
+	e, err := decodeUser(raw)
+	if err != nil {
+		return RouterActionBail, fmt.Errorf("claudeproto: decode user: %w", err)
+	}
+	r.OnUser(ctx, e)
+	return RouterActionContinue, nil
+}
+
+func routeRateLimit(ctx context.Context, raw []byte, r Router) (RouterAction, error) {
+	var e RateLimitEvent
+	if err := json.Unmarshal(raw, &e); err != nil {
+		return RouterActionBail, fmt.Errorf("claudeproto: decode rate_limit_event: %w", err)
+	}
+	e.Raw = raw
+	r.OnRateLimit(ctx, e)
+	return RouterActionContinue, nil
+}
+
+func routeResult(ctx context.Context, raw []byte, r Router) (RouterAction, error) {
+	// Use decoder.UseNumber so total_cost_usd round-trips with full
+	// decimal precision into json.Number (no float64 conversion).
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var e ResultEvent
+	if err := dec.Decode(&e); err != nil {
+		return RouterActionBail, fmt.Errorf("claudeproto: decode result: %w", err)
+	}
+	e.Raw = raw
+	// Derive a single-word TerminalReason from subtype (+ stop_reason
+	// fallback). On 2.1.117 the value is "success" on happy paths.
+	switch {
+	case e.Subtype != "":
+		e.TerminalReason = e.Subtype
+	case e.StopReason != "":
+		e.TerminalReason = e.StopReason
+	default:
+		e.TerminalReason = "completed"
+	}
+	r.OnResult(ctx, e)
+	return RouterActionContinue, nil
 }
 
 // decodeAssistant pulls out the fields the supervisor actually logs

@@ -221,37 +221,14 @@ func Load() (*Config, error) {
 		cfg.UseFakeAgent = true
 	}
 
-	if v := os.Getenv("GARRISON_POLL_INTERVAL"); v != "" {
-		d, err := time.ParseDuration(v)
-		if err != nil {
-			return nil, fmt.Errorf("config: GARRISON_POLL_INTERVAL %q is not a valid duration: %w", v, err)
-		}
-		if d < MinPollInterval {
-			return nil, fmt.Errorf("config: GARRISON_POLL_INTERVAL (%s) must be >= %s", d, MinPollInterval)
-		}
-		cfg.PollInterval = d
+	if err := parseDurationWithMin("GARRISON_POLL_INTERVAL", MinPollInterval, &cfg.PollInterval); err != nil {
+		return nil, err
 	}
-
-	if v := os.Getenv("GARRISON_SUBPROCESS_TIMEOUT"); v != "" {
-		d, err := time.ParseDuration(v)
-		if err != nil {
-			return nil, fmt.Errorf("config: GARRISON_SUBPROCESS_TIMEOUT %q is not a valid duration: %w", v, err)
-		}
-		if d <= 0 {
-			return nil, fmt.Errorf("config: GARRISON_SUBPROCESS_TIMEOUT must be positive (got %s)", d)
-		}
-		cfg.SubprocessTimeout = d
+	if err := parsePositiveDuration("GARRISON_SUBPROCESS_TIMEOUT", &cfg.SubprocessTimeout); err != nil {
+		return nil, err
 	}
-
-	if v := os.Getenv("GARRISON_SHUTDOWN_GRACE"); v != "" {
-		d, err := time.ParseDuration(v)
-		if err != nil {
-			return nil, fmt.Errorf("config: GARRISON_SHUTDOWN_GRACE %q is not a valid duration: %w", v, err)
-		}
-		if d <= 0 {
-			return nil, fmt.Errorf("config: GARRISON_SHUTDOWN_GRACE must be positive (got %s)", d)
-		}
-		cfg.ShutdownGrace = d
+	if err := parsePositiveDuration("GARRISON_SHUTDOWN_GRACE", &cfg.ShutdownGrace); err != nil {
+		return nil, err
 	}
 
 	if v := os.Getenv("GARRISON_HEALTH_PORT"); v != "" {
@@ -308,35 +285,14 @@ func Load() (*Config, error) {
 	if v := os.Getenv("DOCKER_HOST"); v != "" {
 		cfg.DockerHost = v
 	}
-	if v := os.Getenv("GARRISON_HYGIENE_DELAY"); v != "" {
-		d, err := time.ParseDuration(v)
-		if err != nil {
-			return nil, fmt.Errorf("config: GARRISON_HYGIENE_DELAY %q is not a valid duration: %w", v, err)
-		}
-		if d <= 0 {
-			return nil, fmt.Errorf("config: GARRISON_HYGIENE_DELAY must be positive (got %s)", d)
-		}
-		cfg.HygieneDelay = d
+	if err := parsePositiveDuration("GARRISON_HYGIENE_DELAY", &cfg.HygieneDelay); err != nil {
+		return nil, err
 	}
-	if v := os.Getenv("GARRISON_HYGIENE_SWEEP_INTERVAL"); v != "" {
-		d, err := time.ParseDuration(v)
-		if err != nil {
-			return nil, fmt.Errorf("config: GARRISON_HYGIENE_SWEEP_INTERVAL %q is not a valid duration: %w", v, err)
-		}
-		if d <= 0 {
-			return nil, fmt.Errorf("config: GARRISON_HYGIENE_SWEEP_INTERVAL must be positive (got %s)", d)
-		}
-		cfg.HygieneSweepInterval = d
+	if err := parsePositiveDuration("GARRISON_HYGIENE_SWEEP_INTERVAL", &cfg.HygieneSweepInterval); err != nil {
+		return nil, err
 	}
-	if v := os.Getenv("GARRISON_FINALIZE_WRITE_TIMEOUT"); v != "" {
-		d, err := time.ParseDuration(v)
-		if err != nil {
-			return nil, fmt.Errorf("config: GARRISON_FINALIZE_WRITE_TIMEOUT %q is not a valid duration: %w", v, err)
-		}
-		if d <= 0 {
-			return nil, fmt.Errorf("config: GARRISON_FINALIZE_WRITE_TIMEOUT must be positive (got %s)", d)
-		}
-		cfg.FinalizeWriteTimeout = d
+	if err := parsePositiveDuration("GARRISON_FINALIZE_WRITE_TIMEOUT", &cfg.FinalizeWriteTimeout); err != nil {
+		return nil, err
 	}
 
 	if v := os.Getenv("GARRISON_DISABLE_PALACE_BOOTSTRAP"); v == "1" || strings.EqualFold(v, "true") {
@@ -500,6 +456,45 @@ func ensureWritableDir(dir string) error {
 	// filepath.Clean just to flag unusual inputs in the probe name — not
 	// strictly needed but keeps the error path tidy if anything goes wrong.
 	_ = filepath.Clean(dir)
+	return nil
+}
+
+// parsePositiveDuration reads an env var, parses it as a time.Duration,
+// validates it is strictly positive, and writes the result through dst.
+// An unset/empty env var leaves dst unchanged. Used to compress the
+// repeated parse-validate-assign blocks in Load().
+func parsePositiveDuration(envName string, dst *time.Duration) error {
+	v := os.Getenv(envName)
+	if v == "" {
+		return nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return fmt.Errorf("config: %s %q is not a valid duration: %w", envName, v, err)
+	}
+	if d <= 0 {
+		return fmt.Errorf("config: %s must be positive (got %s)", envName, d)
+	}
+	*dst = d
+	return nil
+}
+
+// parseDurationWithMin is the parsePositiveDuration variant that
+// enforces a >= minimum duration check (used by GARRISON_POLL_INTERVAL,
+// whose floor is 100ms per FR-009).
+func parseDurationWithMin(envName string, minimum time.Duration, dst *time.Duration) error {
+	v := os.Getenv(envName)
+	if v == "" {
+		return nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return fmt.Errorf("config: %s %q is not a valid duration: %w", envName, v, err)
+	}
+	if d < minimum {
+		return fmt.Errorf("config: %s (%s) must be >= %s", envName, d, minimum)
+	}
+	*dst = d
 	return nil
 }
 

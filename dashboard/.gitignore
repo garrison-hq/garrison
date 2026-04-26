@@ -1,0 +1,38 @@
+# Next.js build output + caches
+.next/
+out/
+
+# Node tooling
+node_modules/
+
+# Bun
+.bun/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# Local env files
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Test outputs
+coverage/
+test-results/
+playwright-report/
+playwright/.cache/
+tests/integration/.harness/
+
+# Drizzle pull intermediate output (canonical schema lives at
+# drizzle/schema.ts; the _introspected/ subdir is regenerated each
+# time `bun run drizzle:pull` runs and is not source-of-truth).
+drizzle/_introspected/
+
+# OS / editor noise
+.DS_Store
+*.tsbuildinfo
+next-env.d.ts
