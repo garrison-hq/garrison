@@ -25,9 +25,12 @@ beforeEach(async () => {
 async function seedEvent(channel: string, payload: Record<string, unknown>, atIso: string) {
   const sql = postgres(env.TEST_SUPERUSER_DSN, { max: 1 });
   try {
+    // postgres-js sends `${JSON.stringify(p)}::jsonb` as a JSON
+    // scalar string (the entire object as a quoted string), not as
+    // a JSON object. Use sql.json to round-trip jsonb correctly.
     await sql`
       INSERT INTO event_outbox (channel, payload, created_at)
-      VALUES (${channel}, ${JSON.stringify(payload)}::jsonb, ${atIso}::timestamptz)
+      VALUES (${channel}, ${sql.json(payload)}, ${atIso}::timestamptz)
     `;
   } finally {
     await sql.end();

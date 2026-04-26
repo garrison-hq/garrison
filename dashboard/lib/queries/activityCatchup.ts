@@ -29,7 +29,7 @@ export async function fetchEventsAfter(
   }>(sql`
     SELECT id, channel, payload, created_at
       FROM event_outbox
-     ${cursorIso ? sql`WHERE created_at > ${new Date(cursorIso)}` : sql``}
+     ${cursorIso ? sql`WHERE created_at > ${cursorIso}::timestamptz` : sql``}
      ORDER BY created_at ASC, id ASC
      LIMIT ${cap}
   `);
