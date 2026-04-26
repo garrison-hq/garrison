@@ -29,6 +29,29 @@ export default defineConfig({
     // Tests share one DB — run serially to avoid TRUNCATE races
     // between specs.
     fileParallelism: false,
+    // Coverage reporting: lcov.info under coverage/ for Sonar's
+    // sonar.javascript.lcov.reportPaths. Surface code only —
+    // tests, drizzle-generated schema, and test fixtures don't
+    // count toward the coverage metric.
+    coverage: {
+      provider: 'v8',
+      reporter: ['text', 'lcov'],
+      reportsDirectory: './coverage',
+      include: [
+        'lib/**/*.{ts,tsx}',
+        'components/**/*.{ts,tsx}',
+        'app/**/*.{ts,tsx}',
+      ],
+      exclude: [
+        'node_modules/**',
+        '.next/**',
+        'tests/**',
+        'drizzle/**',
+        'scripts/**',
+        '**/*.test.{ts,tsx}',
+        '**/*.spec.{ts,tsx}',
+      ],
+    },
   },
   resolve: {
     alias: {

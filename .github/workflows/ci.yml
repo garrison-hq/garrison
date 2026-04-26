@@ -93,13 +93,74 @@ jobs:
       - run: make build
       - run: ./bin/supervisor --version
 
+  # --- M3 dashboard (TypeScript / Next.js) ---------------------------------
+  dashboard-typecheck:
+    name: dashboard (typecheck)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dashboard
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+
+  dashboard-test-unit:
+    name: dashboard (test + coverage)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dashboard
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      # vitest globalSetup boots a Postgres testcontainer and applies
+      # both goose + drizzle migrations; the unit tests run against
+      # that container. The runner needs Docker available — Ubuntu
+      # GitHub runners ship docker.
+      - run: bun run test:coverage
+      - name: Upload dashboard coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: dashboard-coverage
+          path: dashboard/coverage/lcov.info
+          if-no-files-found: error
+
+  dashboard-build:
+    name: dashboard (production build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dashboard
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      # Build with placeholder DSNs — the lazy-init clients in
+      # lib/db/{appClient,vaultRoClient}.ts no longer throw at
+      # module-load time, so this just verifies next build succeeds
+      # against the current schema + components.
+      - run: bun run build
+        env:
+          DASHBOARD_APP_DSN: postgres://placeholder@localhost:5432/x
+          DASHBOARD_RO_DSN: postgres://placeholder@localhost:5432/x
+          BETTER_AUTH_SECRET: ci_placeholder_long_enough_xxxxxxxxxxxxxxxxx
+
   sonarcloud:
     name: SonarCloud scan
     runs-on: ubuntu-latest
-    # Needs both test suites so the scan sees merged unit + integration
-    # coverage. If either fails, Sonar doesn't run — better than posting
-    # a stale coverage number.
-    needs: [test-unit, test-integration]
+    # Needs all test suites that produce coverage. If any fails,
+    # Sonar doesn't run — better than posting a stale coverage
+    # number.
+    needs: [test-unit, test-integration, dashboard-test-unit]
     steps:
       # fetch-depth 0 gives Sonar full git history so blame-based
       # new-code detection and authorship work correctly.
@@ -119,6 +180,11 @@ jobs:
         with:
           name: integration-coverage
           path: supervisor
+      - name: Download dashboard coverage
+        uses: actions/download-artifact@v4
+        with:
+          name: dashboard-coverage
+          path: dashboard/coverage
       # Pinned to the full commit SHA of v5.0.0 per SonarQube's own
       # githubactions:S7637 rule. The tag-form (`@v5.0.0`) would let a
       # compromised publisher silently retag to a malicious commit.
