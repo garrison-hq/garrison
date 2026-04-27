@@ -67,6 +67,12 @@ test.describe('theme parity', () => {
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark', { timeout: 5_000 });
     for (const path of SURFACES) {
       await page.goto(path);
+      // Per-surface wait — the theme-dark click writes a cookie
+      // that the server consumes on subsequent page renders, but
+      // there's a small race between the click's async write and
+      // the next navigation. Wait for the server's data-theme to
+      // resolve before asserting it.
+      await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark', { timeout: 5_000 });
       const dataTheme = await page.locator('html').getAttribute('data-theme');
       expect(dataTheme).toBe('dark');
       // Resolve the foreground/background tokens; assert they
@@ -94,6 +100,12 @@ test.describe('theme parity', () => {
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'light', { timeout: 5_000 });
     for (const path of SURFACES) {
       await page.goto(path);
+      // Per-surface wait — the theme-light click writes a cookie
+      // that the server consumes on subsequent page renders, but
+      // there's a small race between the click's async write and
+      // the next navigation. Wait for the server's data-theme to
+      // resolve before asserting it.
+      await expect(page.locator('html')).toHaveAttribute('data-theme', 'light', { timeout: 5_000 });
       const dataTheme = await page.locator('html').getAttribute('data-theme');
       expect(dataTheme).toBe('light');
       const colors = await page.evaluate(() => {
