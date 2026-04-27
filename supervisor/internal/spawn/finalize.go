@@ -142,9 +142,19 @@ func WriteFinalize(parentCtx context.Context, deps FinalizeWriteDeps, payload *f
 	// redact secret patterns from the finalize payload fields before the
 	// MemPalace write so no raw credential ever reaches the palace drawer.
 	// Non-blocking: redact-and-warn only (never blocks the write per FR-419).
+	//
+	// M4 / T015 / FR-115: when matches are found, the FIRST matching
+	// label is captured into a local var so writeTransitionRows can
+	// record it on ticket_transitions.suspected_secret_pattern_category
+	// for the dashboard's hygiene table to render. The supervisor
+	// scanner returns multiple labels per call (the M2.3 scanner
+	// chains pattern matches), but the dashboard hygiene UI shows
+	// one category per row — first-match wins.
 	hygieneStatus := FinalizeDiaryHygieneStatus
+	var patternCategory string
 	if matched := scanAndRedactPayload(payload); len(matched) > 0 {
 		hygieneStatus = "suspected_secret_emitted"
+		patternCategory = string(matched[0])
 		logger.Warn("pattern scanner matched secrets in finalize payload; redacted before palace write",
 			"labels", matched)
 	}
@@ -152,7 +162,7 @@ func WriteFinalize(parentCtx context.Context, deps FinalizeWriteDeps, payload *f
 	if err := writePalaceArtifacts(ctx, parentCtx, deps, meta, payload, objective, logger); err != nil {
 		return err
 	}
-	if err := writeTransitionRows(ctx, parentCtx, deps, q, meta, hygieneStatus, logger); err != nil {
+	if err := writeTransitionRows(ctx, parentCtx, deps, q, meta, hygieneStatus, patternCategory, logger); err != nil {
 		return err
 	}
 	if err := writeTerminalAndMark(ctx, parentCtx, deps, q, meta, logger); err != nil {
@@ -219,6 +229,7 @@ func writeTransitionRows(
 	q *store.Queries,
 	meta FinalizeMeta,
 	hygieneStatus string,
+	patternCategory string,
 	logger *slog.Logger,
 ) error {
 	clean := hygieneStatus
@@ -238,6 +249,21 @@ func writeTransitionRows(
 	}); err != nil {
 		return failOrphan(parentCtx, deps, meta, logger, ExitFinalizePalaceWriteFailed, "palace_write",
 			fmt.Errorf("UpdateTicketTransitionHygiene: %w", err))
+	}
+	// M4 / T015 / FR-115: record the matched pattern label when
+	// a secret-shape match was found. Non-blocking on failure —
+	// the hygiene_status row is the load-bearing audit; the
+	// pattern category is a UI-side enrichment.
+	if patternCategory != "" {
+		if err := q.UpdateTicketTransitionPatternCategory(ctx, store.UpdateTicketTransitionPatternCategoryParams{
+			ID:                             transitionID,
+			SuspectedSecretPatternCategory: &patternCategory,
+		}); err != nil {
+			logger.Warn("failed to record suspected_secret_pattern_category",
+				"transition_id", transitionID,
+				"category", patternCategory,
+				"err", err.Error())
+		}
 	}
 	if err := q.UpdateTicketColumnSlug(ctx, store.UpdateTicketColumnSlugParams{
 		ID:         meta.TicketID,

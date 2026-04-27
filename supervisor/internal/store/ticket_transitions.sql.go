@@ -92,3 +92,25 @@ func (q *Queries) UpdateTicketTransitionHygiene(ctx context.Context, arg UpdateT
 	_, err := q.db.Exec(ctx, updateTicketTransitionHygiene, arg.ID, arg.HygieneStatus)
 	return err
 }
+
+const updateTicketTransitionPatternCategory = `-- name: UpdateTicketTransitionPatternCategory :exec
+UPDATE ticket_transitions
+SET suspected_secret_pattern_category = $2
+WHERE id = $1
+`
+
+type UpdateTicketTransitionPatternCategoryParams struct {
+	ID                             pgtype.UUID
+	SuspectedSecretPatternCategory *string
+}
+
+// M4 / T015 / FR-115: when scanAndRedactPayload matches a
+// secret-shape pattern, the matching pattern label is recorded
+// on the transition row so the hygiene table can render the
+// category alongside the failure-mode badge (FR-117). Only
+// written for hygiene_status='suspected_secret_emitted' rows;
+// the column is nullable for every other path.
+func (q *Queries) UpdateTicketTransitionPatternCategory(ctx context.Context, arg UpdateTicketTransitionPatternCategoryParams) error {
+	_, err := q.db.Exec(ctx, updateTicketTransitionPatternCategory, arg.ID, arg.SuspectedSecretPatternCategory)
+	return err
+}
