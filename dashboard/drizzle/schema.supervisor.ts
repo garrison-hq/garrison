@@ -1,8 +1,8 @@
 // ─── generated via drizzle-kit pull — do not edit ───
-// Run `bun run scripts/pull-supervisor-schema.ts` to regenerate.
+// Run `bun run drizzle:pull` to regenerate.
 // Source: goose-managed migrations under ../../migrations/.
 
-import { pgTable, integer, bigint, boolean, timestamp, index, foreignKey, uuid, text, numeric, jsonb, unique, primaryKey, interval } from "drizzle-orm/pg-core"
+import { pgTable, integer, bigint, boolean, timestamp, index, foreignKey, uuid, text, numeric, jsonb, unique, primaryKey, check, interval } from "drizzle-orm/pg-core"
 import { sql } from "drizzle-orm"
 
 
@@ -51,12 +51,6 @@ export const eventOutbox = pgTable("event_outbox", {
 	index("idx_event_outbox_unprocessed").using("btree", table.createdAt.asc().nullsLast().op("timestamptz_ops")).where(sql`(processed_at IS NULL)`),
 ]);
 
-export const companies = pgTable("companies", {
-	id: uuid().defaultRandom().primaryKey().notNull(),
-	name: text().notNull(),
-	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-});
-
 export const departments = pgTable("departments", {
 	id: uuid().defaultRandom().primaryKey().notNull(),
 	slug: text().notNull(),
@@ -75,6 +69,12 @@ export const departments = pgTable("departments", {
 	unique("departments_slug_key").on(table.slug),
 ]);
 
+export const companies = pgTable("companies", {
+	id: uuid().defaultRandom().primaryKey().notNull(),
+	name: text().notNull(),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+});
+
 export const tickets = pgTable("tickets", {
 	id: uuid().defaultRandom().primaryKey().notNull(),
 	departmentId: uuid("department_id").notNull(),
@@ -89,53 +89,6 @@ export const tickets = pgTable("tickets", {
 			columns: [table.departmentId],
 			foreignColumns: [departments.id],
 			name: "tickets_department_id_fkey"
-		}),
-]);
-
-export const vaultAccessLog = pgTable("vault_access_log", {
-	id: uuid().defaultRandom().primaryKey().notNull(),
-	agentInstanceId: uuid("agent_instance_id").notNull(),
-	ticketId: uuid("ticket_id"),
-	secretPath: text("secret_path").notNull(),
-	customerId: uuid("customer_id").notNull(),
-	outcome: text().notNull(),
-	timestamp: timestamp({ withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-}, (table) => [
-	index("idx_vault_access_log_agent_instance").using("btree", table.agentInstanceId.asc().nullsLast().op("uuid_ops")),
-	index("idx_vault_access_log_ticket").using("btree", table.ticketId.asc().nullsLast().op("uuid_ops")).where(sql`(ticket_id IS NOT NULL)`),
-	foreignKey({
-			columns: [table.agentInstanceId],
-			foreignColumns: [agentInstances.id],
-			name: "vault_access_log_agent_instance_id_fkey"
-		}),
-	foreignKey({
-			columns: [table.ticketId],
-			foreignColumns: [tickets.id],
-			name: "vault_access_log_ticket_id_fkey"
-		}),
-]);
-
-export const ticketTransitions = pgTable("ticket_transitions", {
-	id: uuid().defaultRandom().primaryKey().notNull(),
-	ticketId: uuid("ticket_id").notNull(),
-	fromColumn: text("from_column"),
-	toColumn: text("to_column").notNull(),
-	triggeredByAgentInstanceId: uuid("triggered_by_agent_instance_id"),
-	triggeredByUser: boolean("triggered_by_user").default(false).notNull(),
-	at: timestamp({ withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-	hygieneStatus: text("hygiene_status"),
-}, (table) => [
-	index("idx_ticket_transitions_by_ticket").using("btree", table.ticketId.asc().nullsLast().op("timestamptz_ops"), table.at.asc().nullsLast().op("timestamptz_ops")),
-	foreignKey({
-			columns: [table.ticketId],
-			foreignColumns: [tickets.id],
-			name: "ticket_transitions_ticket_id_fkey"
-		}),
-	foreignKey({
-			columns: [table.triggeredByAgentInstanceId],
-			foreignColumns: [agentInstances.id],
-			name: "ticket_transitions_triggered_by_agent_instance_id_fkey"
 		}),
 ]);
 
@@ -162,6 +115,56 @@ export const agents = pgTable("agents", {
 	unique("agents_department_id_role_slug_key").on(table.departmentId, table.roleSlug),
 ]);
 
+export const ticketTransitions = pgTable("ticket_transitions", {
+	id: uuid().defaultRandom().primaryKey().notNull(),
+	ticketId: uuid("ticket_id").notNull(),
+	fromColumn: text("from_column"),
+	toColumn: text("to_column").notNull(),
+	triggeredByAgentInstanceId: uuid("triggered_by_agent_instance_id"),
+	triggeredByUser: boolean("triggered_by_user").default(false).notNull(),
+	at: timestamp({ withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	hygieneStatus: text("hygiene_status"),
+	suspectedSecretPatternCategory: text("suspected_secret_pattern_category"),
+}, (table) => [
+	index("idx_ticket_transitions_by_ticket").using("btree", table.ticketId.asc().nullsLast().op("timestamptz_ops"), table.at.asc().nullsLast().op("timestamptz_ops")),
+	index("idx_ticket_transitions_pattern_category").using("btree", table.suspectedSecretPatternCategory.asc().nullsLast().op("text_ops")).where(sql`(suspected_secret_pattern_category IS NOT NULL)`),
+	foreignKey({
+			columns: [table.ticketId],
+			foreignColumns: [tickets.id],
+			name: "ticket_transitions_ticket_id_fkey"
+		}),
+	foreignKey({
+			columns: [table.triggeredByAgentInstanceId],
+			foreignColumns: [agentInstances.id],
+			name: "ticket_transitions_triggered_by_agent_instance_id_fkey"
+		}),
+]);
+
+export const vaultAccessLog = pgTable("vault_access_log", {
+	id: uuid().defaultRandom().primaryKey().notNull(),
+	agentInstanceId: uuid("agent_instance_id").notNull(),
+	ticketId: uuid("ticket_id"),
+	secretPath: text("secret_path").notNull(),
+	customerId: uuid("customer_id").notNull(),
+	outcome: text().notNull(),
+	timestamp: timestamp({ withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	metadata: jsonb(),
+}, (table) => [
+	index("idx_vault_access_log_agent_instance").using("btree", table.agentInstanceId.asc().nullsLast().op("uuid_ops")),
+	index("idx_vault_access_log_ticket").using("btree", table.ticketId.asc().nullsLast().op("uuid_ops")).where(sql`(ticket_id IS NOT NULL)`),
+	foreignKey({
+			columns: [table.agentInstanceId],
+			foreignColumns: [agentInstances.id],
+			name: "vault_access_log_agent_instance_id_fkey"
+		}),
+	foreignKey({
+			columns: [table.ticketId],
+			foreignColumns: [tickets.id],
+			name: "vault_access_log_ticket_id_fkey"
+		}),
+]);
+
 export const agentRoleSecrets = pgTable("agent_role_secrets", {
 	roleSlug: text("role_slug").notNull(),
 	secretPath: text("secret_path").notNull(),
@@ -186,8 +189,8 @@ export const secretMetadata = pgTable("secret_metadata", {
 	allowedRoleSlugs: text("allowed_role_slugs").array().default([""]).notNull(),
 	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
 	updatedAt: timestamp("updated_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	rotationProvider: text("rotation_provider").default('manual_paste').notNull(),
 }, (table) => [
 	primaryKey({ columns: [table.secretPath, table.customerId], name: "secret_metadata_pkey"}),
+	check("secret_metadata_rotation_provider_check", sql`rotation_provider = ANY (ARRAY['infisical_native'::text, 'manual_paste'::text, 'not_rotatable'::text])`),
 ]);
-
-
