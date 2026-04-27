@@ -92,29 +92,6 @@ export const tickets = pgTable("tickets", {
 		}),
 ]);
 
-export const agents = pgTable("agents", {
-	id: uuid().defaultRandom().primaryKey().notNull(),
-	departmentId: uuid("department_id").notNull(),
-	roleSlug: text("role_slug").notNull(),
-	agentMd: text("agent_md").notNull(),
-	model: text().notNull(),
-	skills: jsonb().default([]).notNull(),
-	mcpTools: jsonb("mcp_tools").default([]).notNull(),
-	listensFor: jsonb("listens_for").notNull(),
-	palaceWing: text("palace_wing"),
-	status: text().default('active').notNull(),
-	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-	mcpConfig: jsonb("mcp_config").default({}).notNull(),
-}, (table) => [
-	index("idx_agents_active_by_dept").using("btree", table.departmentId.asc().nullsLast().op("text_ops"), table.roleSlug.asc().nullsLast().op("text_ops")).where(sql`(status = 'active'::text)`),
-	foreignKey({
-			columns: [table.departmentId],
-			foreignColumns: [departments.id],
-			name: "agents_department_id_fkey"
-		}),
-	unique("agents_department_id_role_slug_key").on(table.departmentId, table.roleSlug),
-]);
-
 export const ticketTransitions = pgTable("ticket_transitions", {
 	id: uuid().defaultRandom().primaryKey().notNull(),
 	ticketId: uuid("ticket_id").notNull(),
@@ -163,6 +140,30 @@ export const vaultAccessLog = pgTable("vault_access_log", {
 			foreignColumns: [tickets.id],
 			name: "vault_access_log_ticket_id_fkey"
 		}),
+]);
+
+export const agents = pgTable("agents", {
+	id: uuid().defaultRandom().primaryKey().notNull(),
+	departmentId: uuid("department_id").notNull(),
+	roleSlug: text("role_slug").notNull(),
+	agentMd: text("agent_md").notNull(),
+	model: text().notNull(),
+	skills: jsonb().default([]).notNull(),
+	mcpTools: jsonb("mcp_tools").default([]).notNull(),
+	listensFor: jsonb("listens_for").notNull(),
+	palaceWing: text("palace_wing"),
+	status: text().default('active').notNull(),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	mcpConfig: jsonb("mcp_config").default({}).notNull(),
+	updatedAt: timestamp("updated_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+}, (table) => [
+	index("idx_agents_active_by_dept").using("btree", table.departmentId.asc().nullsLast().op("text_ops"), table.roleSlug.asc().nullsLast().op("text_ops")).where(sql`(status = 'active'::text)`),
+	foreignKey({
+			columns: [table.departmentId],
+			foreignColumns: [departments.id],
+			name: "agents_department_id_fkey"
+		}),
+	unique("agents_department_id_role_slug_key").on(table.departmentId, table.roleSlug),
 ]);
 
 export const agentRoleSecrets = pgTable("agent_role_secrets", {
