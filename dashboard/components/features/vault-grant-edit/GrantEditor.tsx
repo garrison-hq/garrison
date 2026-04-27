@@ -1,7 +1,6 @@
 'use client';
 
 import { useState, useTransition } from 'react';
-import { useRouter } from 'next/navigation';
 import { addGrant, removeGrant } from '@/lib/actions/vault';
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
 import { VaultError } from '@/lib/vault/errors';
@@ -52,7 +51,6 @@ export function GrantEditor({
   roleSlugs,
   secretPaths,
 }: Readonly<GrantEditorProps>) {
-  const router = useRouter();
   const [grants, setGrants] = useState(initialGrants);
   const [roleSlug, setRoleSlug] = useState(roleSlugs[0] ?? '');
   const [envVarName, setEnvVarName] = useState('');
@@ -74,14 +72,19 @@ export function GrantEditor({
     startTransition(async () => {
       try {
         await addGrant({ roleSlug, envVarName, secretPath });
-        // Optimistic append; router.refresh pulls canonical
-        // state with granted_at populated.
+        // Optimistic append. We deliberately skip router.refresh()
+        // here — calling it inside startTransition leaves
+        // pending=true indefinitely (the destination's RSC fetch
+        // gets folded into the transition), which leaves the
+        // Add-grant button disabled forever and blocks subsequent
+        // adds. The optimistic row carries enough info (grantedAt
+        // 'now') for the table render; a manual page refresh
+        // pulls the server-side granted_at when needed.
         setGrants((prev) => [
           ...prev,
           { roleSlug, envVarName, secretPath, grantedAt: new Date() },
         ]);
         setEnvVarName('');
-        router.refresh();
       } catch (err) {
         if (err instanceof VaultError) {
           setError(`Add rejected: ${err.kind}`);
@@ -94,7 +97,9 @@ export function GrantEditor({
 
   function dropGrantLocally(g: GrantKey): void {
     setGrants((prev) => prev.filter((x) => !isSameGrant(x, g)));
-    router.refresh();
+    // No router.refresh() — same reason as handleAdd. The
+    // optimistic table update is the operator-facing signal;
+    // canonical state arrives on next page navigation.
   }
 
   function applyRemoveError(err: unknown): void {
