@@ -12,12 +12,14 @@ import { ChildProcess, spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { GenericContainer, StartedTestContainer, Wait } from 'testcontainers';
+import { InfisicalTestHarness } from './_infisical';
 
 const ROOT = resolve(import.meta.dirname, '..', '..', '..');
 const MIGRATIONS_DIR = join(ROOT, 'migrations');
 const DASHBOARD_DIR = resolve(import.meta.dirname, '..', '..');
 
 let started: StartedTestContainer | null = null;
+let infisical: InfisicalTestHarness | null = null;
 let dashboardProc: ChildProcess | null = null;
 
 export interface HarnessEnv {
@@ -32,6 +34,19 @@ export interface HarnessEnv {
    * should NEVER use this — it authenticates as the app role only.
    */
   TEST_SUPERUSER_DSN: string;
+  /**
+   * Infisical machine-identity credentials for the dashboard's
+   * vault server actions. Set when an Infisical testcontainer is
+   * provisioned alongside the Postgres container; absent (empty
+   * string) when GARRISON_TEST_NO_INFISICAL=1 is set so legacy
+   * specs can still run against the soft-default
+   * "configure vault" prompt path.
+   */
+  INFISICAL_DASHBOARD_ML_CLIENT_ID: string;
+  INFISICAL_DASHBOARD_ML_CLIENT_SECRET: string;
+  INFISICAL_DASHBOARD_PROJECT_ID: string;
+  INFISICAL_DASHBOARD_ENVIRONMENT: string;
+  INFISICAL_SITE_URL: string;
 }
 
 /**
@@ -102,6 +117,28 @@ export async function bootDb(): Promise<HarnessEnv> {
      ALTER ROLE garrison_dashboard_ro  WITH LOGIN PASSWORD 'ropass';`,
   ]);
 
+  // Boot Infisical alongside Postgres (unless explicitly disabled
+  // via GARRISON_TEST_NO_INFISICAL=1 for fast unit-only iterations).
+  // Mirrors supervisor's testutil.go three-container topology.
+  let infisicalCreds = {
+    INFISICAL_DASHBOARD_ML_CLIENT_ID: '',
+    INFISICAL_DASHBOARD_ML_CLIENT_SECRET: '',
+    INFISICAL_DASHBOARD_PROJECT_ID: '',
+    INFISICAL_DASHBOARD_ENVIRONMENT: '',
+    INFISICAL_SITE_URL: '',
+  };
+  if (process.env.GARRISON_TEST_NO_INFISICAL !== '1') {
+    infisical = await InfisicalTestHarness.start();
+    const creds = await infisical.issueCredentials();
+    infisicalCreds = {
+      INFISICAL_DASHBOARD_ML_CLIENT_ID: creds.clientId,
+      INFISICAL_DASHBOARD_ML_CLIENT_SECRET: creds.clientSecret,
+      INFISICAL_DASHBOARD_PROJECT_ID: creds.projectId,
+      INFISICAL_DASHBOARD_ENVIRONMENT: creds.environment,
+      INFISICAL_SITE_URL: creds.siteUrl,
+    };
+  }
+
   const env: HarnessEnv = {
     DASHBOARD_APP_DSN: `postgres://garrison_dashboard_app:apppass@${host}:${port}/testdb?sslmode=disable`,
     DASHBOARD_RO_DSN: `postgres://garrison_dashboard_ro:ropass@${host}:${port}/testdb?sslmode=disable`,
@@ -109,6 +146,7 @@ export async function bootDb(): Promise<HarnessEnv> {
     BETTER_AUTH_URL: 'http://localhost:3010',
     PORT: '3010',
     TEST_SUPERUSER_DSN: superUserDsn,
+    ...infisicalCreds,
   };
   writeEnvFile(env);
   return env;
@@ -207,6 +245,14 @@ async function startDashboard(env: HarnessEnv): Promise<void> {
       ...process.env,
       ...env,
       GARRISON_TEST_MODE: '1',
+      // Force the standalone runtime to listen on 0.0.0.0 so the
+      // localhost:3010 probe below can reach it. Next reads
+      // process.env.HOSTNAME at server.js startup and binds to it
+      // verbatim; on machines where the OS hostname resolves to a
+      // public address (some ISPs assign reverse-DNS to the IPv6
+      // delegation), that means the server only accepts requests
+      // on that public address and localhost loops fail.
+      HOSTNAME: '0.0.0.0',
       // Tell the standalone runtime where to find the static
       // assets and the public dir. They live OUTSIDE the
       // standalone dir during local dev (Next emits them next
@@ -249,6 +295,10 @@ export async function stopHarness(): Promise<void> {
     await started.stop();
     started = null;
   }
+  if (infisical) {
+    await infisical.stop();
+    infisical = null;
+  }
 }
 
 function envFilePath(): string {
@@ -269,22 +319,93 @@ function readEnv(): HarnessEnv {
   return JSON.parse(readFileSync(path, 'utf-8')) as HarnessEnv;
 }
 
+/**
+ * Idempotently create the Infisical folder path under the test
+ * workspace's 'dev' environment. Required before dashboard's
+ * createSecret because Infisical does not auto-create folders.
+ *
+ * Specs needing a folder for a freshly-seeded company UUID call
+ * this AFTER seedFixtures and BEFORE driving the create-secret
+ * form. No-op when GARRISON_TEST_NO_INFISICAL=1.
+ *
+ * Authenticates via the dashboard's ML credentials (which have
+ * admin role on the test project) since spec workers run in
+ * separate processes and don't see the harness's in-memory
+ * org-token. The siteUrl + ML credentials live in env.json so
+ * each worker can re-derive the access token.
+ */
+export async function ensureInfisicalFolder(
+  env: HarnessEnv,
+  folderPath: string,
+): Promise<void> {
+  if (!env.INFISICAL_SITE_URL) return; // GARRISON_TEST_NO_INFISICAL path
+  const trimmed = folderPath.replace(/^\/+|\/+$/g, '');
+  if (trimmed === '') return;
+
+  // Universal-Auth login → access token.
+  const loginRes = await fetch(`${env.INFISICAL_SITE_URL}/api/v1/auth/universal-auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      clientId: env.INFISICAL_DASHBOARD_ML_CLIENT_ID,
+      clientSecret: env.INFISICAL_DASHBOARD_ML_CLIENT_SECRET,
+    }),
+  });
+  if (!loginRes.ok) {
+    const text = await loginRes.text().catch(() => '');
+    throw new Error(`UA login: HTTP ${loginRes.status}: ${text}`);
+  }
+  const { accessToken } = (await loginRes.json()) as { accessToken: string };
+
+  const segments = trimmed.split('/');
+  let parent = '/';
+  for (const seg of segments) {
+    const body = {
+      workspaceId: env.INFISICAL_DASHBOARD_PROJECT_ID,
+      environment: env.INFISICAL_DASHBOARD_ENVIRONMENT,
+      name: seg,
+      path: parent,
+    };
+    const res = await fetch(`${env.INFISICAL_SITE_URL}/api/v1/folders`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${accessToken}`,
+      },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      const lower = text.toLowerCase();
+      if (!(res.status === 400 && lower.includes('already exist'))) {
+        throw new Error(`ensureFolder ${parent}/${seg}: HTTP ${res.status}: ${text}`);
+      }
+    }
+    parent = parent === '/' ? `/${seg}` : `${parent}/${seg}`;
+  }
+}
+
 export async function truncateDashboardState(env: HarnessEnv): Promise<void> {
   // Connect as the test superuser — TRUNCATE is not in the
   // app role's grant set, and we don't want test infrastructure to
   // weaken the production grant matrix.
   //
   // Truncates BOTH dashboard-owned tables and M2-arc tables that
-  // integration tests seed (departments / tickets / etc). The
-  // M2-arc seed rows from migrations re-appear via TRUNCATE only
-  // if the migration's seed step is re-run; we leave them gone for
-  // the duration of the test (each test re-seeds what it needs).
+  // integration tests seed (departments / tickets / etc). M4
+  // additions (vault_access_log, secret_metadata, agent_role_secrets,
+  // event_outbox) are also wiped so per-spec assertions over the
+  // audit log start from a clean slate. The M2-arc seed rows from
+  // migrations re-appear via TRUNCATE only if the migration's seed
+  // step is re-run; we leave them gone for the duration of the test
+  // (each test re-seeds what it needs).
   const sql = (await import('postgres')).default;
   const client = sql(env.TEST_SUPERUSER_DSN, { max: 1 });
   try {
     await client`TRUNCATE users, sessions, accounts, verifications, operator_invites,
                           companies, departments, tickets, ticket_transitions,
-                          agent_instances, agents
+                          agent_instances, agents,
+                          event_outbox, vault_access_log, secret_metadata,
+                          agent_role_secrets
                  RESTART IDENTITY CASCADE`;
   } finally {
     await client.end();
