@@ -47,6 +47,25 @@ function readEnv(): { clientId: string; clientSecret: string; siteUrl?: string }
   };
 }
 
+/**
+ * Read the Infisical workspace + environment the dashboard
+ * targets for vault writes. Both come from env vars set per
+ * docs/ops-checklist.md M4 section. Throws if not set —
+ * fail-fast rather than send writes to an unintended workspace.
+ */
+export function getDashboardVaultConfig(): { projectId: string; environment: string } {
+  const projectId = process.env.INFISICAL_DASHBOARD_PROJECT_ID;
+  const environment = process.env.INFISICAL_DASHBOARD_ENVIRONMENT;
+  if (!projectId || !environment) {
+    throw new Error(
+      'INFISICAL_DASHBOARD_PROJECT_ID and INFISICAL_DASHBOARD_ENVIRONMENT must be set ' +
+        'so the dashboard knows which Infisical project + environment to target ' +
+        '(FR-051). See docs/ops-checklist.md M4 section.',
+    );
+  }
+  return { projectId, environment };
+}
+
 async function authenticate(): Promise<InfisicalSDK> {
   const env = readEnv();
   const sdk = new InfisicalSDK({ siteUrl: env.siteUrl });
