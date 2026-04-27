@@ -169,6 +169,25 @@
     },
     "sandbox_escape": {
       "tooltip": "Sandbox escape: the agent's claimed artifact path differs from what's on disk. See docs/issues/agent-workspace-sandboxing.md."
+    },
+    "conflict": {
+      "stale_version": "Another operator changed this since you opened the form. Review the conflict and choose to overwrite, merge, or discard.",
+      "already_exists": "Something with this identifier already exists.",
+      "in_use": "Cannot delete: the item is referenced by other rows.",
+      "rotation_step_failed": "A step of this multi-step operation failed. Review the partial state and retry the affected step.",
+      "path_collision": "Target path collides with an existing path."
+    },
+    "vault": {
+      "vault_unavailable": "Cannot reach Infisical right now. Check the vault container and try again.",
+      "vault_auth_expired": "The dashboard's vault credential expired. Restart the dashboard or re-provision the machine identity per docs/ops-checklist.md M4 section.",
+      "vault_permission_denied": "Infisical denied this operation. Check the dashboard's machine-identity grants.",
+      "vault_rate_limited": "Infisical rate-limited this request. Wait a moment and try again.",
+      "vault_secret_not_found": "Secret not found in the vault.",
+      "vault_path_already_exists": "A secret already exists at this path.",
+      "vault_validation_rejected": "Validation failed: review the form fields and try again.",
+      "vault_rotation_unsupported": "This secret type does not support automated rotation. Use paste-new-value instead.",
+      "vault_grant_conflict": "A grant with this role and env-var-name combination already exists.",
+      "vault_secret_in_use_cannot_delete": "Cannot delete: this secret is currently granted to one or more agent roles. Remove the grants first."
     }
   },
   "nav": {
