@@ -6,6 +6,16 @@ import { addGrant, removeGrant } from '@/lib/actions/vault';
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
 import { VaultError } from '@/lib/vault/errors';
 
+type GrantKey = { roleSlug: string; envVarName: string; secretPath: string };
+
+function isSameGrant(a: GrantKey, b: GrantKey): boolean {
+  return (
+    a.roleSlug === b.roleSlug &&
+    a.envVarName === b.envVarName &&
+    a.secretPath === b.secretPath
+  );
+}
+
 // GrantEditor — operator-facing surface for addGrant + removeGrant
 // per FR-061 / FR-062 / FR-063 / FR-082 / FR-083.
 //
@@ -82,40 +92,37 @@ export function GrantEditor({
     });
   }
 
-  function isSameGrant(
-    a: { roleSlug: string; envVarName: string; secretPath: string },
-    b: { roleSlug: string; envVarName: string; secretPath: string },
-  ): boolean {
-    return (
-      a.roleSlug === b.roleSlug &&
-      a.envVarName === b.envVarName &&
-      a.secretPath === b.secretPath
-    );
+  function applyRemoveResult(g: GrantKey, removed: boolean): void {
+    if (removed) {
+      setGrants((prev) => prev.filter((x) => !isSameGrant(x, g)));
+      router.refresh();
+    } else {
+      setError('Grant not found (may have been removed already).');
+    }
   }
 
-  function handleRemove(g: { roleSlug: string; envVarName: string; secretPath: string }) {
+  function applyRemoveError(err: unknown): void {
+    if (err instanceof VaultError) {
+      setError(`Remove rejected: ${err.kind}`);
+    } else {
+      setError(err instanceof Error ? err.message : 'unknown error');
+    }
+  }
+
+  async function performRemove(g: GrantKey): Promise<void> {
+    try {
+      const result = await removeGrant(g);
+      applyRemoveResult(g, result.removed);
+    } catch (err) {
+      applyRemoveError(err);
+    }
+  }
+
+  function handleRemove(g: GrantKey) {
     setError(null);
     setConfirmRemoveKey(null);
-    startTransition(async () => {
-      try {
-        const result = await removeGrant({
-          roleSlug: g.roleSlug,
-          envVarName: g.envVarName,
-          secretPath: g.secretPath,
-        });
-        if (result.removed) {
-          setGrants((prev) => prev.filter((x) => !isSameGrant(x, g)));
-          router.refresh();
-        } else {
-          setError('Grant not found (may have been removed already).');
-        }
-      } catch (err) {
-        if (err instanceof VaultError) {
-          setError(`Remove rejected: ${err.kind}`);
-        } else {
-          setError(err instanceof Error ? err.message : 'unknown error');
-        }
-      }
+    startTransition(() => {
+      void performRemove(g);
     });
   }
 

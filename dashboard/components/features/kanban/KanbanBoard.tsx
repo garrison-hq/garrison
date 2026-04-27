@@ -168,21 +168,20 @@ export function KanbanBoard({
                   </p>
                 ) : (
                   colTickets.map((t) => (
-                    <div
+                    <button
                       key={t.id}
-                      role="button"
-                      tabIndex={0}
+                      type="button"
                       aria-label={`Drag ${t.id}`}
                       draggable
                       onDragStart={(e) => handleDragStart(e, t.id)}
                       onDragEnd={handleDragEnd}
-                      className={`cursor-grab transition-opacity ${
+                      className={`block w-full text-left cursor-grab transition-opacity ${
                         draggingId === t.id ? 'opacity-40' : ''
                       }`}
                       data-testid={`ticket-card-${t.id}`}
                     >
                       <TicketCard ticket={t} />
-                    </div>
+                    </button>
                   ))
                 )}
               </div>

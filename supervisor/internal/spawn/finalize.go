@@ -162,9 +162,7 @@ func WriteFinalize(parentCtx context.Context, deps FinalizeWriteDeps, payload *f
 	if err := writePalaceArtifacts(ctx, parentCtx, deps, meta, payload, objective, logger); err != nil {
 		return err
 	}
-	if err := writeTransitionRows(writeTransitionRowsArgs{
-		ctx:             ctx,
-		parentCtx:       parentCtx,
+	if err := writeTransitionRows(ctx, parentCtx, writeTransitionRowsArgs{
 		deps:            deps,
 		q:               q,
 		meta:            meta,
@@ -229,14 +227,13 @@ func writePalaceArtifacts(
 	return nil
 }
 
-// writeTransitionRowsArgs bundles the writeTransitionRows args
-// per linter S107 (function-arg cap). The set has grown across
+// writeTransitionRowsArgs bundles the non-context writeTransitionRows
+// args per linter S107 (function-arg cap). The set has grown across
 // milestones — M2.x added hygiene_status, M4 / T015 added
 // patternCategory; passing as a struct keeps the call sites
-// readable and the signature stable.
+// readable and the signature stable. Contexts are passed as
+// explicit parameters per godre:S8242 (never embed ctx in a struct).
 type writeTransitionRowsArgs struct {
-	ctx             context.Context
-	parentCtx       context.Context
 	deps            FinalizeWriteDeps
 	q               *store.Queries
 	meta            FinalizeMeta
@@ -248,9 +245,7 @@ type writeTransitionRowsArgs struct {
 // writeTransitionRows performs Step 3+4 (InsertTicketTransition,
 // UpdateTicketTransitionHygiene, UpdateTicketColumnSlug). Any failure
 // here leaves a palace orphan because Step 1+2 already succeeded.
-func writeTransitionRows(args writeTransitionRowsArgs) error {
-	ctx := args.ctx
-	parentCtx := args.parentCtx
+func writeTransitionRows(ctx, parentCtx context.Context, args writeTransitionRowsArgs) error {
 	deps := args.deps
 	q := args.q
 	meta := args.meta
