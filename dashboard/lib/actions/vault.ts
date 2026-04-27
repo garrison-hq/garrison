@@ -418,6 +418,143 @@ function snapshotFrom(row: Record<string, unknown>): SecretSnapshot {
   };
 }
 
+// ─── addGrant / removeGrant (T008) ────────────────────────────
+
+export interface AddGrantParams {
+  roleSlug: string;
+  envVarName: string;
+  secretPath: string;
+  /** Optional explicit customer_id; defaults to the operator's
+   *  single-tenant company. */
+  customerId?: string;
+}
+
+const ENV_VAR_NAME_RE = /^[A-Z][A-Z0-9_]*$/;
+
+export async function addGrant(params: AddGrantParams): Promise<{ added: true }> {
+  const actorUserId = await requireOperatorUserId();
+
+  if (!ENV_VAR_NAME_RE.test(params.envVarName)) {
+    throw new VaultError(VaultErrorKind.ValidationRejected, {
+      field: 'envVarName',
+      reason: 'env var name must match [A-Z][A-Z0-9_]*',
+    });
+  }
+  if (!params.roleSlug) {
+    throw new VaultError(VaultErrorKind.ValidationRejected, {
+      field: 'roleSlug',
+      reason: 'role slug must be a non-empty string',
+    });
+  }
+
+  const customerId = await resolveCustomerId(params.customerId);
+
+  await appDb.transaction(async (tx) => {
+    const tx2 = tx as unknown as MutationTx;
+
+    // Validate the secret exists in secret_metadata first.
+    // Insert that doesn't reference an existing secret_path is
+    // allowed by the M2.3 schema (no FK), but we want the
+    // operator-facing UI to reject it.
+    const secretRow = await tx
+      .select({ secretPath: secretMetadata.secretPath })
+      .from(secretMetadata)
+      .where(eq(secretMetadata.secretPath, params.secretPath))
+      .limit(1);
+    if (secretRow.length === 0) {
+      throw new VaultError(VaultErrorKind.SecretNotFound, { secretPath: params.secretPath });
+    }
+
+    try {
+      await tx.insert(agentRoleSecrets).values({
+        roleSlug: params.roleSlug,
+        secretPath: params.secretPath,
+        envVarName: params.envVarName,
+        customerId,
+        grantedBy: actorUserId,
+      });
+    } catch (err) {
+      // PK is (role_slug, env_var_name, customer_id) per M2.3
+      // schema — duplicate insert violates the PK constraint.
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/duplicate key|unique|primary key/i.test(msg)) {
+        throw new VaultError(VaultErrorKind.GrantConflict, {
+          roleSlug: params.roleSlug,
+          envVarName: params.envVarName,
+        });
+      }
+      throw err;
+    }
+
+    // The rebuild_secret_metadata_role_slugs trigger fires
+    // automatically inside this transaction (M2.3 invariant).
+
+    await writeVaultMutationLog(tx2, {
+      outcome: VaultWriteOutcome.GrantAdded,
+      secretPath: params.secretPath,
+      customerId,
+      actorUserId,
+      metadata: {
+        role_slug: params.roleSlug,
+        env_var_name: params.envVarName,
+      },
+    });
+    await emitPgNotify(tx2, 'work.vault.grant_added', params.secretPath);
+  });
+
+  return { added: true };
+}
+
+export interface RemoveGrantParams {
+  roleSlug: string;
+  envVarName: string;
+  secretPath: string;
+  customerId?: string;
+}
+
+export async function removeGrant(params: RemoveGrantParams): Promise<{ removed: boolean }> {
+  const actorUserId = await requireOperatorUserId();
+  const customerId = await resolveCustomerId(params.customerId);
+
+  let removed = false;
+  await appDb.transaction(async (tx) => {
+    const tx2 = tx as unknown as MutationTx;
+
+    const result = await tx.execute(sql`
+      DELETE FROM agent_role_secrets
+       WHERE role_slug = ${params.roleSlug}
+         AND env_var_name = ${params.envVarName}
+         AND customer_id = ${customerId}
+         AND secret_path = ${params.secretPath}
+       RETURNING role_slug
+    `);
+    removed = result.length > 0;
+
+    if (!removed) {
+      // No row to remove — surface as not-found (FR-058 caller
+      // surface; operators see "grant doesn't exist" rather
+      // than a silent no-op).
+      return;
+    }
+
+    await writeVaultMutationLog(tx2, {
+      outcome: VaultWriteOutcome.GrantRemoved,
+      secretPath: params.secretPath,
+      customerId,
+      actorUserId,
+      metadata: {
+        role_slug: params.roleSlug,
+        env_var_name: params.envVarName,
+      },
+    });
+    await emitPgNotify(tx2, 'work.vault.grant_removed', params.secretPath);
+  });
+
+  return { removed };
+}
+
+// ─── Internal helpers ─────────────────────────────────────────
+
 function mapInfisicalError(err: unknown, op: 'create' | 'edit' | 'delete'): VaultError {
   const msg = err instanceof Error ? err.message : String(err);
   if (/already exists/i.test(msg)) {
