@@ -162,7 +162,16 @@ func WriteFinalize(parentCtx context.Context, deps FinalizeWriteDeps, payload *f
 	if err := writePalaceArtifacts(ctx, parentCtx, deps, meta, payload, objective, logger); err != nil {
 		return err
 	}
-	if err := writeTransitionRows(ctx, parentCtx, deps, q, meta, hygieneStatus, patternCategory, logger); err != nil {
+	if err := writeTransitionRows(writeTransitionRowsArgs{
+		ctx:             ctx,
+		parentCtx:       parentCtx,
+		deps:            deps,
+		q:               q,
+		meta:            meta,
+		hygieneStatus:   hygieneStatus,
+		patternCategory: patternCategory,
+		logger:          logger,
+	}); err != nil {
 		return err
 	}
 	if err := writeTerminalAndMark(ctx, parentCtx, deps, q, meta, logger); err != nil {
@@ -220,18 +229,34 @@ func writePalaceArtifacts(
 	return nil
 }
 
+// writeTransitionRowsArgs bundles the writeTransitionRows args
+// per linter S107 (function-arg cap). The set has grown across
+// milestones — M2.x added hygiene_status, M4 / T015 added
+// patternCategory; passing as a struct keeps the call sites
+// readable and the signature stable.
+type writeTransitionRowsArgs struct {
+	ctx             context.Context
+	parentCtx       context.Context
+	deps            FinalizeWriteDeps
+	q               *store.Queries
+	meta            FinalizeMeta
+	hygieneStatus   string
+	patternCategory string
+	logger          *slog.Logger
+}
+
 // writeTransitionRows performs Step 3+4 (InsertTicketTransition,
 // UpdateTicketTransitionHygiene, UpdateTicketColumnSlug). Any failure
 // here leaves a palace orphan because Step 1+2 already succeeded.
-func writeTransitionRows(
-	ctx, parentCtx context.Context,
-	deps FinalizeWriteDeps,
-	q *store.Queries,
-	meta FinalizeMeta,
-	hygieneStatus string,
-	patternCategory string,
-	logger *slog.Logger,
-) error {
+func writeTransitionRows(args writeTransitionRowsArgs) error {
+	ctx := args.ctx
+	parentCtx := args.parentCtx
+	deps := args.deps
+	q := args.q
+	meta := args.meta
+	hygieneStatus := args.hygieneStatus
+	patternCategory := args.patternCategory
+	logger := args.logger
 	clean := hygieneStatus
 	transitionID, err := q.InsertTicketTransition(ctx, store.InsertTicketTransitionParams{
 		TicketID:                   meta.TicketID,

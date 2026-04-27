@@ -235,22 +235,16 @@ export type EditSecretResult =
 export async function editSecret(params: EditSecretParams): Promise<EditSecretResult> {
   const actorUserId = await requireOperatorUserId();
 
-  const cadenceUpdate =
-    params.changes.rotationCadenceDays !== undefined
-      ? { rotationCadence: cadenceIntervalFromDays(params.changes.rotationCadenceDays) }
-      : {};
-  const provenanceUpdate =
-    params.changes.provenance !== undefined ? { provenance: params.changes.provenance } : {};
-  const rotationProviderUpdate =
-    params.changes.rotationProvider !== undefined
-      ? { rotationProvider: params.changes.rotationProvider }
-      : {};
-
-  const localChanges = {
-    ...provenanceUpdate,
-    ...cadenceUpdate,
-    ...rotationProviderUpdate,
-  };
+  const localChanges: Record<string, unknown> = {};
+  if (params.changes.rotationCadenceDays !== undefined) {
+    localChanges.rotationCadence = cadenceIntervalFromDays(params.changes.rotationCadenceDays);
+  }
+  if (params.changes.provenance !== undefined) {
+    localChanges.provenance = params.changes.provenance;
+  }
+  if (params.changes.rotationProvider !== undefined) {
+    localChanges.rotationProvider = params.changes.rotationProvider;
+  }
 
   // If a value change is requested, write it to Infisical. We
   // do this BEFORE the local optimistic-lock check so the
@@ -407,13 +401,17 @@ function extractPathPrefix(fullPath: string): string {
   return idx > 0 ? fullPath.slice(0, idx) : '/';
 }
 
+function asStr(value: unknown): string {
+  return typeof value === 'string' ? value : '';
+}
+
 function snapshotFrom(row: Record<string, unknown>): SecretSnapshot {
   return {
-    secretPath: String(row.secret_path ?? row.secretPath ?? ''),
-    customerId: String(row.customer_id ?? row.customerId ?? ''),
-    provenance: String(row.provenance ?? ''),
-    rotationProvider: String(row.rotation_provider ?? row.rotationProvider ?? ''),
-    updatedAt: String(row.updated_at ?? row.updatedAt ?? ''),
+    secretPath: asStr(row.secret_path ?? row.secretPath),
+    customerId: asStr(row.customer_id ?? row.customerId),
+    provenance: asStr(row.provenance),
+    rotationProvider: asStr(row.rotation_provider ?? row.rotationProvider),
+    updatedAt: asStr(row.updated_at ?? row.updatedAt),
   };
 }
 
@@ -559,7 +557,11 @@ export async function renamePath(params: RenamePathParams): Promise<{ renamed: b
   // Step 2: update secret_metadata.secret_path + write audit
   // + pg_notify atomically. Optimistic lock on the original
   // row's updated_at; if stale, rollback.
-  const lockResult = await appDb.transaction(async (tx) => {
+  type RenameLockResult =
+    | { kind: 'accepted' }
+    | { kind: 'stale'; serverState: unknown };
+
+  const lockResult: RenameLockResult = await appDb.transaction(async (tx): Promise<RenameLockResult> => {
     const tx2 = tx as unknown as MutationTx;
 
     const result = await checkAndUpdate<{ secret_path: string; updated_at: string }>(tx2, {
@@ -571,8 +573,8 @@ export async function renamePath(params: RenamePathParams): Promise<{ renamed: b
       expectedVersionToken: params.versionToken,
       changes: { secretPath: params.newPath },
     });
-    if (!lockResult_isAccepted(result)) {
-      return result;
+    if (!result.accepted) {
+      return { kind: 'stale', serverState: result.serverState };
     }
 
     // Cascade: agent_role_secrets.secret_path also needs to
@@ -596,10 +598,10 @@ export async function renamePath(params: RenamePathParams): Promise<{ renamed: b
     });
     await emitPgNotify(tx2, 'work.vault.secret_edited', params.newPath);
 
-    return result;
+    return { kind: 'accepted' };
   });
 
-  if (!lockResult_isAccepted(lockResult)) {
+  if (lockResult.kind === 'stale') {
     // Stale token — rolled back, but the Infisical-side rename
     // already happened. Surface the desync for the operator to
     // investigate.
@@ -612,14 +614,6 @@ export async function renamePath(params: RenamePathParams): Promise<{ renamed: b
 
   return { renamed: true };
 }
-
-function lockResult_isAccepted(
-  r: { accepted: true; newVersionToken: string; row: unknown } | { accepted: false; serverState: unknown },
-): r is { accepted: true; newVersionToken: string; row: unknown } {
-  return r.accepted === true;
-}
-
-
 
 export interface InitiateRotationParams {
   secretPath: string;

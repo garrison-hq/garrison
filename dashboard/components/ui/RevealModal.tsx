@@ -23,6 +23,12 @@ import { useEffect, useId, useState } from 'react';
 
 export const REVEAL_AUTO_HIDE_SECONDS = 30;
 
+async function copyToClipboard(value: string): Promise<void> {
+  if (typeof navigator !== 'undefined' && navigator.clipboard) {
+    await navigator.clipboard.writeText(value);
+  }
+}
+
 export interface RevealModalProps {
   open: boolean;
   /** The secret path the operator is revealing — shown in the
@@ -91,20 +97,13 @@ export function RevealModal({ open, secretPath, fetcher, onClose, onError }: Rea
     }
   }
 
-  async function handleCopy(value: string) {
-    if (typeof navigator !== 'undefined' && navigator.clipboard) {
-      await navigator.clipboard.writeText(value);
-    }
-  }
-
   return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby={headingId}
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 garrison-fade-in"
-    >
-      <div className="bg-surface-1 border border-border-1 rounded shadow-lg w-full max-w-lg p-5">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 garrison-fade-in">
+      <dialog
+        open
+        aria-modal="true"
+        aria-labelledby={headingId}
+        className="static block m-0 bg-surface-1 border border-border-1 rounded shadow-lg w-full max-w-lg p-5 text-text-1">
         <h2 id={headingId} className="text-[16px] font-semibold text-text-1">
           Reveal secret value
         </h2>
@@ -153,7 +152,7 @@ export function RevealModal({ open, secretPath, fetcher, onClose, onError }: Rea
               <div className="flex gap-2">
                 <button
                   type="button"
-                  onClick={() => handleCopy(phase.value)}
+                  onClick={() => copyToClipboard(phase.value)}
                   className="px-3 py-1.5 text-[13px] text-text-1 border border-border-1 rounded bg-surface-2 hover:bg-surface-3"
                 >
                   Copy
@@ -184,7 +183,7 @@ export function RevealModal({ open, secretPath, fetcher, onClose, onError }: Rea
             </div>
           </>
         )}
-      </div>
+      </dialog>
     </div>
   );
 }

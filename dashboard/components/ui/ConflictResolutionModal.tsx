@@ -43,14 +43,13 @@ export function ConflictResolutionModal({
   if (!open) return null;
 
   return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby={headingId}
-      aria-describedby={diffId}
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 garrison-fade-in"
-    >
-      <div className="bg-surface-1 border border-border-1 rounded shadow-lg w-full max-w-2xl p-5">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 garrison-fade-in">
+      <dialog
+        open
+        aria-modal="true"
+        aria-labelledby={headingId}
+        aria-describedby={diffId}
+        className="static block m-0 bg-surface-1 border border-border-1 rounded shadow-lg w-full max-w-2xl p-5 text-text-1">
         <h2 id={headingId} className="text-[16px] font-semibold text-text-1">
           {title}
         </h2>
@@ -83,7 +82,7 @@ export function ConflictResolutionModal({
             Overwrite server version
           </button>
         </div>
-      </div>
+      </dialog>
     </div>
   );
 }

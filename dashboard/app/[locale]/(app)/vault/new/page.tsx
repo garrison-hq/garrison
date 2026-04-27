@@ -20,15 +20,17 @@ export default async function VaultCreatePage() {
           <h1 className="text-text-1 text-2xl font-semibold tracking-tight">Create secret</h1>
         </header>
         <div className="rounded border border-warn/40 bg-warn/5 px-4 py-3 text-[12.5px] text-warn">
-          The dashboard&apos;s Infisical credentials are not configured. See
+          {'The dashboard’s Infisical credentials are not configured. See '}
           <code className="font-mono mx-1">docs/ops-checklist.md</code>
-          M4 section to provision the
+          {' M4 section to provision the '}
           <code className="font-mono mx-1">garrison-dashboard</code>
-          Machine Identity, then set
-          <code className="font-mono mx-1">INFISICAL_DASHBOARD_ML_CLIENT_ID</code> /
-          <code className="font-mono mx-1">_SECRET</code> /
-          <code className="font-mono mx-1">_PROJECT_ID</code> on the dashboard
-          runtime and reload.
+          {' Machine Identity, then set '}
+          <code className="font-mono mx-1">INFISICAL_DASHBOARD_ML_CLIENT_ID</code>
+          {' / '}
+          <code className="font-mono mx-1">_SECRET</code>
+          {' / '}
+          <code className="font-mono mx-1">_PROJECT_ID</code>
+          {' on the dashboard runtime and reload.'}
         </div>
       </div>
     );

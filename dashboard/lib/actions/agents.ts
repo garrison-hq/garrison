@@ -42,7 +42,7 @@ import {
 import { emitPgNotify } from '@/lib/audit/pgNotify';
 import { buildFieldDiff } from '@/lib/audit/diff';
 import { checkAndUpdate } from '@/lib/locks/version';
-import { scanForLeaks, type LeakLabel } from '@/lib/vault/leakScan';
+import { scanForLeaks } from '@/lib/vault/leakScan';
 import {
   getDashboardVault,
   getDashboardVaultConfig,
@@ -196,50 +196,44 @@ async function fetchableValuesForRole(roleSlug: string): Promise<string[]> {
 
 // ─── editAgent ────────────────────────────────────────────────
 
-export async function editAgent(params: EditAgentParams): Promise<EditAgentResult> {
-  await requireOperatorUserId();
-
-  // Validate each supplied change.
-  if (params.changes.model !== undefined) validateModel(params.changes.model);
-  if (params.changes.listensFor !== undefined) validateListensFor(params.changes.listensFor);
-  if (params.changes.skills !== undefined) validateSkills(params.changes.skills);
-  if (params.changes.agentMd?.length === 0) {
+function validateChanges(changes: EditAgentParams['changes']): void {
+  if (changes.model !== undefined) validateModel(changes.model);
+  if (changes.listensFor !== undefined) validateListensFor(changes.listensFor);
+  if (changes.skills !== undefined) validateSkills(changes.skills);
+  if (changes.agentMd?.length === 0) {
     throw new ConflictError(ConflictKind.AlreadyExists, undefined, 'agent_md must be non-empty');
   }
+}
 
-  // Read the current row to (a) verify the role slug matches,
-  // (b) build the field-level diff before/after pair.
-  const currentRows = await appDb
-    .select()
-    .from(agents)
-    .where(eq(agents.id, params.agentId))
-    .limit(1);
+async function loadCurrentAgent(agentId: string, expectedRoleSlug: string) {
+  const currentRows = await appDb.select().from(agents).where(eq(agents.id, agentId)).limit(1);
   if (currentRows.length === 0) {
     throw new ConflictError(ConflictKind.AlreadyExists, undefined, 'agent not found');
   }
   const current = currentRows[0];
-  if (current.roleSlug !== params.expectedRoleSlug) {
+  if (current.roleSlug !== expectedRoleSlug) {
     throw new ConflictError(
       ConflictKind.AlreadyExists,
       undefined,
       'role slug mismatch — agent has been re-keyed; reload and retry',
     );
   }
+  return current;
+}
+
+export async function editAgent(params: EditAgentParams): Promise<EditAgentResult> {
+  await requireOperatorUserId();
+
+  validateChanges(params.changes);
+
+  const current = await loadCurrentAgent(params.agentId, params.expectedRoleSlug);
 
   // Run the leak-scan against the proposed agentMd. Per FR-088,
   // saving an agent.md that contains a fetchable secret value
   // verbatim is rejected. Shape patterns also trigger rejection
   // — they're a strong signal of an accidental paste.
   if (params.changes.agentMd !== undefined) {
-    const fetchableValues = await fetchableValuesForRole(current.roleSlug);
-    const matches = scanForLeaks(params.changes.agentMd, fetchableValues);
-    if (matches.length > 0) {
-      const labels = Array.from(new Set(matches.map((m) => m.label as LeakLabel)));
-      throw new VaultError(VaultErrorKind.ValidationRejected, {
-        reason: 'agent_md contains a leak-scan match; refusing to save per Rule 1 / FR-088',
-        labels,
-      });
-    }
+    await rejectIfLeak(params.changes.agentMd, current.roleSlug);
   }
 
   // Build the field-level diff (used for both the lock-changes
@@ -326,6 +320,19 @@ function asStr(value: unknown): string {
 
 function asStrArray(value: unknown): string[] {
   return Array.isArray(value) ? (value as string[]) : [];
+}
+
+/** Run the leak-scan against agentMd; throw VaultError on match. */
+async function rejectIfLeak(agentMd: string, roleSlug: string): Promise<void> {
+  const fetchableValues = await fetchableValuesForRole(roleSlug);
+  const matches = scanForLeaks(agentMd, fetchableValues);
+  if (matches.length > 0) {
+    const labels = Array.from(new Set(matches.map((m) => m.label)));
+    throw new VaultError(VaultErrorKind.ValidationRejected, {
+      reason: 'agent_md contains a leak-scan match; refusing to save per Rule 1 / FR-088',
+      labels,
+    });
+  }
 }
 
 function snapshotFrom(row: Record<string, unknown>): AgentSnapshot {

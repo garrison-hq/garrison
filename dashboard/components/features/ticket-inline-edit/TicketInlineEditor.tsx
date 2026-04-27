@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useTransition } from 'react';
+import { useId, useState, useTransition } from 'react';
 import { useRouter } from 'next/navigation';
 import { editTicket } from '@/lib/actions/tickets';
 import { ConflictError } from '@/lib/locks/conflict';
@@ -38,6 +38,8 @@ export function TicketInlineEditor({
   );
   const [error, setError] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
+  const objectiveId = useId();
+  const acceptanceId = useId();
 
   function handleSave() {
     setError(null);
@@ -105,10 +107,11 @@ export function TicketInlineEditor({
   return (
     <div className="space-y-4 rounded border border-border-1 bg-surface-1 p-4">
       <div className="space-y-1.5">
-        <label className="block text-[10.5px] uppercase tracking-wide text-text-3 font-mono">
+        <label htmlFor={objectiveId} className="block text-[10.5px] uppercase tracking-wide text-text-3 font-mono">
           objective
         </label>
         <input
+          id={objectiveId}
           type="text"
           value={objective}
           onChange={(e) => setObjective(e.target.value)}
@@ -118,10 +121,11 @@ export function TicketInlineEditor({
       </div>
 
       <div className="space-y-1.5">
-        <label className="block text-[10.5px] uppercase tracking-wide text-text-3 font-mono">
+        <label htmlFor={acceptanceId} className="block text-[10.5px] uppercase tracking-wide text-text-3 font-mono">
           acceptance criteria
         </label>
         <textarea
+          id={acceptanceId}
           value={acceptanceCriteria}
           onChange={(e) => setAcceptanceCriteria(e.target.value)}
           rows={6}

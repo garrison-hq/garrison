@@ -26,6 +26,11 @@ import (
 // Centralised here so dashboard + supervisor agree by reference.
 const ChannelName = "agents.changed"
 
+const (
+	initialBackoff = 100 * time.Millisecond
+	maxBackoff     = 30 * time.Second
+)
+
 // StartChangeListener opens a dedicated pgx.Conn from the pool, issues
 // LISTEN agents.changed, and runs a goroutine that drives Cache.Reset
 // on every notification. The goroutine accepts the supervisor's root
@@ -56,57 +61,74 @@ func StartChangeListener(ctx context.Context, pool *pgxpool.Pool, cache *Cache) 
 		return fmt.Errorf("agents: LISTEN %s: %w", ChannelName, err)
 	}
 
-	go func() {
-		defer conn.Release()
-
-		backoff := 100 * time.Millisecond
-		const maxBackoff = 30 * time.Second
-
-		for {
-			if err := ctx.Err(); err != nil {
-				return
-			}
-
-			notification, err := conn.Conn().WaitForNotification(ctx)
-			if err != nil {
-				if ctx.Err() != nil {
-					return
-				}
-				slog.WarnContext(ctx, "agents.changed: WaitForNotification error; reconnecting",
-					slog.String("err", err.Error()),
-					slog.Duration("backoff", backoff),
-				)
-				select {
-				case <-ctx.Done():
-					return
-				case <-time.After(backoff):
-				}
-				backoff = min(backoff*2, maxBackoff)
-				// Try to re-LISTEN — connection may be unhealthy.
-				if _, relistenErr := conn.Exec(ctx, `LISTEN "`+ChannelName+`"`); relistenErr != nil {
-					slog.WarnContext(ctx, "agents.changed: re-LISTEN failed",
-						slog.String("err", relistenErr.Error()),
-					)
-				}
-				continue
-			}
-			backoff = 100 * time.Millisecond
-
-			roleSlug := notification.Payload
-			if err := cache.Reset(ctx, roleSlug); err != nil {
-				slog.WarnContext(ctx, "agents.changed: cache reset failed",
-					slog.String("role_slug", roleSlug),
-					slog.String("err", err.Error()),
-				)
-				continue
-			}
-			slog.InfoContext(ctx, "agents.changed: cache reset complete",
-				slog.String("role_slug", roleSlug),
-			)
-		}
-	}()
+	go runListenerLoop(ctx, conn, cache)
 
 	return nil
+}
+
+// runListenerLoop is the goroutine body, extracted from
+// StartChangeListener so the per-iteration handlers can compose
+// without piling up into one cognitively-heavy function (linter
+// S3776).
+func runListenerLoop(ctx context.Context, conn *pgxpool.Conn, cache *Cache) {
+	defer conn.Release()
+
+	backoff := initialBackoff
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+
+		notification, err := conn.Conn().WaitForNotification(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			handleListenError(ctx, conn, err, backoff)
+			if ctx.Err() != nil {
+				return
+			}
+			backoff = min(backoff*2, maxBackoff)
+			continue
+		}
+
+		backoff = initialBackoff
+		applyNotification(ctx, cache, notification.Payload)
+	}
+}
+
+// handleListenError logs the WaitForNotification error, sleeps
+// for `backoff`, and attempts a re-LISTEN. Returns when the sleep
+// finishes or the context is cancelled.
+func handleListenError(ctx context.Context, conn *pgxpool.Conn, err error, backoff time.Duration) {
+	slog.WarnContext(ctx, "agents.changed: WaitForNotification error; reconnecting",
+		slog.String("err", err.Error()),
+		slog.Duration("backoff", backoff),
+	)
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(backoff):
+	}
+	if _, relistenErr := conn.Exec(ctx, `LISTEN "`+ChannelName+`"`); relistenErr != nil {
+		slog.WarnContext(ctx, "agents.changed: re-LISTEN failed",
+			slog.String("err", relistenErr.Error()),
+		)
+	}
+}
+
+// applyNotification calls Cache.Reset and logs the outcome.
+func applyNotification(ctx context.Context, cache *Cache, roleSlug string) {
+	if err := cache.Reset(ctx, roleSlug); err != nil {
+		slog.WarnContext(ctx, "agents.changed: cache reset failed",
+			slog.String("role_slug", roleSlug),
+			slog.String("err", err.Error()),
+		)
+		return
+	}
+	slog.InfoContext(ctx, "agents.changed: cache reset complete",
+		slog.String("role_slug", roleSlug),
+	)
 }
 
 // pgx.Conn type alias for tests that want to construct a fake.

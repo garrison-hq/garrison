@@ -82,9 +82,7 @@ export function KanbanBoard({
     }
 
     // Optimistic update.
-    setOptimisticTickets((prev) =>
-      prev.map((t) => (t.id === ticketId ? { ...t, columnSlug: toColumn } : t)),
-    );
+    setColumnFor(ticketId, toColumn);
     setError(null);
 
     startTransition(async () => {
@@ -93,9 +91,7 @@ export function KanbanBoard({
         router.refresh();
       } catch (err) {
         // Revert per FR-042.
-        setOptimisticTickets((prev) =>
-          prev.map((t) => (t.id === ticketId ? { ...t, columnSlug: fromColumn } : t)),
-        );
+        setColumnFor(ticketId, fromColumn);
         if (err instanceof ConflictError) {
           setError(`Could not move: ${err.message}`);
         } else {
@@ -103,6 +99,12 @@ export function KanbanBoard({
         }
       }
     });
+  }
+
+  function setColumnFor(ticketId: string, column: string): void {
+    setOptimisticTickets((prev) =>
+      prev.map((t) => (t.id === ticketId ? { ...t, columnSlug: column } : t)),
+    );
   }
 
   function handleDragEnd() {
@@ -137,8 +139,9 @@ export function KanbanBoard({
           const colTickets = byColumn.get(c.slug) ?? [];
           const isHovered = hoveredColumn === c.slug;
           return (
-            <div
+            <section
               key={c.slug}
+              aria-label={`${c.label} column drop target`}
               onDragOver={(e) => handleDragOver(e, c.slug)}
               onDragLeave={() => handleDragLeave(c.slug)}
               onDrop={(e) => handleDrop(e, c.slug)}
@@ -167,6 +170,9 @@ export function KanbanBoard({
                   colTickets.map((t) => (
                     <div
                       key={t.id}
+                      role="button"
+                      tabIndex={0}
+                      aria-label={`Drag ${t.id}`}
                       draggable
                       onDragStart={(e) => handleDragStart(e, t.id)}
                       onDragEnd={handleDragEnd}
@@ -180,7 +186,7 @@ export function KanbanBoard({
                   ))
                 )}
               </div>
-            </div>
+            </section>
           );
         })}
       </div>

@@ -82,6 +82,17 @@ export function GrantEditor({
     });
   }
 
+  function isSameGrant(
+    a: { roleSlug: string; envVarName: string; secretPath: string },
+    b: { roleSlug: string; envVarName: string; secretPath: string },
+  ): boolean {
+    return (
+      a.roleSlug === b.roleSlug &&
+      a.envVarName === b.envVarName &&
+      a.secretPath === b.secretPath
+    );
+  }
+
   function handleRemove(g: { roleSlug: string; envVarName: string; secretPath: string }) {
     setError(null);
     setConfirmRemoveKey(null);
@@ -93,16 +104,7 @@ export function GrantEditor({
           secretPath: g.secretPath,
         });
         if (result.removed) {
-          setGrants((prev) =>
-            prev.filter(
-              (x) =>
-                !(
-                  x.roleSlug === g.roleSlug &&
-                  x.envVarName === g.envVarName &&
-                  x.secretPath === g.secretPath
-                ),
-            ),
-          );
+          setGrants((prev) => prev.filter((x) => !isSameGrant(x, g)));
           router.refresh();
         } else {
           setError('Grant not found (may have been removed already).');

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useTransition } from 'react';
+import { useId, useState, useTransition } from 'react';
 import { useRouter } from 'next/navigation';
 import { initiateRotation } from '@/lib/actions/vault';
 import { VaultError } from '@/lib/vault/errors';
@@ -34,6 +34,7 @@ export function RotationButton({
   const [newValue, setNewValue] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
+  const inputId = useId();
 
   if (rotationProvider === 'not_rotatable') {
     return (
@@ -85,20 +86,21 @@ export function RotationButton({
         Rotate now
       </button>
       {open && (
-        <div
-          role="dialog"
-          aria-modal="true"
-          aria-label="Rotate secret"
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 garrison-fade-in"
-        >
-          <div className="bg-surface-1 border border-border-1 rounded shadow-lg w-full max-w-md p-5 space-y-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 garrison-fade-in">
+          <dialog
+            open
+            aria-modal="true"
+            aria-label="Rotate secret"
+            className="static block m-0 bg-surface-1 border border-border-1 rounded shadow-lg w-full max-w-md p-5 space-y-4 text-text-1"
+          >
             <h2 className="text-[16px] font-semibold text-text-1">Rotate secret</h2>
             <p className="text-[12px] text-text-3 font-mono">{secretPath}</p>
             <div className="space-y-1.5">
-              <label className="block text-[10.5px] uppercase tracking-wide text-text-3 font-mono">
+              <label htmlFor={inputId} className="block text-[10.5px] uppercase tracking-wide text-text-3 font-mono">
                 new value
               </label>
               <textarea
+                id={inputId}
                 value={newValue}
                 onChange={(e) => setNewValue(e.target.value)}
                 rows={4}
@@ -133,7 +135,7 @@ export function RotationButton({
                 {pending ? 'Rotating…' : 'Rotate'}
               </button>
             </div>
-          </div>
+          </dialog>
         </div>
       )}
     </>

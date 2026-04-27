@@ -64,7 +64,7 @@ const SHAPE_PATTERNS: ShapePattern[] = [
   { label: 'github_user', re: /ghu_[A-Za-z0-9]{30,}/g },
   { label: 'github_server', re: /ghs_[A-Za-z0-9]{30,}/g },
   { label: 'github_refresh', re: /ghr_[A-Za-z0-9]{30,}/g },
-  { label: 'bearer_shape', re: /authorization:\s*bearer\s+[A-Za-z0-9._~+/-]+=*/gi },
+  { label: 'bearer_shape', re: /authorization:\s*bearer\s+[a-z0-9._~+/-]+=*/gi },
 ];
 
 /**

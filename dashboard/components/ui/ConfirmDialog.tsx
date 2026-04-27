@@ -61,6 +61,7 @@ export function ConfirmDialog({
   const [typed, setTyped] = useState('');
   const headingId = useId();
   const bodyId = useId();
+  const inputId = useId();
 
   if (!open) return null;
 
@@ -74,14 +75,13 @@ export function ConfirmDialog({
       : 'bg-accent text-white hover:bg-accent/90';
 
   return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby={headingId}
-      aria-describedby={bodyId}
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 garrison-fade-in"
-    >
-      <div className="bg-surface-1 border border-border-1 rounded shadow-lg w-full max-w-md p-5">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 garrison-fade-in">
+      <dialog
+        open
+        aria-modal="true"
+        aria-labelledby={headingId}
+        aria-describedby={bodyId}
+        className="static block m-0 bg-surface-1 border border-border-1 rounded shadow-lg w-full max-w-md p-5 text-text-1">
         <h2 id={headingId} className="text-[16px] font-semibold text-text-1">
           {title}
         </h2>
@@ -90,7 +90,7 @@ export function ConfirmDialog({
         </div>
         {isTypedTier && confirmationName !== undefined && (
           <div className="mt-4">
-            <label className="block text-[11px] uppercase tracking-wide text-text-3 mb-1.5">
+            <label htmlFor={inputId} className="block text-[11px] uppercase tracking-wide text-text-3 mb-1.5">
               Type{' '}
               <span className="font-mono text-text-1 normal-case tracking-normal">
                 {confirmationName}
@@ -98,6 +98,7 @@ export function ConfirmDialog({
               to confirm
             </label>
             <input
+              id={inputId}
               type="text"
               value={typed}
               onChange={(e) => setTyped(e.target.value)}
@@ -125,7 +126,7 @@ export function ConfirmDialog({
             {confirmLabel}
           </button>
         </div>
-      </div>
+      </dialog>
     </div>
   );
 }
