@@ -248,6 +248,100 @@ test.describe('M4 vault flows — coverage for under-covered Client Components',
     await ctx.close();
   });
 
+  test('edit secret value + provenance exercises full SecretEditForm path', async ({ browser }) => {
+    const env = await bootHarness();
+    const { customerId, secretPath } = await seedCompanyAndAgent(env);
+    await seedSecretInBoth(env, customerId);
+    const ctx = await browser.newContext();
+    await bootstrapAndSignIn(ctx);
+    const page = await ctx.newPage();
+
+    await page.goto(`/vault/edit${secretPath}`);
+    await expect(page.getByRole('heading', { name: 'Edit secret' })).toBeVisible();
+    // Type a new value — exercises the Infisical-write branch.
+    const valueField = page.locator('textarea').first();
+    await valueField.fill('rotated-via-edit-form');
+    // Switch provenance — exercises the metadata-only branch +
+    // the provenance dropdown wiring.
+    await page.getByRole('button', { name: 'oauth-flow' }).click();
+    await page.getByRole('button', { name: 'Save changes' }).click();
+
+    await expect
+      .poll(async () => {
+        const sql = postgres(env.TEST_SUPERUSER_DSN, { max: 1 });
+        try {
+          const r = await sql<{ provenance: string }[]>`
+            SELECT provenance FROM secret_metadata WHERE secret_path = ${secretPath}
+          `;
+          return r[0]?.provenance ?? '';
+        } finally {
+          await sql.end();
+        }
+      }, { timeout: 10_000 })
+      .toBe('oauth_flow');
+
+    await ctx.close();
+  });
+
+  test('agent leak-scan rejects an agent.md that contains a fetchable secret value', async ({
+    browser,
+  }) => {
+    const env = await bootHarness();
+    const { customerId } = await seedCompanyAndAgent(env);
+    await seedSecretInBoth(env, customerId);
+    // Grant the seeded secret to engineer so its value is fetchable.
+    const sql = postgres(env.TEST_SUPERUSER_DSN, { max: 1 });
+    try {
+      await sql`
+        INSERT INTO agent_role_secrets (role_slug, env_var_name, secret_path, customer_id, granted_by)
+        VALUES ('engineer', 'SEEDED_KEY', ${`/${customerId}/operator/SEEDED_KEY`}, ${customerId}, 'op')
+      `;
+    } finally {
+      await sql.end();
+    }
+
+    const ctx = await browser.newContext();
+    await bootstrapAndSignIn(ctx);
+    const page = await ctx.newPage();
+    await page.goto('/agents/engineering/engineer/edit');
+    await expect(page.getByRole('heading', { name: 'Edit agent' })).toBeVisible();
+    // Paste the verbatim secret value into agent.md — leak-scan
+    // must reject the save with VaultError(ValidationRejected).
+    const agentMdField = page.locator('textarea').first();
+    await agentMdField.fill('# engineer\n\nSecret leak: seeded-secret-value-not-leaked-anywhere');
+    await page.getByRole('button', { name: 'Save changes' }).click();
+    // Server action throws → AgentSettingsForm shows an error toast.
+    await expect(page.getByText(/rejected|leak|secret/i).first()).toBeVisible({ timeout: 5_000 });
+
+    await ctx.close();
+  });
+
+  test('path tree page exercises PathTreeView render', async ({ browser }) => {
+    const env = await bootHarness();
+    const { customerId } = await seedCompanyAndAgent(env);
+    await seedSecretInBoth(env, customerId);
+    const ctx = await browser.newContext();
+    await bootstrapAndSignIn(ctx);
+    const page = await ctx.newPage();
+    await page.goto('/vault/tree');
+    await expect(page.getByRole('heading', { name: /path tree/i })).toBeVisible();
+    // The tree starts collapsed. Click each branch button in
+    // turn — exercises the expand/collapse logic in PathTreeView.
+    // Just clicking 'em-all' is robust regardless of UUID slug.
+    const branches = page.getByRole('button', { name: /^▸/ });
+    const count = await branches.count();
+    for (let i = 0; i < count; i++) {
+      await branches.nth(i).click();
+    }
+    // Click any newly-revealed branches too (one more pass).
+    const more = await page.getByRole('button', { name: /^▸/ }).count();
+    for (let i = 0; i < more; i++) {
+      await page.getByRole('button', { name: /^▸/ }).first().click();
+    }
+    await expect(page.getByText('SEEDED_KEY').first()).toBeVisible({ timeout: 5_000 });
+    await ctx.close();
+  });
+
   test('manual-paste rotation exercises RotationButton modal', async ({ browser }) => {
     const env = await bootHarness();
     const { customerId, secretPath } = await seedCompanyAndAgent(env);
