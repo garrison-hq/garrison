@@ -151,30 +151,72 @@ async function startDashboard(env: HarnessEnv): Promise<void> {
     copyFileSync(fixture, target);
   }
 
-  // Build once if .next/standalone isn't already present. We use
-  // `next start` rather than `next dev` for tests because Turbopack's
-  // dev-mode root detection has been flaky on this layout (see M3
-  // retro notes for T006). `next start` runs the prebuilt server and
-  // is closer to production behavior anyway.
+  // M4 / T016 / FR-122: build + run the dashboard via the
+  // standalone runtime (node .next/standalone/server.js), not
+  // `next start`. M3's harness used `bun run start` (= next
+  // start) which printed a warning about output: 'standalone'
+  // and diverged from the production Docker image's runtime
+  // shape. Switching the test harness to standalone closes
+  // the prod-vs-test parity gap M3 retro Q2 flagged.
+  //
+  // The build must produce .next/standalone/server.js (next
+  // emits it when output: 'standalone' is set in next.config.ts —
+  // already true since M3). Standalone-runtime requires the
+  // .next/static + public directories to live alongside the
+  // server.js entrypoint at runtime; the Dockerfile copies them
+  // there explicitly. Locally we point STATIC and PUBLIC at the
+  // build directory's locations via env so the standalone
+  // server can find them.
   //
   // GARRISON_TEST_MODE=1 is set here AND in the runtime spawn below
   // because the locale list in lib/i18n/config.ts is read at both
   // build time (next-intl bakes the catalog list into the bundle)
   // and request time.
-  if (!existsSync(join(DASHBOARD_DIR, '.next', 'BUILD_ID'))) {
+  if (!existsSync(join(DASHBOARD_DIR, '.next', 'standalone', 'server.js'))) {
     const buildResult = spawnSync('bun', ['run', 'build'], {
       cwd: DASHBOARD_DIR,
       env: { ...process.env, ...env, GARRISON_TEST_MODE: '1' },
       stdio: 'inherit',
     });
     if (buildResult.status !== 0) {
-      throw new Error('next build failed (T006 harness pre-build)');
+      throw new Error('next build failed (T016 harness standalone-build)');
     }
   }
 
-  const proc = spawn('bun', ['run', 'start'], {
-    cwd: DASHBOARD_DIR,
-    env: { ...process.env, ...env, GARRISON_TEST_MODE: '1' },
+  // Wire up .next/static + public next to the standalone server.js
+  // so the runtime can resolve them at the expected relative paths.
+  // Symlinks keep this idempotent and avoid copying large bundles.
+  const standaloneRoot = join(DASHBOARD_DIR, '.next', 'standalone');
+  const { symlinkSync, existsSync: exists, mkdirSync: mkdir } = await import('node:fs');
+  const standaloneNextDir = join(standaloneRoot, '.next');
+  if (!exists(standaloneNextDir)) {
+    mkdir(standaloneNextDir, { recursive: true });
+  }
+  const standaloneStatic = join(standaloneNextDir, 'static');
+  if (!exists(standaloneStatic)) {
+    symlinkSync(join(DASHBOARD_DIR, '.next', 'static'), standaloneStatic, 'dir');
+  }
+  const standalonePublic = join(standaloneRoot, 'public');
+  if (!exists(standalonePublic)) {
+    symlinkSync(join(DASHBOARD_DIR, 'public'), standalonePublic, 'dir');
+  }
+
+  const proc = spawn('node', ['server.js'], {
+    cwd: standaloneRoot,
+    env: {
+      ...process.env,
+      ...env,
+      GARRISON_TEST_MODE: '1',
+      // Tell the standalone runtime where to find the static
+      // assets and the public dir. They live OUTSIDE the
+      // standalone dir during local dev (Next emits them next
+      // to .next/standalone, not inside it). The standalone
+      // server.js looks at ./public and ./.next/static
+      // relative to its cwd; symlinks let us run without
+      // copying gigabytes around.
+      // (At T019's Docker build time, the Dockerfile
+      // explicitly COPYs them into the standalone dir.)
+    },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   dashboardProc = proc;
