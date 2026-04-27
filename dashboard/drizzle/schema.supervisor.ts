@@ -142,7 +142,7 @@ export const ticketTransitions = pgTable("ticket_transitions", {
 
 export const vaultAccessLog = pgTable("vault_access_log", {
 	id: uuid().defaultRandom().primaryKey().notNull(),
-	agentInstanceId: uuid("agent_instance_id").notNull(),
+	agentInstanceId: uuid("agent_instance_id"),
 	ticketId: uuid("ticket_id"),
 	secretPath: text("secret_path").notNull(),
 	customerId: uuid("customer_id").notNull(),
