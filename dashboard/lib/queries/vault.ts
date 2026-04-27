@@ -29,6 +29,8 @@ export interface SecretMetadataRow {
   lastRotatedAt: Date | null;
   /** Status string derived from lastRotatedAt + rotationCadence. */
   rotationStatus: 'fresh' | 'aging' | 'overdue' | 'never';
+  /** M4 / FR-072: drives rotation UI dispatch. */
+  rotationProvider: 'infisical_native' | 'manual_paste' | 'not_rotatable';
   allowedRoleSlugs: string[];
 }
 
@@ -81,10 +83,11 @@ export async function fetchSecretsList(): Promise<SecretMetadataRow[]> {
     provenance: string;
     rotation_cadence: string;
     last_rotated_at: Date | null;
+    rotation_provider: string;
     allowed_role_slugs: string[];
   }>(sql`
     SELECT secret_path, customer_id, provenance, rotation_cadence::text AS rotation_cadence,
-           last_rotated_at, allowed_role_slugs
+           last_rotated_at, rotation_provider, allowed_role_slugs
       FROM secret_metadata
      ORDER BY secret_path ASC
   `);
@@ -95,6 +98,10 @@ export async function fetchSecretsList(): Promise<SecretMetadataRow[]> {
     rotationCadence: r.rotation_cadence,
     lastRotatedAt: r.last_rotated_at,
     rotationStatus: classifyRotation(r.last_rotated_at, r.rotation_cadence),
+    rotationProvider:
+      r.rotation_provider === 'infisical_native' || r.rotation_provider === 'not_rotatable'
+        ? r.rotation_provider
+        : 'manual_paste',
     allowedRoleSlugs: r.allowed_role_slugs ?? [],
   }));
 }
