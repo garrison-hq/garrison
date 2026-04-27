@@ -33,9 +33,33 @@ const SANDBOX_ESCAPE_STATUSES = ['sandbox_escape', 'artifact_claimed_vs_on_disk'
 export interface HygieneFilter {
   failureMode?: FailureMode;
   departmentSlug?: string;
+  /** M4 / FR-117: filter by suspected_secret_pattern_category.
+   *  Only meaningful when failureMode='suspected_secret_emitted'
+   *  (or unset). Pre-M4 rows have NULL category and surface as
+   *  'unknown' on read; passing 'unknown' filters those rows. */
+  patternCategory?: string;
   page?: number;
   pageSize?: number;
 }
+
+/** The 10 supervisor pattern labels per
+ *  supervisor/internal/vault/scanner.go + 'unknown' for pre-M4
+ *  rows. The hygiene UI renders one category per row; this
+ *  list drives the filter chip. */
+export const PATTERN_CATEGORIES = [
+  'sk_prefix',
+  'xoxb_prefix',
+  'aws_akia',
+  'pem_header',
+  'github_pat',
+  'github_app',
+  'github_user',
+  'github_server',
+  'github_refresh',
+  'bearer_shape',
+  'unknown',
+] as const;
+export type PatternCategory = (typeof PATTERN_CATEGORIES)[number];
 
 export interface HygieneRow {
   transitionId: string;
@@ -126,6 +150,13 @@ export async function fetchHygieneRows(
       AND tt.hygiene_status NOT IN ('clean', '')
       ${statusInClause}
       ${filter.departmentSlug ? sql`AND d.slug = ${filter.departmentSlug}` : sql``}
+      ${
+        filter.patternCategory === 'unknown'
+          ? sql`AND tt.hygiene_status = 'suspected_secret_emitted' AND tt.suspected_secret_pattern_category IS NULL`
+          : filter.patternCategory
+            ? sql`AND tt.suspected_secret_pattern_category = ${filter.patternCategory}`
+            : sql``
+      }
     ORDER BY tt.at DESC
     LIMIT ${pageSize} OFFSET ${offset}
   `);
