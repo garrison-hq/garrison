@@ -9,11 +9,13 @@ import { bootHarness } from './_harness';
 
 const ENV_FILE = join(import.meta.dirname, '.harness', 'env.json');
 // Browser-coverage cache (Path B) + server-coverage cache (Path A).
-// All three directories are siblings (not nested) so monocart's
-// generate() of the merged report can't wipe the source caches.
+// All four directories are siblings (not nested) so each monocart
+// CoverageReport's generate() can't wipe siblings while emitting
+// its own lcov output.
 const COVERAGE_DIR = resolve(import.meta.dirname, '..', '..', 'coverage', 'integration');
 const RAW_DIR = resolve(import.meta.dirname, '..', '..', 'coverage', 'integration-raw');
 const SERVER_COVERAGE_DIR = resolve(import.meta.dirname, '..', '..', 'coverage', 'integration-server');
+const SERVER_REPORT_DIR = resolve(import.meta.dirname, '..', '..', 'coverage', 'integration-server-report');
 
 export default async function globalSetup() {
   // Stale env file from a previous run points at a dead testcontainer
@@ -26,14 +28,10 @@ export default async function globalSetup() {
   // at coverage/integration/.raw/.cache; the server cache lives
   // at coverage/integration/.server-cache; both get re-created
   // by the harness + per-spec fixture as data flows in.
-  if (existsSync(COVERAGE_DIR)) {
-    rmSync(COVERAGE_DIR, { recursive: true, force: true });
-  }
-  if (existsSync(RAW_DIR)) {
-    rmSync(RAW_DIR, { recursive: true, force: true });
-  }
-  if (existsSync(SERVER_COVERAGE_DIR)) {
-    rmSync(SERVER_COVERAGE_DIR, { recursive: true, force: true });
+  for (const d of [COVERAGE_DIR, RAW_DIR, SERVER_COVERAGE_DIR, SERVER_REPORT_DIR]) {
+    if (existsSync(d)) {
+      rmSync(d, { recursive: true, force: true });
+    }
   }
   const env = await bootHarness();
   // Mirror env into process.env so playwright.config.ts's webServer

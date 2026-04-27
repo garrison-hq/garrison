@@ -239,6 +239,32 @@ async function startDashboard(env: HarnessEnv): Promise<void> {
     symlinkSync(join(DASHBOARD_DIR, 'public'), standalonePublic, 'dir');
   }
 
+  // Path A coverage prerequisite: Next's standalone tracer copies
+  // .next/server/**/*.js into .next/standalone/.next/server/ but
+  // NOT the .map files (they're considered dev-only artefacts).
+  // V8 coverage maps positions back via the .map files at runtime,
+  // so we mirror them in by symlinking each one alongside its
+  // chunk. Cheap (28 dirs, 252 maps) and idempotent.
+  const { readdirSync, statSync } = await import('node:fs');
+  const realServerDir = join(DASHBOARD_DIR, '.next', 'server');
+  const standaloneServerDir = join(standaloneNextDir, 'server');
+  if (exists(realServerDir) && exists(standaloneServerDir)) {
+    function mirrorMaps(srcDir: string, dstDir: string): void {
+      for (const entry of readdirSync(srcDir)) {
+        const srcPath = join(srcDir, entry);
+        const dstPath = join(dstDir, entry);
+        const stat = statSync(srcPath);
+        if (stat.isDirectory()) {
+          if (!exists(dstPath)) mkdir(dstPath, { recursive: true });
+          mirrorMaps(srcPath, dstPath);
+        } else if (entry.endsWith('.map') && !exists(dstPath)) {
+          symlinkSync(srcPath, dstPath);
+        }
+      }
+    }
+    mirrorMaps(realServerDir, standaloneServerDir);
+  }
+
   // Path A — server-side V8 coverage: NODE_V8_COVERAGE tells
   // Node to dump per-script coverage profiles to a directory on
   // clean shutdown. The c8 post-test step converts them to lcov.

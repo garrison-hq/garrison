@@ -20,7 +20,7 @@
     "drizzle:generate": "drizzle-kit generate && bun run drizzle/scripts/append-grants.ts",
     "drizzle:migrate": "drizzle-kit migrate",
     "lint:vault-discipline": "bun run scripts/lint-vault-discipline.ts",
-    "test:integration": "next build && playwright test"
+    "test:integration": "next build && playwright test && bun run tests/integration/_server-coverage.ts"
   },
   "dependencies": {
     "@infisical/sdk": "5.0.2",
@@ -45,6 +45,9 @@
     "@vitest/ui": "4.1.5",
     "c8": "^11.0.0",
     "drizzle-kit": "^0.31.10",
+    "istanbul-lib-coverage": "^3.2.2",
+    "istanbul-lib-report": "^3.0.1",
+    "istanbul-reports": "^3.2.0",
     "monocart-coverage-reports": "^2.12.11",
     "playwright": "1.59.1",
     "postcss": "8.5.6",

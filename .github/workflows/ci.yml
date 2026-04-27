@@ -219,15 +219,30 @@ jobs:
       # before a release.
       - name: Run Playwright integration suite
         run: bunx playwright test --project=chromium-1280
-      # Browser-side V8 coverage from monocart-coverage-reports →
-      # consumed by the SonarCloud job below. See
-      # tests/integration/_coverage.ts + global-teardown.ts.
-      - name: Upload integration coverage
+      # Path A — server-side V8 coverage. The Playwright harness
+      # spawns the dashboard with NODE_V8_COVERAGE; this step
+      # converts those profiles to lcov via v8-to-istanbul.
+      # Runs after Playwright exits so the dashboard has flushed
+      # its profiles via the SIGTERM handler. See
+      # tests/integration/_server-coverage.ts.
+      - name: Convert server-side V8 profiles to lcov
+        run: bun run tests/integration/_server-coverage.ts
+        if: always()
+      # Browser-side V8 coverage (Path B) from monocart-coverage
+      # -reports → consumed by the SonarCloud job below.
+      - name: Upload integration coverage (browser)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: dashboard-integration-coverage
           path: dashboard/coverage/integration/lcov.info
+          if-no-files-found: warn
+      - name: Upload integration coverage (server)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dashboard-integration-server-coverage
+          path: dashboard/coverage/integration-server-report/lcov.info
           if-no-files-found: warn
       - name: Upload Playwright trace + report on failure
         if: failure()
@@ -273,14 +288,22 @@ jobs:
         with:
           name: dashboard-coverage
           path: dashboard/coverage
-      # Browser-side V8 coverage (Playwright + monocart). Sonar
-      # reads sonar.javascript.lcov.reportPaths as a comma-list
-      # → both unit + integration lcov contribute to the metric.
-      - name: Download dashboard integration coverage
+      # Browser-side V8 coverage (Path B — Playwright + monocart)
+      # AND server-side V8 coverage (Path A — NODE_V8_COVERAGE +
+      # v8-to-istanbul). Sonar reads sonar.javascript.lcov
+      # .reportPaths as a comma-list → all three lcov files
+      # contribute to the metric (unit + integration browser +
+      # integration server).
+      - name: Download dashboard integration coverage (browser)
         uses: actions/download-artifact@v4
         with:
           name: dashboard-integration-coverage
           path: dashboard/coverage/integration
+      - name: Download dashboard integration coverage (server)
+        uses: actions/download-artifact@v4
+        with:
+          name: dashboard-integration-server-coverage
+          path: dashboard/coverage/integration-server-report
       # Pinned to the full commit SHA of v5.0.0 per SonarQube's own
       # githubactions:S7637 rule. The tag-form (`@v5.0.0`) would let a
       # compromised publisher silently retag to a malicious commit.
