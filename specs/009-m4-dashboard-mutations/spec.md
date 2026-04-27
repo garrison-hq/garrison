@@ -11,6 +11,18 @@
 
 ---
 
+## Clarifications
+
+### Session 2026-04-27 (five markers resolved)
+
+- **FR-029** (operator drag → supervisor wake-up loop): operator drags emit on the same `work.ticket.transitioned.<dept>.<from>.<to>` channels agent finalize transitions emit on; agents listening on those channels spawn on operator drags as they would on agent finalizes. Event-handling consistency outweighs the rare unwanted-spawn case; per-channel mute or per-drag opt-out is deferred to a future milestone.
+- **FR-030** (`operator_initiated` rows in weekly hygiene metrics): excluded by default from "needs-review" aggregate counts. A filter chip surfaces them on demand. Per RATIONALE §5, operator drags are not failure modes; including them in triage backlogs dilutes the signal.
+- **FR-031** (inline-edit field set): exhaustive — title, description, priority, assigned-agent. Other `tickets` columns are not inline-editable in M4. Set can grow in M5+ if specific gaps surface.
+- **FR-071** (secret-reveal "reason" prompt): no reason prompt. Single-click confirm; audit row captures who / what / when. At solo-operator scale, the operator is the auditor; reason capture is friction without a reader. Revisit if multi-operator audit workflows make it useful.
+- **FR-100** (supervisor `internal/agents` cache invalidation): supervisor adds a `pg_notify`-driven cache invalidator listening on a new `agents.changed` channel. Dashboard emits `pg_notify('agents.changed', <role_slug>)` on every successful `agents` write. Preserves M2.1's startup cache invariant for the no-edits common case; wiring is one LISTEN goroutine + a cache.Reset() callback. The new channel is the only supervisor-pg_notify-set extension in M4; supervisor-emitted channels (the 4 disabled activity-feed chips) remain unchanged.
+
+---
+
 ## User scenarios & testing *(mandatory)*
 
 ### User story 1 — operator manages vault secrets, grants, and rotation through the dashboard (priority: P1)
@@ -150,13 +162,15 @@ When the M2.3 finalize-path scanner emits a `suspected_secret_emitted` row, the 
 - **FR-026**: Submitting the create-ticket form MUST insert a row in `tickets` with operator-authored provenance and write a corresponding `event_outbox` row.
 - **FR-027**: Drag-to-move on the Kanban view MUST write a `ticket_transitions` row. The new row MUST have `hygiene_status='operator_initiated'` (added to the enum vocabulary) and `agent_instance_id=NULL`. Inserting the transition row updates `tickets.column_slug` atomically (single transaction, mirroring M2.2 transition semantics).
 - **FR-028**: The hygiene table MUST display `operator_initiated` rows in a category distinct from failure modes (`finalize_never_called`, `suspected_secret_emitted`, sandbox-escape variants). Filter chips MUST allow operator to include / exclude operator-initiated transitions.
-- **FR-029**: Whether operator-initiated transitions trigger the supervisor's wake-up loop (and therefore agent spawning on listened channels) is **[NEEDS CLARIFICATION: should an operator drag from `in_dev` to `in_review` trigger agents that listen on `work.ticket.transitioned.<dept>.in_dev.in_review` to spawn? Pro: event-handling consistency with agent-driven transitions. Con: operator drags spawn agents, possibly unwanted]**.
-- **FR-030**: Whether `operator_initiated` transitions count toward weekly hygiene metrics (RATIONALE §5 weekly-review framing) is **[NEEDS CLARIFICATION: include in metrics by default, or filter out by default? The hygiene table makes them visible regardless; the question is whether they contribute to "issues to triage" counts]**.
-- **FR-031**: Inline ticket edits MUST support the following fields **[NEEDS CLARIFICATION: is this set exhaustive or illustrative? The current `tickets` schema may have additional columns the operator could want editable, e.g., due_date, labels]**:
+- **FR-029**: Operator-initiated transitions MUST emit on the same `work.ticket.transitioned.<dept>.<from>.<to>` channel set that agent finalize transitions emit on. Agents listening on those channels spawn on operator drags as they would on agent-driven transitions. The hygiene table distinguishes the two transition origins via the new `hygiene_status='operator_initiated'` value (FR-027); the channel set does not.
+- **FR-030**: Operator-initiated transitions MUST be excluded by default from the hygiene table's "needs-review" aggregate counts and weekly hygiene metrics. A filter chip MUST surface them on demand. Per RATIONALE §5, operator drags are not failure modes and including them in triage backlogs dilutes signal.
+- **FR-031**: Inline ticket edits MUST support exactly the following fields (set is exhaustive for M4):
   - title
   - description
   - priority
   - assigned-agent
+
+  Other `tickets` columns (system columns, `dept_slug`, `column_slug`, foreign-key columns, plus any `due_date` / `labels` if present in the schema) MUST NOT be inline-editable in M4. The set can grow in a future milestone if specific operator-workflow gaps surface.
 - **FR-032**: Inline ticket edits MUST NOT create `ticket_transitions` rows. The transition table is reserved for column moves (whether agent-driven or operator-driven).
 - **FR-033**: Inline edits MUST emit `event_outbox` rows with field-level `before` / `after` diffs (FR-014). The activity feed MUST render an "edited <field> from X to Y" line.
 - **FR-034**: Inline edits MUST use last-write-wins semantics. No optimistic locking, no conflict UI; concurrent inline edits both succeed in chronological order, both audit rows are preserved, and the divergence is reconstructible from the audit stream.
@@ -204,7 +218,7 @@ When the M2.3 finalize-path scanner emits a `suspected_secret_emitted` row, the 
 - **FR-068**: Path / environment tree rename MUST issue a single Infisical move call per affected secret. Multi-secret moves require typed-name confirmation.
 - **FR-069**: Path / environment tree move MUST update `secret_metadata.secret_path` for every affected secret in the same DB transaction as the audit rows. Partial Infisical failure surfaces per FR-094.
 - **FR-070**: The secret reveal modal MUST require a single-click confirmation before rendering the value. Auto-hide fires 30 seconds after first render. Copy-to-clipboard is available within the modal; closing the modal removes the value from the DOM immediately.
-- **FR-071**: Whether the reveal modal requires the operator to enter a "reason" before reveal is **[NEEDS CLARIFICATION: many credential vaults capture justification on reveal. M4 default is no reason prompt. Operator confirms or extends]**.
+- **FR-071**: The reveal modal MUST NOT require a reason or justification field. Single-click confirmation is sufficient; the audit row (FR-012 `value_revealed` outcome) captures who, what, and when. A reason field can be added in a future milestone if a multi-operator audit workflow makes it useful.
 - **FR-072**: `secret_metadata` MUST gain a `rotation_provider` column (enum: `infisical_native`, `manual_paste`, `not_rotatable`). The column is populated at secret creation based on path-prefix conventions (operator-entered defaults to `manual_paste`; OAuth secrets default to `infisical_native` if Infisical supports the backend) plus an Infisical metadata read.
 - **FR-073**: The vault audit log viewer (M3's read surface) MUST extend to render the new write `outcome` values with consistent visual treatment.
 - **FR-074**: The vault audit log viewer MUST allow filtering by outcome category (read events vs. write events) and by individual outcome values.
@@ -238,7 +252,7 @@ When the M2.3 finalize-path scanner emits a `suspected_secret_emitted` row, the 
 - **FR-097**: Saving an agent.md whose body contains the verbatim value of a fetchable secret for the agent's role MUST reject the save (FR-088).
 - **FR-098**: Saved agent edits take effect at the next spawn for the role. Already-spawned subprocesses retain prior config until they exit.
 - **FR-099**: The agent settings editor MUST surface a banner indicator: "N instances currently running with prior config — change takes effect on next spawn for this role." The count comes from `agent_instances` filtered to `role_slug` and `exit_reason IS NULL`.
-- **FR-100**: Whether the supervisor's `internal/agents` startup-once cache (per AGENTS.md M2.1) is invalidated on dashboard agent-row writes is **[NEEDS CLARIFICATION: M2.1 cache reads agents at supervisor startup. Either (i) spawn-time always re-reads from `agents` (changes M2.1 caching behavior), (ii) supervisor adds a `pg_notify`-driven cache invalidator (new wiring, supervisor-side change), or (iii) operator restarts the supervisor on agent edits (operator-facing inconvenience). M4 must pick one]**.
+- **FR-100**: The supervisor MUST add a `pg_notify`-driven cache invalidator that listens on a new channel `agents.changed`. The dashboard MUST emit `pg_notify('agents.changed', <role_slug>)` on every successful write to the `agents` table (insert / update / delete). The supervisor's `internal/agents` cache resets the affected role's entry on receipt; subsequent spawns for that role re-read from `agents`. The startup-cache invariant for the no-edits common case is preserved. Wiring is a single LISTEN goroutine on the supervisor side plus a `cache.Reset(roleSlug)` callback; the dashboard's emission piggy-backs on the existing transactional write to `agents` (single SQL transaction, `pg_notify` issued inside it).
 - **FR-101**: Concurrent edits to the same agent MUST use optimistic locking. Conflicts surface a UI showing the diff between the operator's draft and the latest saved version; the operator chooses to overwrite, merge manually, or discard.
 - **FR-102**: The agent settings editor MUST validate model against the existing model enum.
 - **FR-103**: The agent settings editor MUST validate concurrency cap as a positive integer ≤ a configurable max (default 10 per role per M2.1 framing).
@@ -327,7 +341,7 @@ External entities:
 - **SC-008**: M3 regressions are zero. The M3 golden-path Playwright spec passes unchanged under M4's data shapes.
 - **SC-009**: All vault write routes use the `garrison-dashboard` Machine Identity. Verifiable by inspecting dashboard runtime configuration and Infisical's machine-identity audit log after a full acceptance run.
 - **SC-010**: The threat model amendment (commit `11b0dfb`) is consistent with what M4 ships. Verifiable by re-reading the amended threat model after M4 ships and confirming no new contradictions.
-- **SC-011**: All five `[NEEDS CLARIFICATION]` markers (FR-029, FR-030, FR-031, FR-071, FR-100) are resolved during `/speckit.clarify` before `/garrison-plan` runs.
+- **SC-011**: All five `[NEEDS CLARIFICATION]` markers (FR-029, FR-030, FR-031, FR-071, FR-100) are resolved by the 2026-04-27 clarification round (see §Clarifications above). The spec carries no unresolved markers entering `/garrison-plan`.
 - **SC-012**: Zero new direct dashboard dependencies, OR each new direct dependency carries a one-paragraph justification in `docs/retros/m4.md` per M3 discipline.
 - **SC-013**: The `next start` → standalone test harness migration (FR-122) ships in M4. Acceptance: the M4 Playwright suite runs against the standalone runtime and passes without the `next start` warning.
 - **SC-014**: The Drizzle CLI stays out of the runtime image (FR-120, FR-121). Acceptance: `dashboard/Dockerfile` carries no `drizzle-kit` install line, and `docs/ops-checklist.md` documents the ops-shell migration procedure for any new M4 dashboard-domain migrations.
@@ -348,7 +362,7 @@ External entities:
 - **The parked `garrison-dashboard` Machine Identity is created in Infisical and configured with appropriate write permissions**. M2.3 retro Q4 confirmed the ML is parked; M4 activates it. Operators provision the ML's credentials before deploying M4.
 - **Single operator pool continues**. M3's invite-driven multi-account model continues unchanged; M4 introduces no per-operator role distinctions.
 - **Better-auth session model is unchanged**. M3's email/password provider with the drizzle adapter continues; M4 adds no new auth providers.
-- **The supervisor's pg_notify channel set is unchanged in M4**. The 4 disabled activity-feed chips (`ticket.commented`, `agent.spawned`, `agent.completed`, `hygiene.flagged`) remain disabled. Future milestone TBD picks them up.
+- **The supervisor's *emitted* pg_notify channel set is unchanged in M4**. The 4 disabled activity-feed chips (`ticket.commented`, `agent.spawned`, `agent.completed`, `hygiene.flagged`) remain disabled. Future milestone TBD picks them up. The supervisor *listens* on one new channel introduced by M4 — `agents.changed`, dashboard-emitted, for `internal/agents` cache invalidation per FR-100.
 - **The hygiene-backfill workflow stays at M6**. M4 does NOT pull forward the "jump to palace wing" affordance from M3 retro / M3 context.
 - **Cost-telemetry blind spot stays surfaced-not-fixed** (`docs/issues/cost-telemetry-blind-spot.md`). M4 inherits M3's caveat-icon treatment without modifying the underlying supervisor signal-handling.
 - **Workspace-sandbox escape stays surfaced-not-fixed** (`docs/issues/agent-workspace-sandboxing.md`). M4 displays the failure mode in hygiene + ticket detail per M3; the per-agent Docker container fix is post-M4 work.
