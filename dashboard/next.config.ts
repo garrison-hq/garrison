@@ -19,6 +19,16 @@ const nextConfig: NextConfig = {
   // source paths in browser DevTools — neither concerning for this
   // operator-only deployment.
   productionBrowserSourceMaps: true,
+  // Emit Server Component / route-handler / Server Action source
+  // maps in the standalone bundle. Required so c8 (post-test
+  // converter) can map NODE_V8_COVERAGE profiles back to source
+  // for Sonar ingestion. Without this, the server-side coverage
+  // report references compiled .next/server/chunks paths that
+  // Sonar can't match against repo files. Path A wiring per
+  // M4 retro post-ship.
+  experimental: {
+    serverSourceMaps: true,
+  },
   // Pin turbopack's root to the dashboard/ directory so its lockfile +
   // node_modules search doesn't drift up into the monorepo and confuse
   // tailwindcss / postcss resolution when sibling lockfiles exist at

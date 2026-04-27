@@ -1,5 +1,5 @@
 import { rmSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { bootHarness } from './_harness';
 
 // Playwright globalSetup. Boots the postgres testcontainer +
@@ -8,6 +8,12 @@ import { bootHarness } from './_harness';
 // so the webServer block in playwright.config.ts can pick it up.
 
 const ENV_FILE = join(import.meta.dirname, '.harness', 'env.json');
+// Browser-coverage cache (Path B) + server-coverage cache (Path A).
+// All three directories are siblings (not nested) so monocart's
+// generate() of the merged report can't wipe the source caches.
+const COVERAGE_DIR = resolve(import.meta.dirname, '..', '..', 'coverage', 'integration');
+const RAW_DIR = resolve(import.meta.dirname, '..', '..', 'coverage', 'integration-raw');
+const SERVER_COVERAGE_DIR = resolve(import.meta.dirname, '..', '..', 'coverage', 'integration-server');
 
 export default async function globalSetup() {
   // Stale env file from a previous run points at a dead testcontainer
@@ -15,6 +21,19 @@ export default async function globalSetup() {
   // bootHarness starts fresh and writes a new one.
   if (existsSync(ENV_FILE)) {
     rmSync(ENV_FILE);
+  }
+  // Clear out previous coverage dumps. The browser cache lives
+  // at coverage/integration/.raw/.cache; the server cache lives
+  // at coverage/integration/.server-cache; both get re-created
+  // by the harness + per-spec fixture as data flows in.
+  if (existsSync(COVERAGE_DIR)) {
+    rmSync(COVERAGE_DIR, { recursive: true, force: true });
+  }
+  if (existsSync(RAW_DIR)) {
+    rmSync(RAW_DIR, { recursive: true, force: true });
+  }
+  if (existsSync(SERVER_COVERAGE_DIR)) {
+    rmSync(SERVER_COVERAGE_DIR, { recursive: true, force: true });
   }
   const env = await bootHarness();
   // Mirror env into process.env so playwright.config.ts's webServer

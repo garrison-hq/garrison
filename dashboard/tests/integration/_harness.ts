@@ -239,7 +239,36 @@ async function startDashboard(env: HarnessEnv): Promise<void> {
     symlinkSync(join(DASHBOARD_DIR, 'public'), standalonePublic, 'dir');
   }
 
-  const proc = spawn('node', ['server.js'], {
+  // Path A — server-side V8 coverage: NODE_V8_COVERAGE tells
+  // Node to dump per-script coverage profiles to a directory on
+  // clean shutdown. The c8 post-test step converts them to lcov.
+  // Required: serverSourceMaps=true in next.config.ts so c8 can
+  // map back to source. The directory lives OUTSIDE
+  // coverage/integration/ so monocart's browser-coverage
+  // generate() doesn't wipe it.
+  const serverCoverageDir = resolve(DASHBOARD_DIR, 'coverage', 'integration-server');
+  // The directory is recreated per test invocation via the
+  // teardown's pre-clean step; safe to mkdir here even if it
+  // exists.
+  if (!existsSync(serverCoverageDir)) {
+    mkdirSync(serverCoverageDir, { recursive: true });
+  }
+
+  // --import a tiny inline ESM module that installs SIGTERM /
+  // SIGINT handlers BEFORE server.js loads. Required for Path A
+  // coverage: NODE_V8_COVERAGE only flushes profiles on a
+  // clean Node exit (process.exit / natural completion); a
+  // signal-killed Node leaves the in-memory coverage tables on
+  // the floor. The data: URL form sidesteps having to write a
+  // wrapper file inside .next/standalone (which would survive
+  // bun run build wipes).
+  const SIGNAL_HANDLER_DATA_URL =
+    'data:text/javascript,' +
+    encodeURIComponent(
+      'process.on("SIGTERM",()=>process.exit(0));process.on("SIGINT",()=>process.exit(0));',
+    );
+
+  const proc = spawn('node', ['--import', SIGNAL_HANDLER_DATA_URL, 'server.js'], {
     cwd: standaloneRoot,
     env: {
       ...process.env,
@@ -253,6 +282,8 @@ async function startDashboard(env: HarnessEnv): Promise<void> {
       // delegation), that means the server only accepts requests
       // on that public address and localhost loops fail.
       HOSTNAME: '0.0.0.0',
+      // Server-side coverage profile dump destination (Path A).
+      NODE_V8_COVERAGE: serverCoverageDir,
       // Tell the standalone runtime where to find the static
       // assets and the public dir. They live OUTSIDE the
       // standalone dir during local dev (Next emits them next
@@ -285,11 +316,26 @@ async function startDashboard(env: HarnessEnv): Promise<void> {
 
 export async function stopHarness(): Promise<void> {
   if (dashboardProc) {
-    dashboardProc.kill('SIGTERM');
-    // Give next a moment to shut down child workers.
-    await new Promise((r) => setTimeout(r, 1500));
-    if (!dashboardProc.killed) dashboardProc.kill('SIGKILL');
+    // SIGTERM, then wait for the process to fully exit before
+    // moving on. NODE_V8_COVERAGE writes profile files at clean
+    // exit time; killing harder (SIGKILL) loses them.
+    const proc = dashboardProc;
     dashboardProc = null;
+    proc.kill('SIGTERM');
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(() => {
+        // 10s ceiling — Next typically exits in <2s but we want
+        // generous headroom for V8 to flush coverage. If it
+        // somehow hangs past 10s, fall back to SIGKILL so the
+        // harness can shut down at all.
+        proc.kill('SIGKILL');
+        resolve();
+      }, 10_000);
+      proc.on('exit', () => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
   }
   if (started) {
     await started.stop();

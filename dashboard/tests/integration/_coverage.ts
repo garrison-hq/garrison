@@ -33,10 +33,12 @@ import { CoverageReport } from 'monocart-coverage-reports';
 import { resolve } from 'node:path';
 
 export const COVERAGE_ROOT = resolve(import.meta.dirname, '..', '..', 'coverage', 'integration');
-// The 'raw' reporter writes its files into outputDir/.cache/ (monocart's
-// internal layout: source-*.json + coverage-*.json). We expose both
-// paths so global-teardown.ts knows where to read from.
-export const RAW_DIR = resolve(COVERAGE_ROOT, '.raw');
+// The 'raw' reporter writes its files into outputDir/.cache/
+// (monocart's internal layout: source-*.json + coverage-*.json).
+// Place the raw output OUTSIDE of COVERAGE_ROOT so the teardown's
+// CoverageReport.generate() doesn't conflict with the worker's
+// data — siblings, not parent/child.
+export const RAW_DIR = resolve(COVERAGE_ROOT, '..', 'integration-raw');
 export const RAW_DATA_DIR = resolve(RAW_DIR, '.cache');
 
 const WORKER_REPORT = new CoverageReport({
