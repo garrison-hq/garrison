@@ -2,7 +2,7 @@
 
 **Branch**: `009-m4-dashboard-mutations`
 **Spec**: [`spec.md`](./spec.md)
-**Last updated**: 2026-04-27
+**Last updated**: 2026-04-27 (post-ship: SC-002 closed via Infisical testcontainer wiring)
 
 Maps every Success Criterion from `spec.md` §"Success criteria" to
 the artefact that proves it. Some SCs are pinned by unit tests;
@@ -14,7 +14,7 @@ asking "did we ship what the spec said we would?"
 | SC | What | Verified by |
 |---|---|---|
 | **SC-001** | Vault golden path completes in ≤ 5 min operator wall-clock | Manual operator review against the dev stack with Infisical configured. Path is wired: `/vault/new` → `/vault/{path}/edit` → `/vault/rotation` → reveal modal → typed-name delete. Each surface tested in isolation by the per-task Playwright specs. |
-| **SC-002** | Vault golden path Playwright integration test in ≤ 90s CI | Deferred to a follow-up acceptance run with a testcontainer Infisical. The unit-level invariants are proven by `lib/audit/vaultAccessLog.test.ts` (Rule 6 backstop) + `lib/locks/version.test.ts` (optimistic locking). |
+| **SC-002** | Vault golden path Playwright integration test in ≤ 90s CI | `tests/integration/m4-golden-path.spec.ts` (post-ship update). Boots Postgres + Redis + Infisical v0.159.22 testcontainers via `tests/integration/_infisical.ts` (TS port of `supervisor/internal/vault/testutil.go`), bootstraps admin signup → org → project → ML, threads the credentials into the dashboard process, then drives create-secret end-to-end + asserts secret_metadata + vault_access_log rows + Rule 6 no-leak. Local run: ~55s (image cached) on chromium-1280. The Infisical-side cold-start adds ~30-60s on first runner pull. |
 | **SC-003** | Ticket mutation golden path ≤ 2 min + Playwright | `tests/integration/m4-ticket-mutations.spec.ts` — create + inline edit + concurrent last-write-wins. |
 | **SC-004** | Agent settings editor golden path ≤ 90s + Playwright | `tests/integration/m4-agent-settings.spec.ts` — edit + agents.changed pg_notify + event_outbox row. |
 | **SC-005** | Mutation visible in activity feed within 30s (poll) / 2s (real-time) | M3 SSE listener subscribes to `work.ticket.edited`, `work.agent.edited`, `work.ticket.transitioned.*`, `work.vault.*` channels. Real-time visibility for literal channels is platform-guaranteed by Postgres `LISTEN`; the parameterised channels rely on the M3 30s poll cadence. The activity feed's two-source merge (event_outbox + vault_access_log) lands in `lib/queries/activityCatchup.ts`. |
@@ -37,11 +37,26 @@ asking "did we ship what the spec said we would?"
 
 ## Outstanding follow-ups (not blockers; documented for the post-ship polish round)
 
-- `SC-002`: vault golden path Playwright spec needs a testcontainer Infisical to fully exercise. The unit-level invariants are pinned; the Playwright surface check ships once the container is wired.
 - `SC-007`: the M4 form-level catalog adds (vault errors etc.) shipped in `messages/en.json`; ticket-create + agent-settings + reveal modal copy is pending a wider i18n audit. Tracked as a polish pass.
 - `SC-018`: form-state preservation across re-auth is the polish-round concern; the auth guard is robust at the server-action layer.
 - `SC-020`: visual-treatment-distinct check is a manual review at retro time.
 - Drag-to-move keyboard accessibility (FR-037): HTML5 drag covers mouse + touch + most assistive tech; arrow-key column traversal is a polish-round concern.
+
+## Post-ship updates
+
+- **2026-04-27 — SC-002 closed.** Wired the Infisical testcontainer into the
+  Playwright harness (`dashboard/tests/integration/_infisical.ts` +
+  `_harness.ts` updates); activated the vault create flow in
+  `m4-golden-path.spec.ts`. The activation surfaced a real M4 bug:
+  `garrison_dashboard_app` lacked SELECT on the vault tables and lacked
+  several mutation grants (UPDATE on agents, INSERT/UPDATE on tickets,
+  INSERT on ticket_transitions, INSERT on event_outbox, INSERT on
+  vault_access_log). Fixed in
+  `migrations/20260427000014_m4_dashboard_app_vault_read_grants.sql`.
+  Without this migration, the agent edit page failed to render existing
+  grants and `deleteSecret` threw permission_denied. Also fixed a
+  test-harness HOSTNAME bind on machines whose OS hostname resolves to
+  a public address (forces `HOSTNAME=0.0.0.0` on the dashboard spawn).
 
 ## Scripted runner
 
