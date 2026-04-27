@@ -31,6 +31,78 @@ function asStringArray(value: unknown): string[] {
   return [];
 }
 
+// M4 / T013 — single-agent fetch for the agent settings editor.
+// Returns the editable fields (agentMd, model, listensFor, skills) +
+// updatedAt for the optimistic-lock version token + current
+// running-instance count for the banner copy. Looked up by
+// (departmentSlug, roleSlug) since the M2.1 schema scopes
+// role_slug uniqueness per department.
+
+export interface AgentEditSnapshot {
+  id: string;
+  departmentSlug: string;
+  departmentName: string;
+  roleSlug: string;
+  agentMd: string;
+  model: string;
+  listensFor: string[];
+  skills: string[];
+  updatedAt: string;
+  liveInstances: number;
+}
+
+export async function fetchAgentForEdit(
+  departmentSlug: string,
+  roleSlug: string,
+): Promise<AgentEditSnapshot | null> {
+  const rows = await appDb.execute<{
+    id: string;
+    department_slug: string;
+    department_name: string;
+    role_slug: string;
+    agent_md: string;
+    model: string;
+    listens_for: unknown;
+    skills: unknown;
+    updated_at: string;
+    live_instances: number;
+  }>(sql`
+    SELECT
+      a.id,
+      d.slug AS department_slug,
+      d.name AS department_name,
+      a.role_slug,
+      a.agent_md,
+      a.model,
+      a.listens_for,
+      a.skills,
+      a.updated_at,
+      (SELECT count(*)::int FROM agent_instances ai
+        WHERE ai.department_id = a.department_id
+          AND ai.role_slug = a.role_slug
+          AND ai.status = 'running') AS live_instances
+    FROM agents a
+    JOIN departments d ON d.id = a.department_id
+    WHERE d.slug = ${departmentSlug}
+      AND a.role_slug = ${roleSlug}
+    LIMIT 1
+  `);
+  if (rows.length === 0) return null;
+  const r = rows[0];
+  return {
+    id: r.id,
+    departmentSlug: r.department_slug,
+    departmentName: r.department_name,
+    roleSlug: r.role_slug,
+    agentMd: r.agent_md,
+    model: r.model,
+    listensFor: asStringArray(r.listens_for),
+    skills: asStringArray(r.skills),
+    updatedAt: r.updated_at,
+    liveInstances: r.live_instances ?? 0,
+  };
+}
+
 export async function fetchAgents(): Promise<AgentRow[]> {
   const rows = await appDb.execute<{
     id: string;
