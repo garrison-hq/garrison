@@ -92,13 +92,9 @@ export function GrantEditor({
     });
   }
 
-  function applyRemoveResult(g: GrantKey, removed: boolean): void {
-    if (removed) {
-      setGrants((prev) => prev.filter((x) => !isSameGrant(x, g)));
-      router.refresh();
-    } else {
-      setError('Grant not found (may have been removed already).');
-    }
+  function dropGrantLocally(g: GrantKey): void {
+    setGrants((prev) => prev.filter((x) => !isSameGrant(x, g)));
+    router.refresh();
   }
 
   function applyRemoveError(err: unknown): void {
@@ -112,7 +108,11 @@ export function GrantEditor({
   async function performRemove(g: GrantKey): Promise<void> {
     try {
       const result = await removeGrant(g);
-      applyRemoveResult(g, result.removed);
+      if (result.removed) {
+        dropGrantLocally(g);
+        return;
+      }
+      setError('Grant not found (may have been removed already).');
     } catch (err) {
       applyRemoveError(err);
     }
