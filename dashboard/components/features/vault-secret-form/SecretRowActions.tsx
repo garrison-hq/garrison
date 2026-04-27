@@ -59,8 +59,25 @@ export function SecretRowActions({ secretPath }: SecretRowActionsProps) {
     });
   }
 
+  // Build the edit href: encode each path segment to handle
+  // characters that need URL escaping (e.g. slashes inside a
+  // segment shouldn't ever appear, but encode defensively).
+  const editHref =
+    '/vault' +
+    secretPath
+      .split('/')
+      .map((s) => (s ? '/' + encodeURIComponent(s) : ''))
+      .join('') +
+    '/edit';
+
   return (
     <span className="inline-flex items-center gap-2">
+      <a
+        href={editHref}
+        className="text-[12px] text-accent hover:underline"
+      >
+        Edit
+      </a>
       <button
         type="button"
         onClick={() => setRevealOpen(true)}

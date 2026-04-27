@@ -76,6 +76,51 @@ function classifyRotation(
   return 'fresh';
 }
 
+// M4 / T007 — single-secret fetch for the secret edit form.
+// Returns the editable fields + updated_at version token used by
+// the optimistic-lock check in editSecret per FR-084.
+export interface SecretEditSnapshot {
+  secretPath: string;
+  customerId: string;
+  provenance: string;
+  rotationCadence: string;
+  rotationProvider: 'infisical_native' | 'manual_paste' | 'not_rotatable';
+  updatedAt: string;
+}
+
+export async function fetchSecretForEdit(
+  secretPath: string,
+): Promise<SecretEditSnapshot | null> {
+  const rows = await vaultRoDb.execute<{
+    secret_path: string;
+    customer_id: string;
+    provenance: string;
+    rotation_cadence: string;
+    rotation_provider: string;
+    updated_at: string;
+  }>(sql`
+    SELECT secret_path, customer_id, provenance,
+           rotation_cadence::text AS rotation_cadence,
+           rotation_provider, updated_at
+      FROM secret_metadata
+     WHERE secret_path = ${secretPath}
+     LIMIT 1
+  `);
+  if (rows.length === 0) return null;
+  const r = rows[0];
+  return {
+    secretPath: r.secret_path,
+    customerId: r.customer_id,
+    provenance: r.provenance,
+    rotationCadence: r.rotation_cadence,
+    rotationProvider:
+      r.rotation_provider === 'infisical_native' || r.rotation_provider === 'not_rotatable'
+        ? r.rotation_provider
+        : 'manual_paste',
+    updatedAt: r.updated_at,
+  };
+}
+
 export async function fetchSecretsList(): Promise<SecretMetadataRow[]> {
   const rows = await vaultRoDb.execute<{
     secret_path: string;
