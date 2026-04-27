@@ -74,7 +74,9 @@ test.describe('M4 ticket mutations', () => {
     await page.goto('/tickets/new');
     await page.locator('input').first().fill('Test ticket from M4 spec');
     await page.getByRole('button', { name: 'Create ticket' }).click();
-    await page.waitForURL(/\/tickets\//);
+    // Specifically a UUID path so we don't trivially match /tickets/new
+    // which is the page we're already on when waitForURL is called.
+    await page.waitForURL(/\/tickets\/[a-f0-9-]{36}$/, { timeout: 10_000 });
 
     // Verify the ticket lands as origin='operator'.
     const sql = postgres(env.TEST_SUPERUSER_DSN, { max: 1 });
@@ -99,7 +101,15 @@ test.describe('M4 ticket mutations', () => {
     await page.goto('/tickets/new');
     await page.locator('input').first().fill('Original objective');
     await page.getByRole('button', { name: 'Create ticket' }).click();
-    await page.waitForURL(/\/tickets\//);
+    // Specifically a UUID path so we don't trivially match /tickets/new
+    // which is the page we're already on when waitForURL is called.
+    await page.waitForURL(/\/tickets\/[a-f0-9-]{36}$/, { timeout: 10_000 });
+    // The router.push from createTicket lands us on the
+    // intercepted @panel route (drawer overlay) which omits the
+    // TicketInlineEditor. Reload to break out of the intercept
+    // and render the standalone /tickets/<id> page that hosts the
+    // inline-edit Edit button.
+    await page.goto(page.url());
 
     // Inline edit.
     await page.getByRole('button', { name: 'Edit' }).first().click();
@@ -141,7 +151,10 @@ test.describe('M4 ticket mutations', () => {
     await pageA.goto('/tickets/new');
     await pageA.locator('input').first().fill('Race target');
     await pageA.getByRole('button', { name: 'Create ticket' }).click();
-    await pageA.waitForURL(/\/tickets\//);
+    await pageA.waitForURL(/\/tickets\/[a-f0-9-]{36}$/, { timeout: 10_000 });
+    // Reload to break out of the @panel intercept and render the
+    // standalone page that hosts the inline-edit Edit button.
+    await pageA.goto(pageA.url());
     const ticketUrl = pageA.url();
 
     // Second context: log in via the API (the harness's

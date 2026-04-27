@@ -59,6 +59,12 @@ test.describe('theme parity', () => {
   test('every primary surface renders in dark theme with token-resolved colours', async ({ page }) => {
     const env = await bootHarness();
     await authenticate(page, env);
+    // Explicitly pick dark — the theme defaults to 'system' which
+    // doesn't set data-theme; under headless Chromium 'system' often
+    // resolves to light, so without this click data-theme is null.
+    await page.goto('/');
+    await page.getByTestId('theme-dark').click();
+    await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark', { timeout: 5_000 });
     for (const path of SURFACES) {
       await page.goto(path);
       const dataTheme = await page.locator('html').getAttribute('data-theme');

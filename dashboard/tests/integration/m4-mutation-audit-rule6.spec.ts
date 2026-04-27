@@ -95,7 +95,10 @@ test.describe('M4 / T017 — Rule 6 audit invariants', () => {
     await page.goto('/tickets/new');
     await page.locator('input').first().fill('rule6 audit shape');
     await page.getByRole('button', { name: 'Create ticket' }).click();
-    await page.waitForURL(/\/tickets\//);
+    await page.waitForURL(/\/tickets\/[a-f0-9-]{36}$/, { timeout: 10_000 });
+    // Reload to break out of the @panel intercept and render the
+    // standalone /tickets/<id> page that hosts the inline editor.
+    await page.goto(page.url());
 
     await page.getByRole('button', { name: 'Edit' }).first().click();
     await page.locator('input').filter({ hasNotText: '' }).first().fill('rule6 edited');

@@ -169,7 +169,7 @@ test('M3 golden-path acceptance: full operator journey', async ({ browser }) => 
 
   // Step 6: ticket detail with sandbox-escape
   await pageA.goto(`/tickets/${seed.sandboxEscapeTicket}`);
-  await expect(pageA.getByTestId('sandbox-escape-icon')).toBeVisible();
+  await expect(pageA.getByTestId('failure-icon')).toBeVisible();
   await pageA.getByTestId('history-block').getByRole('button').first().click();
   await expect(pageA.getByTestId('sandbox-escape-detail')).toBeVisible();
 

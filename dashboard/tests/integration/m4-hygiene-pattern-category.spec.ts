@@ -20,17 +20,28 @@ async function seedSecretEmittedRow(
 ): Promise<void> {
   const sql = postgres(env.TEST_SUPERUSER_DSN, { max: 1 });
   try {
-    const [c] = await sql<{ id: string }[]>`
-      INSERT INTO companies (id, name) VALUES (gen_random_uuid(), 'm4-hygiene') RETURNING id
+    // Get-or-create the engineering department so multiple calls
+    // in the same spec don't violate departments_slug_key.
+    const existing = await sql<{ id: string }[]>`
+      SELECT id FROM departments WHERE slug = 'engineering' LIMIT 1
     `;
-    const [d] = await sql<{ id: string }[]>`
-      INSERT INTO departments (id, company_id, slug, name, concurrency_cap, workspace_path)
-      VALUES (gen_random_uuid(), ${c.id}, 'engineering', 'Engineering', 1, '/tmp')
-      RETURNING id
-    `;
+    let dId: string;
+    if (existing.length > 0) {
+      dId = existing[0].id;
+    } else {
+      const [c] = await sql<{ id: string }[]>`
+        INSERT INTO companies (id, name) VALUES (gen_random_uuid(), 'm4-hygiene') RETURNING id
+      `;
+      const [d] = await sql<{ id: string }[]>`
+        INSERT INTO departments (id, company_id, slug, name, concurrency_cap, workspace_path)
+        VALUES (gen_random_uuid(), ${c.id}, 'engineering', 'Engineering', 1, '/tmp')
+        RETURNING id
+      `;
+      dId = d.id;
+    }
     const [t] = await sql<{ id: string }[]>`
       INSERT INTO tickets (id, department_id, column_slug, objective, origin)
-      VALUES (gen_random_uuid(), ${d.id}, 'in_dev', ${objectiveTag}, 'sql')
+      VALUES (gen_random_uuid(), ${dId}, 'in_dev', ${objectiveTag}, 'sql')
       RETURNING id
     `;
     await sql`
@@ -81,9 +92,12 @@ test.describe('M4 hygiene pattern-category filter', () => {
     const page = await ctx.newPage();
     await page.goto('/hygiene');
 
-    // Both rows are visible.
-    await expect(page.getByText('has-category')).toBeVisible();
-    await expect(page.getByText('pre-m4-row')).toBeVisible();
+    // Both seeded rows render in the hygiene table — the page
+    // shows the truncated ticket id in the 'ticket' column, not
+    // the objective; assert via the pattern-category cell text
+    // (FR-117 = the label renders verbatim; FR-118 = NULL → 'unknown').
+    await expect(page.getByText('sk_prefix').first()).toBeVisible();
+    await expect(page.getByText('unknown').first()).toBeVisible();
 
     // Filter chip exists for the suspected_secret_emitted view
     // (rendering only when failure-mode is unset OR set to that
@@ -102,11 +116,16 @@ test.describe('M4 hygiene pattern-category filter', () => {
     const page = await ctx.newPage();
     await page.goto('/hygiene');
 
-    // Click sk_prefix; only that row remains.
+    // Click sk_prefix; only that row remains. Assert via the
+    // hygiene-row count + the surviving row's category cell text.
+    // (Looking for 'aws_akia' anywhere on the page would still match
+    // the always-rendered filter chip; scope to the data table.)
     await page.getByTestId('category-sk_prefix').click();
     await page.waitForURL(/category=sk_prefix/);
-    await expect(page.getByText('sk-row')).toBeVisible();
-    await expect(page.getByText('aws-row')).not.toBeVisible();
+    await expect(page.getByTestId('hygiene-row')).toHaveCount(1);
+    const tableText = await page.getByRole('table').textContent();
+    expect(tableText).toContain('sk_prefix');
+    expect(tableText).not.toContain('aws_akia');
     await ctx.close();
   });
 });

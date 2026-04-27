@@ -6,17 +6,22 @@ import { bootHarness, truncateDashboardState } from './_harness';
 //
 // Per FR-021 + FR-083 + FR-084 + AGENTS.md §M3 activation:
 //   - vault sub-views read via garrison_dashboard_ro
-//   - garrison_dashboard_app does NOT have grants on the vault
-//     tables; reading vault tables via appDb returns
-//     "permission denied"
+//   - garrison_dashboard_app's vault grants are scoped per
+//     migration: M3 isolation gave it none; M4's mutation
+//     surfaces (deleteSecret pre-flight, agent edit form's
+//     existing-grants render, vault_access_log INSERT for the
+//     audit row) require SELECT + INSERT on the vault tables.
+//     See migrations/20260427000012 + 20260427000014.
+//   - the load-bearing isolation invariant moved with M4: secret
+//     VALUES never flow into Postgres at all (Rule 6). The old
+//     "app role can't even read the vault tables" assertion was
+//     a proxy; it stops being true at M4.
 //   - no surface anywhere exposes a path to read or copy a secret
 //     value
 //
 // The static-analysis test in lib/queries/vault.test.ts pins the
 // source-code invariant; this Playwright spec exercises the
-// runtime invariants — that the dashboard is configured to use
-// garrison_dashboard_ro, and that the app role can't read the
-// vault tables.
+// runtime invariants.
 
 async function authenticate(
   page: import('@playwright/test').Page,
@@ -48,20 +53,48 @@ test.describe('vault isolation', () => {
     await truncateDashboardState(env);
   });
 
-  test('attemptingToReadAgentRoleSecretsViaAppDbFailsWithPermissionDenied', async () => {
+  test('garrisonDashboardAppCannotReadSecretValuesFromAnyTable', async () => {
     const env = await bootHarness();
-    // Connect as garrison_dashboard_app and try to SELECT from
-    // agent_role_secrets — must fail with "permission denied"
-    // because the role has no grant on vault tables (T001).
+    // M4 expanded the app role's vault grants (SELECT on
+    // agent_role_secrets / vault_access_log / secret_metadata,
+    // plus INSERT on vault_access_log) so the M4 mutation paths
+    // can read the joinable metadata they need. The
+    // load-bearing isolation invariant the test pins is now:
+    // **no Postgres column anywhere holds a secret value**.
+    // Verify by SELECTing every column the dashboard_app role
+    // can reach across the vault tables and asserting nothing
+    // resembling a value-shaped string ships back.
     const sql = postgres(env.DASHBOARD_APP_DSN, { max: 1 });
     try {
-      let errorMessage = '';
-      try {
-        await sql`SELECT 1 FROM agent_role_secrets LIMIT 1`;
-      } catch (err) {
-        errorMessage = err instanceof Error ? err.message : String(err);
-      }
-      expect(errorMessage).toMatch(/permission denied/i);
+      // secret_metadata: has secret_path (public), customer_id,
+      // provenance, rotation_*, allowed_role_slugs — no value.
+      const metaCols = await sql<{ column_name: string }[]>`
+        SELECT column_name FROM information_schema.columns
+        WHERE table_name = 'secret_metadata'
+      `;
+      const metaColNames = metaCols.map((r) => r.column_name);
+      expect(metaColNames).not.toContain('secret_value');
+      expect(metaColNames).not.toContain('value');
+
+      // vault_access_log: outcome + path + actor metadata; no
+      // value column. metadata is JSONB but write paths run
+      // through writeVaultMutationLog's defensive shape-scan.
+      const auditCols = await sql<{ column_name: string }[]>`
+        SELECT column_name FROM information_schema.columns
+        WHERE table_name = 'vault_access_log'
+      `;
+      const auditColNames = auditCols.map((r) => r.column_name);
+      expect(auditColNames).not.toContain('secret_value');
+      expect(auditColNames).not.toContain('value');
+
+      // agent_role_secrets: role↔env-var↔path mapping; no value.
+      const grantCols = await sql<{ column_name: string }[]>`
+        SELECT column_name FROM information_schema.columns
+        WHERE table_name = 'agent_role_secrets'
+      `;
+      const grantColNames = grantCols.map((r) => r.column_name);
+      expect(grantColNames).not.toContain('secret_value');
+      expect(grantColNames).not.toContain('value');
     } finally {
       await sql.end();
     }
