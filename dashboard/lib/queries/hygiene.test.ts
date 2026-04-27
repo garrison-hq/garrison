@@ -84,13 +84,47 @@ describe('lib/queries/hygiene', () => {
     expect(onlySecret.rows[0].hygieneStatus).toBe('suspected_secret_emitted');
   });
 
-  it('flags suspected_secret_emitted rows with a pattern category, never the matched value', async () => {
-    await seedTransitions(['suspected_secret_emitted']);
+  it('flags suspected_secret_emitted rows with a pattern category from the column, never the matched value', async () => {
+    // M4 / T015 / FR-115: the supervisor scanner records the
+    // matched pattern label on ticket_transitions.
+    // suspected_secret_pattern_category. Seeding with the column
+    // populated exercises the post-M4 read path.
+    const sql = postgres(env.TEST_SUPERUSER_DSN, { max: 1 });
+    try {
+      const [c] = await sql<{ id: string }[]>`INSERT INTO companies (id, name) VALUES (gen_random_uuid(), 't') RETURNING id`;
+      const [d] = await sql<{ id: string }[]>`
+        INSERT INTO departments (id, company_id, slug, name, concurrency_cap, workspace_path)
+        VALUES (gen_random_uuid(), ${c.id}, 'eng', 'X', 1, '/tmp')
+        RETURNING id
+      `;
+      const [t] = await sql<{ id: string }[]>`
+        INSERT INTO tickets (id, department_id, column_slug, objective, origin)
+        VALUES (gen_random_uuid(), ${d.id}, 'in_dev', 'h-test', 'sql')
+        RETURNING id
+      `;
+      await sql`
+        INSERT INTO ticket_transitions (
+          ticket_id, from_column, to_column, hygiene_status,
+          suspected_secret_pattern_category
+        )
+        VALUES (${t.id}, 'todo', 'in_dev', 'suspected_secret_emitted', 'sk_prefix')
+      `;
+    } finally {
+      await sql.end();
+    }
     const { fetchHygieneRows } = await import('./hygiene');
     const result = await fetchHygieneRows({ failureMode: 'suspected_secret_emitted' });
-    expect(result.rows[0].patternCategory).toBe('secret-shape');
+    expect(result.rows).toHaveLength(1);
+    expect(result.rows[0].patternCategory).toBe('sk_prefix');
     // No raw secret values should be reachable from the row
     // (the schema doesn't carry them; pinning the contract here).
     expect(JSON.stringify(result.rows[0])).not.toMatch(/sk-/);
+  });
+
+  it('renders pre-M4 suspected_secret_emitted rows with NULL category as "unknown" per FR-118', async () => {
+    await seedTransitions(['suspected_secret_emitted']);
+    const { fetchHygieneRows } = await import('./hygiene');
+    const result = await fetchHygieneRows({ failureMode: 'suspected_secret_emitted' });
+    expect(result.rows[0].patternCategory).toBe('unknown');
   });
 });

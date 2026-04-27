@@ -106,6 +106,7 @@ export async function fetchHygieneRows(
     to_column: string;
     at: Date;
     exit_reason: string | null;
+    suspected_secret_pattern_category: string | null;
   }>(sql`
     SELECT
       tt.id AS transition_id,
@@ -115,7 +116,8 @@ export async function fetchHygieneRows(
       tt.from_column,
       tt.to_column,
       tt.at,
-      ai.exit_reason
+      ai.exit_reason,
+      tt.suspected_secret_pattern_category
     FROM ticket_transitions tt
     JOIN tickets t ON t.id = tt.ticket_id
     JOIN departments d ON d.id = t.department_id
@@ -150,8 +152,16 @@ export async function fetchHygieneRows(
       at: r.at,
       exitReason: r.exit_reason,
       failureMode: classify(r.hygiene_status) ?? 'finalize_path',
+      // M4 / T015 / FR-115 / FR-118: the supervisor scanner now
+      // records the matched pattern label on the transition row
+      // (see supervisor/internal/spawn/finalize.go T015 commit).
+      // Pre-M4 rows have NULL here; render as 'unknown' (FR-118).
+      // For non-secret-emitted rows the column is always NULL by
+      // construction.
       patternCategory:
-        classify(r.hygiene_status) === 'suspected_secret_emitted' ? 'secret-shape' : null,
+        classify(r.hygiene_status) === 'suspected_secret_emitted'
+          ? r.suspected_secret_pattern_category ?? 'unknown'
+          : null,
     })),
     total: Number(totalResult[0]?.total ?? 0),
   };
