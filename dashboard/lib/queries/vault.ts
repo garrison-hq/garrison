@@ -193,6 +193,36 @@ export async function fetchAuditLog(filter: VaultAuditFilter = {}): Promise<{
   };
 }
 
+// M4 / T008 — full grants list for the matrix view's grant
+// editor. Returns each agent_role_secrets row with the four
+// fields the addGrant/removeGrant server actions need:
+// role_slug, env_var_name, secret_path, granted_at.
+export interface GrantRow {
+  roleSlug: string;
+  envVarName: string;
+  secretPath: string;
+  grantedAt: Date;
+}
+
+export async function fetchAllGrants(): Promise<GrantRow[]> {
+  const rows = await vaultRoDb.execute<{
+    role_slug: string;
+    env_var_name: string;
+    secret_path: string;
+    granted_at: Date;
+  }>(sql`
+    SELECT role_slug, env_var_name, secret_path, granted_at
+      FROM agent_role_secrets
+     ORDER BY role_slug ASC, env_var_name ASC
+  `);
+  return rows.map((r) => ({
+    roleSlug: r.role_slug,
+    envVarName: r.env_var_name,
+    secretPath: r.secret_path,
+    grantedAt: r.granted_at,
+  }));
+}
+
 export async function fetchRoleSecretMatrix(): Promise<{
   roles: string[];
   secrets: string[];
