@@ -3,13 +3,18 @@ import postgres from 'postgres';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
-let env: { DASHBOARD_APP_DSN: string; TEST_SUPERUSER_DSN: string };
+let env: { DASHBOARD_APP_DSN: string; DASHBOARD_RO_DSN: string; TEST_SUPERUSER_DSN: string };
 
 beforeAll(() => {
   const path = resolve(import.meta.dirname, '..', '..', 'tests', 'integration', '.harness', 'env.json');
   env = JSON.parse(readFileSync(path, 'utf-8'));
   process.env.DASHBOARD_APP_DSN = env.DASHBOARD_APP_DSN;
-  process.env.DASHBOARD_RO_DSN = env.DASHBOARD_APP_DSN;
+  // M4: activityCatchup also reads vault_access_log via vaultRoDb,
+  // which authenticates as garrison_dashboard_ro. Use the harness's
+  // real RO DSN (was previously aliased to the app DSN, which failed
+  // permission denied on vault_access_log SELECT after T003 added
+  // the vault read path).
+  process.env.DASHBOARD_RO_DSN = env.DASHBOARD_RO_DSN;
   process.env.BETTER_AUTH_SECRET = 'unit_test_secret_long_enough_xxxxxxxxxxxxxxxxxxxx';
 });
 
