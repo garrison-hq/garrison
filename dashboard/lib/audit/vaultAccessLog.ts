@@ -45,7 +45,7 @@ export const VaultWriteOutcome = {
 export type VaultWriteOutcome = typeof VaultWriteOutcome[keyof typeof VaultWriteOutcome];
 
 export interface WriteVaultMutationLogParams {
-  outcome: VaultWriteOutcome | string;
+  outcome: string;
   secretPath: string;
   customerId: string;
   /** Operator identity (better-auth user uuid) — written into
@@ -113,9 +113,9 @@ export async function writeVaultMutationLog(
   tx: MutationTx,
   params: WriteVaultMutationLogParams,
 ): Promise<void> {
-  const metadata = {
+  const metadata: Record<string, unknown> = {
     actor_user_id: params.actorUserId,
-    ...(params.metadata ?? {}),
+    ...params.metadata,
   };
   const leak = metadataLooksLikeSecret(metadata);
   if (leak.matched) {

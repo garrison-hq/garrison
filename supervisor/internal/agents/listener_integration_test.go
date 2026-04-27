@@ -16,10 +16,10 @@ import (
 // path from M4 / FR-100 / T014 plan §"Supervisor `internal/agents` cache
 // invalidation lifecycle":
 //
-//   1. supervisor cache pre-loaded
-//   2. dashboard emits pg_notify('agents.changed', role_slug)
-//   3. listener receives the notification, calls Cache.Reset
-//   4. cache reflects the latest agents row state
+//  1. supervisor cache pre-loaded
+//  2. dashboard emits pg_notify('agents.changed', role_slug)
+//  3. listener receives the notification, calls Cache.Reset
+//  4. cache reflects the latest agents row state
 //
 // Approach: open a real Postgres testdb pool, seed the engineering
 // department + engineer agent, build the cache, start the listener,
@@ -98,7 +98,10 @@ func TestListenerReceivesAndAppliesAgentsChangedNotify(t *testing.T) {
 		// We need to find the dept id for the lookup.
 		row := pool.QueryRow(ctx, `SELECT id FROM departments WHERE slug = 'engineering' LIMIT 1`)
 		var deptID [16]byte
-		var deptIDPg = struct{ Bytes [16]byte; Valid bool }{}
+		var deptIDPg = struct {
+			Bytes [16]byte
+			Valid bool
+		}{}
 		_ = row.Scan(&deptID)
 		_ = deptIDPg
 

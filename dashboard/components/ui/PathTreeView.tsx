@@ -54,7 +54,7 @@ interface TreeNode {
  *  paths from the input. */
 export function buildTreeFromPaths(paths: string[]): TreeNode {
   const root: TreeNode = { prefix: '', label: '/', isLeaf: false, children: [] };
-  const sorted = [...paths].sort();
+  const sorted = [...paths].sort((a, b) => a.localeCompare(b));
   for (const path of sorted) {
     const segments = path.split('/').filter((s) => s !== '');
     let cursor = root;
@@ -83,7 +83,7 @@ export function PathTreeView({
   defaultExpanded,
   filter,
   onLeafClick,
-}: PathTreeViewProps) {
+}: Readonly<PathTreeViewProps>) {
   const filtered = useMemo(() => {
     if (!filter || filter.trim() === '') return paths;
     const needle = filter.trim().toLowerCase();
@@ -146,29 +146,39 @@ function PathTreeNode({
   onToggle,
   nodeMeta,
   onLeafClick,
-}: PathTreeNodeProps) {
+}: Readonly<PathTreeNodeProps>) {
   const isOpen = expanded.has(node.prefix);
   const hasChildren = node.children.length > 0;
   const meta = nodeMeta?.[node.prefix];
   const indent = depth * 16;
 
+  // Branch glyph + button-element accessibility — interactive
+  // rows are real <button>s with tab support and Enter/Space
+  // activation per S1082 / S6848.
+  let glyph: string;
+  if (hasChildren) {
+    glyph = isOpen ? '▾' : '▸';
+  } else {
+    glyph = '·';
+  }
+  const handleActivate = () => {
+    if (hasChildren) onToggle(node.prefix);
+    else if (node.isLeaf) onLeafClick?.(node.prefix);
+  };
+
   return (
     <div>
-      <div
-        className="flex items-center gap-2 py-1 px-2 hover:bg-surface-2 rounded cursor-pointer"
+      <button
+        type="button"
+        className="w-full text-left flex items-center gap-2 py-1 px-2 hover:bg-surface-2 rounded cursor-pointer focus:outline-none focus:ring-1 focus:ring-accent"
         style={{ paddingLeft: 8 + indent }}
-        onClick={() => {
-          if (hasChildren) onToggle(node.prefix);
-          else if (node.isLeaf) onLeafClick?.(node.prefix);
-        }}
+        onClick={handleActivate}
       >
-        <span className="text-text-3 w-3 text-center">
-          {hasChildren ? (isOpen ? '▾' : '▸') : '·'}
-        </span>
+        <span className="text-text-3 w-3 text-center">{glyph}</span>
         <span className={node.isLeaf ? 'text-text-1' : 'text-text-2'}>{node.label}</span>
         {meta?.rightSlot && <span className="ml-auto">{meta.rightSlot}</span>}
         {meta?.actions && <span className="ml-2">{meta.actions}</span>}
-      </div>
+      </button>
       {hasChildren && isOpen && (
         <div>
           {node.children.map((child) => (

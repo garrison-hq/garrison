@@ -30,7 +30,7 @@ export interface TicketCreateFormProps {
 export function TicketCreateForm({
   departments,
   initialDeptSlug,
-}: TicketCreateFormProps) {
+}: Readonly<TicketCreateFormProps>) {
   const router = useRouter();
   const [objective, setObjective] = useState('');
   const [acceptanceCriteria, setAcceptanceCriteria] = useState('');

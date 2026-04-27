@@ -28,7 +28,7 @@ export function RotationButton({
   secretPath,
   rotationProvider,
   variant = 'inline',
-}: RotationButtonProps) {
+}: Readonly<RotationButtonProps>) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [newValue, setNewValue] = useState('');

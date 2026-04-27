@@ -23,10 +23,10 @@ export function buildFieldDiff<T extends Record<string, unknown>>(
 ): Record<string, { before: unknown; after: unknown }> {
   const out: Record<string, { before: unknown; after: unknown }> = {};
   for (const field of fields) {
-    const b = before[field];
-    const a = after[field];
-    if (!isDeepEqual(b, a)) {
-      out[field as string] = { before: b, after: a };
+    const beforeValue = before[field];
+    const afterValue = after[field];
+    if (!isDeepEqual(beforeValue, afterValue)) {
+      out[field as string] = { before: beforeValue, after: afterValue };
     }
   }
   return out;

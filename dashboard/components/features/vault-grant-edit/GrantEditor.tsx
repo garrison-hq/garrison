@@ -41,7 +41,7 @@ export function GrantEditor({
   grants: initialGrants,
   roleSlugs,
   secretPaths,
-}: GrantEditorProps) {
+}: Readonly<GrantEditorProps>) {
   const router = useRouter();
   const [grants, setGrants] = useState(initialGrants);
   const [roleSlug, setRoleSlug] = useState(roleSlugs[0] ?? '');

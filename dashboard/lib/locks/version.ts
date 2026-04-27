@@ -24,47 +24,42 @@ import { sql, eq, and, type SQL } from 'drizzle-orm';
 import type { PgTable, PgColumn } from 'drizzle-orm/pg-core';
 import type { MutationTx } from '@/lib/audit/eventOutbox';
 
-export type VersionToken = string;
-
 /**
  * Compare-and-swap update against an `updated_at` version token.
  *
  * Returns `{ accepted: true, newVersionToken }` on success, or
  * `{ accepted: false, serverState }` if the row's current
- * `updated_at` does not match `expectedVersionToken`. The caller
- * is expected to surface the serverState through the conflict
- * resolution modal.
+ * `updated_at` does not match the expected token. Caller surfaces
+ * the serverState through the conflict resolution modal.
  *
- * Args:
- * - tx: the active Drizzle transaction.
- * - table: the Drizzle table reference.
- * - pkColumn: the table's primary-key column reference.
- * - updatedAtColumn: the table's updated_at column reference.
- * - updatedAtFieldName: the JS field name of the updated_at column
- *   (Drizzle's `set()` expects JS field names, not SQL column
- *   names — pass `'updatedAt'` for the canonical Drizzle naming).
- * - idValue: the primary key value to look up.
- * - expectedVersionToken: the version token from the operator's
- *   load-time snapshot.
- * - changes: the field changes to apply (using JS field names).
- *   Caller MUST NOT include the updated_at field; the helper
- *   bumps it automatically.
+ * Args bundled into a single `params` object to keep the
+ * signature compact (S107 — function-arg cap).
  */
+export interface CheckAndUpdateParams {
+  table: PgTable;
+  pkColumn: PgColumn;
+  updatedAtColumn: PgColumn;
+  /** JS field name of the updated_at column (Drizzle's `set()`
+   *  expects JS field names, not SQL column names — pass
+   *  `'updatedAt'` for the canonical Drizzle naming). */
+  updatedAtFieldName: string;
+  idValue: string;
+  expectedVersionToken: string;
+  /** Caller MUST NOT include the updated_at field; the helper
+   *  bumps it automatically. */
+  changes: Record<string, unknown>;
+}
+
 export async function checkAndUpdate<TRow extends Record<string, unknown>>(
   tx: MutationTx,
-  table: PgTable,
-  pkColumn: PgColumn,
-  updatedAtColumn: PgColumn,
-  updatedAtFieldName: string,
-  idValue: string,
-  expectedVersionToken: VersionToken,
-  changes: Record<string, unknown>,
+  params: CheckAndUpdateParams,
 ): Promise<
-  | { accepted: true; newVersionToken: VersionToken; row: TRow }
+  | { accepted: true; newVersionToken: string; row: TRow }
   | { accepted: false; serverState: TRow | null }
 > {
-  if (Object.prototype.hasOwnProperty.call(changes, updatedAtFieldName) ||
-      Object.prototype.hasOwnProperty.call(changes, 'updated_at')) {
+  const { table, pkColumn, updatedAtColumn, updatedAtFieldName, idValue, expectedVersionToken, changes } = params;
+  if (Object.hasOwn(changes, updatedAtFieldName) ||
+      Object.hasOwn(changes, 'updated_at')) {
     throw new Error(
       `checkAndUpdate: changes must not include ${updatedAtFieldName}; the helper bumps it automatically`,
     );

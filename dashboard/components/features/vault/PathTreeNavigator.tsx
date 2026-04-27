@@ -18,14 +18,14 @@ export function PathTreeNavigator({
       paths={paths}
       onLeafClick={(secretPath) => {
         // Mirror SecretRowActions's editHref encoding so the
-        // route resolves correctly.
+        // route resolves correctly. Next.js 16 requires the
+        // catch-all to be the last segment.
         const editHref =
-          '/vault' +
+          '/vault/edit' +
           secretPath
             .split('/')
             .map((s) => (s ? '/' + encodeURIComponent(s) : ''))
-            .join('') +
-          '/edit';
+            .join('');
         router.push(editHref);
       }}
     />

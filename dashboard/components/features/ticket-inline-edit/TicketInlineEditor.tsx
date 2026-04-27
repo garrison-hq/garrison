@@ -29,7 +29,7 @@ export function TicketInlineEditor({
   ticketId,
   initialObjective,
   initialAcceptanceCriteria,
-}: TicketInlineEditorProps) {
+}: Readonly<TicketInlineEditorProps>) {
   const router = useRouter();
   const [mode, setMode] = useState<'view' | 'edit'>('view');
   const [objective, setObjective] = useState(initialObjective);

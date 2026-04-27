@@ -42,24 +42,16 @@ export interface HygieneFilter {
   pageSize?: number;
 }
 
-/** The 10 supervisor pattern labels per
- *  supervisor/internal/vault/scanner.go + 'unknown' for pre-M4
- *  rows. The hygiene UI renders one category per row; this
- *  list drives the filter chip. */
-export const PATTERN_CATEGORIES = [
-  'sk_prefix',
-  'xoxb_prefix',
-  'aws_akia',
-  'pem_header',
-  'github_pat',
-  'github_app',
-  'github_user',
-  'github_server',
-  'github_refresh',
-  'bearer_shape',
-  'unknown',
-] as const;
-export type PatternCategory = (typeof PATTERN_CATEGORIES)[number];
+// PATTERN_CATEGORIES + PatternCategory live in
+// lib/hygiene/categories.ts so Client Components (e.g. the
+// PatternCategoryFilter chip strip) can import them without
+// pulling lib/db/appClient (server-only) through the bundle.
+// Re-exported here for server-side callers that already import
+// from lib/queries/hygiene.
+export {
+  PATTERN_CATEGORIES,
+  type PatternCategory,
+} from '@/lib/hygiene/categories';
 
 export interface HygieneRow {
   transitionId: string;
@@ -121,6 +113,17 @@ export async function fetchHygieneRows(
   const statusInClause = statusList
     ? sql`AND tt.hygiene_status IN ${sql.raw(buildQuotedInList(statusList))}`
     : sql``;
+
+  // Pattern-category filter clause hoisted out of the inline
+  // ternary chain (S3358). 'unknown' = pre-M4 NULL rows
+  // restricted to the suspected_secret_emitted bucket per FR-118;
+  // any other label filters by exact column match.
+  let patternCategoryClause = sql``;
+  if (filter.patternCategory === 'unknown') {
+    patternCategoryClause = sql`AND tt.hygiene_status = 'suspected_secret_emitted' AND tt.suspected_secret_pattern_category IS NULL`;
+  } else if (filter.patternCategory) {
+    patternCategoryClause = sql`AND tt.suspected_secret_pattern_category = ${filter.patternCategory}`;
+  }
   const rowsResult = await appDb.execute<{
     transition_id: string;
     ticket_id: string;
@@ -150,13 +153,7 @@ export async function fetchHygieneRows(
       AND tt.hygiene_status NOT IN ('clean', '')
       ${statusInClause}
       ${filter.departmentSlug ? sql`AND d.slug = ${filter.departmentSlug}` : sql``}
-      ${
-        filter.patternCategory === 'unknown'
-          ? sql`AND tt.hygiene_status = 'suspected_secret_emitted' AND tt.suspected_secret_pattern_category IS NULL`
-          : filter.patternCategory
-            ? sql`AND tt.suspected_secret_pattern_category = ${filter.patternCategory}`
-            : sql``
-      }
+      ${patternCategoryClause}
     ORDER BY tt.at DESC
     LIMIT ${pageSize} OFFSET ${offset}
   `);

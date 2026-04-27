@@ -53,7 +53,7 @@ export interface SecretEditFormProps {
   };
 }
 
-export function SecretEditForm({ initial }: SecretEditFormProps) {
+export function SecretEditForm({ initial }: Readonly<SecretEditFormProps>) {
   const router = useRouter();
   const [provenance, setProvenance] = useState<SecretProvenance>(initial.provenance);
   const [rotationCadenceDays, setRotationCadenceDays] = useState<string>(

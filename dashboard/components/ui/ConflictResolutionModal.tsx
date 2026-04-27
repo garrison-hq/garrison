@@ -36,7 +36,7 @@ export function ConflictResolutionModal({
   onOverwrite,
   onMergeManually,
   onDiscard,
-}: ConflictResolutionModalProps) {
+}: Readonly<ConflictResolutionModalProps>) {
   const headingId = useId();
   const diffId = useId();
 

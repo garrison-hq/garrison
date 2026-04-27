@@ -52,7 +52,7 @@ const ROTATION_VALUES: ReadonlyArray<{ value: RotationProvider; label: string; h
   },
 ];
 
-export function SecretCreateForm({ customerId }: SecretCreateFormProps) {
+export function SecretCreateForm({ customerId }: Readonly<SecretCreateFormProps>) {
   const router = useRouter();
   const [name, setName] = useState('');
   const [value, setValue] = useState('');

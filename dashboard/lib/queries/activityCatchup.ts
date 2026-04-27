@@ -131,7 +131,7 @@ function vaultRowToActivityEvent(row: {
     channel: `work.vault.${row.outcome}`,
     payload: {
       secret_path: row.secret_path,
-      ...(row.metadata ?? {}),
+      ...row.metadata,
     },
     createdAt: row.timestamp,
   });

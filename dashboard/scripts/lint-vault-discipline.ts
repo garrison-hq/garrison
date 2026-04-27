@@ -33,7 +33,7 @@ interface Finding {
   rule: string;
 }
 
-const SECRET_LIKE_IDENT = /(?:^|[^a-zA-Z])(value|secret|password|apiKey|clientSecret|token)\b/i;
+const SECRET_LIKE_IDENT = /(?:^|[^a-z])(value|secret|password|apiKey|clientSecret|token)\b/i;
 const SHAPE_PATTERNS: RegExp[] = [
   /sk-[A-Za-z0-9]{20,}/,
   /xoxb-[A-Za-z0-9-]{20,}/,

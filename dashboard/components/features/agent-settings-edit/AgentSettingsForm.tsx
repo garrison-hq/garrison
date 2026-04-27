@@ -47,7 +47,7 @@ export function AgentSettingsForm({
   roleSlug,
   departmentSlug,
   initial,
-}: AgentSettingsFormProps) {
+}: Readonly<AgentSettingsFormProps>) {
   const router = useRouter();
   const [agentMd, setAgentMd] = useState(initial.agentMd);
   const [model, setModel] = useState<AgentModel>(initial.model);

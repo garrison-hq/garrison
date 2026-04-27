@@ -1,7 +1,7 @@
 'use client';
 
 import { useRouter, useSearchParams, usePathname } from 'next/navigation';
-import { PATTERN_CATEGORIES, type PatternCategory } from '@/lib/queries/hygiene';
+import { PATTERN_CATEGORIES, type PatternCategory } from '@/lib/hygiene/categories';
 
 // PatternCategoryFilter — M4 / FR-117 chip strip filtering by
 // suspected_secret_pattern_category. Renders only when the

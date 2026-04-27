@@ -45,7 +45,7 @@ type Phase =
   | { kind: 'rendered'; value: string; expiresAt: number }
   | { kind: 'error'; message: string };
 
-export function RevealModal({ open, secretPath, fetcher, onClose, onError }: RevealModalProps) {
+export function RevealModal({ open, secretPath, fetcher, onClose, onError }: Readonly<RevealModalProps>) {
   const [phase, setPhase] = useState<Phase>({ kind: 'confirm-prompt' });
   const [secondsRemaining, setSecondsRemaining] = useState<number>(REVEAL_AUTO_HIDE_SECONDS);
   const headingId = useId();

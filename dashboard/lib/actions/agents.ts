@@ -203,7 +203,7 @@ export async function editAgent(params: EditAgentParams): Promise<EditAgentResul
   if (params.changes.model !== undefined) validateModel(params.changes.model);
   if (params.changes.listensFor !== undefined) validateListensFor(params.changes.listensFor);
   if (params.changes.skills !== undefined) validateSkills(params.changes.skills);
-  if (params.changes.agentMd !== undefined && params.changes.agentMd.length === 0) {
+  if (params.changes.agentMd?.length === 0) {
     throw new ConflictError(ConflictKind.AlreadyExists, undefined, 'agent_md must be non-empty');
   }
 
@@ -281,16 +281,15 @@ export async function editAgent(params: EditAgentParams): Promise<EditAgentResul
   return appDb.transaction(async (tx) => {
     const tx2 = tx as unknown as MutationTx;
 
-    const lockResult = await checkAndUpdate<typeof current>(
-      tx2,
-      agents,
-      agents.id,
-      agents.updatedAt,
-      'updatedAt',
-      params.agentId,
-      params.versionToken,
-      setMap,
-    );
+    const lockResult = await checkAndUpdate<typeof current>(tx2, {
+      table: agents,
+      pkColumn: agents.id,
+      updatedAtColumn: agents.updatedAt,
+      updatedAtFieldName: 'updatedAt',
+      idValue: params.agentId,
+      expectedVersionToken: params.versionToken,
+      changes: setMap,
+    });
     if (!lockResult.accepted) {
       const ss = lockResult.serverState;
       return {
@@ -321,16 +320,22 @@ export async function editAgent(params: EditAgentParams): Promise<EditAgentResul
   });
 }
 
+function asStr(value: unknown): string {
+  return typeof value === 'string' ? value : '';
+}
+
+function asStrArray(value: unknown): string[] {
+  return Array.isArray(value) ? (value as string[]) : [];
+}
+
 function snapshotFrom(row: Record<string, unknown>): AgentSnapshot {
   return {
-    agentId: String(row.id ?? ''),
-    roleSlug: String(row.role_slug ?? row.roleSlug ?? ''),
-    agentMd: String(row.agent_md ?? row.agentMd ?? ''),
-    model: String(row.model ?? ''),
-    listensFor: Array.isArray(row.listens_for ?? row.listensFor)
-      ? (row.listens_for ?? row.listensFor) as string[]
-      : [],
-    skills: Array.isArray(row.skills) ? (row.skills as string[]) : [],
-    updatedAt: String(row.updated_at ?? row.updatedAt ?? ''),
+    agentId: asStr(row.id),
+    roleSlug: asStr(row.role_slug ?? row.roleSlug),
+    agentMd: asStr(row.agent_md ?? row.agentMd),
+    model: asStr(row.model),
+    listensFor: asStrArray(row.listens_for ?? row.listensFor),
+    skills: asStrArray(row.skills),
+    updatedAt: asStr(row.updated_at ?? row.updatedAt),
   };
 }

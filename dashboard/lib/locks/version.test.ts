@@ -62,16 +62,15 @@ describe('lib/locks/version', () => {
       const { secretPath, updatedAt } = await seedSecret(client, 'a');
 
       const result = await db.transaction(async (tx) => {
-        return checkAndUpdate(
-          tx as unknown as MutationTx,
-          secretMetadata,
-          secretMetadata.secretPath,
-          secretMetadata.updatedAt,
-          'updatedAt',
-          secretPath,
-          updatedAt,
-          { provenance: 'oauth_flow' },
-        );
+        return checkAndUpdate(tx as unknown as MutationTx, {
+            table: secretMetadata,
+            pkColumn: secretMetadata.secretPath,
+            updatedAtColumn: secretMetadata.updatedAt,
+            updatedAtFieldName: 'updatedAt',
+            idValue: secretPath,
+            expectedVersionToken: updatedAt,
+            changes: { provenance: 'oauth_flow' },
+          });
       });
       expect(result.accepted).toBe(true);
       if (result.accepted) {
@@ -90,16 +89,15 @@ describe('lib/locks/version', () => {
       const stale = '2020-01-01T00:00:00.000Z';
 
       const result = await db.transaction(async (tx) => {
-        return checkAndUpdate(
-          tx as unknown as MutationTx,
-          secretMetadata,
-          secretMetadata.secretPath,
-          secretMetadata.updatedAt,
-          'updatedAt',
-          secretPath,
-          stale,
-          { provenance: 'oauth_flow' },
-        );
+        return checkAndUpdate(tx as unknown as MutationTx, {
+            table: secretMetadata,
+            pkColumn: secretMetadata.secretPath,
+            updatedAtColumn: secretMetadata.updatedAt,
+            updatedAtFieldName: 'updatedAt',
+            idValue: secretPath,
+            expectedVersionToken: stale,
+            changes: { provenance: 'oauth_flow' },
+          });
       });
       expect(result.accepted).toBe(false);
       if (!result.accepted) {
@@ -117,16 +115,15 @@ describe('lib/locks/version', () => {
       const { secretPath, updatedAt } = await seedSecret(client, 'c');
       await expect(
         db.transaction(async (tx) => {
-          await checkAndUpdate(
-            tx as unknown as MutationTx,
-            secretMetadata,
-            secretMetadata.secretPath,
-            secretMetadata.updatedAt,
-            'updatedAt',
-            secretPath,
-            updatedAt,
-            { updatedAt: new Date().toISOString() },
-          );
+          await checkAndUpdate(tx as unknown as MutationTx, {
+            table: secretMetadata,
+            pkColumn: secretMetadata.secretPath,
+            updatedAtColumn: secretMetadata.updatedAt,
+            updatedAtFieldName: 'updatedAt',
+            idValue: secretPath,
+            expectedVersionToken: updatedAt,
+            changes: { updatedAt: new Date().toISOString() },
+          });
         }),
       ).rejects.toThrow(/updatedAt/);
     } finally {
@@ -154,16 +151,15 @@ describe('lib/locks/version', () => {
 
       const op = (provenance: string) =>
         db.transaction(async (tx) => {
-          return checkAndUpdate(
-            tx as unknown as MutationTx,
-            secretMetadata,
-            secretMetadata.secretPath,
-            secretMetadata.updatedAt,
-            'updatedAt',
-            secretPath,
-            updatedAt,
-            { provenance },
-          );
+          return checkAndUpdate(tx as unknown as MutationTx, {
+            table: secretMetadata,
+            pkColumn: secretMetadata.secretPath,
+            updatedAtColumn: secretMetadata.updatedAt,
+            updatedAtFieldName: 'updatedAt',
+            idValue: secretPath,
+            expectedVersionToken: updatedAt,
+            changes: { provenance },
+          });
         });
 
       // Sequential — operator A wins.

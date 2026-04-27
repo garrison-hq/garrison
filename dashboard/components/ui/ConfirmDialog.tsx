@@ -57,7 +57,7 @@ export function ConfirmDialog({
   intent = 'primary',
   onConfirm,
   onCancel,
-}: ConfirmDialogProps) {
+}: Readonly<ConfirmDialogProps>) {
   const [typed, setTyped] = useState('');
   const headingId = useId();
   const bodyId = useId();

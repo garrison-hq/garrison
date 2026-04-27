@@ -292,16 +292,15 @@ export async function editSecret(params: EditSecretParams): Promise<EditSecretRe
     const customerId = customerIdRow[0].customerId;
 
     if (Object.keys(localChanges).length > 0) {
-      const lockResult = await checkAndUpdate<{ secret_path: string; updated_at: string }>(
-        tx2,
-        secretMetadata,
-        secretMetadata.secretPath,
-        secretMetadata.updatedAt,
-        'updatedAt',
-        params.secretPath,
-        params.versionToken,
-        localChanges,
-      );
+      const lockResult = await checkAndUpdate<{ secret_path: string; updated_at: string }>(tx2, {
+        table: secretMetadata,
+        pkColumn: secretMetadata.secretPath,
+        updatedAtColumn: secretMetadata.updatedAt,
+        updatedAtFieldName: 'updatedAt',
+        idValue: params.secretPath,
+        expectedVersionToken: params.versionToken,
+        changes: localChanges,
+      });
       if (!lockResult.accepted) {
         return {
           accepted: false as const,
@@ -563,16 +562,15 @@ export async function renamePath(params: RenamePathParams): Promise<{ renamed: b
   const lockResult = await appDb.transaction(async (tx) => {
     const tx2 = tx as unknown as MutationTx;
 
-    const result = await checkAndUpdate<{ secret_path: string; updated_at: string }>(
-      tx2,
-      secretMetadata,
-      secretMetadata.secretPath,
-      secretMetadata.updatedAt,
-      'updatedAt',
-      params.oldPath,
-      params.versionToken,
-      { secretPath: params.newPath },
-    );
+    const result = await checkAndUpdate<{ secret_path: string; updated_at: string }>(tx2, {
+      table: secretMetadata,
+      pkColumn: secretMetadata.secretPath,
+      updatedAtColumn: secretMetadata.updatedAt,
+      updatedAtFieldName: 'updatedAt',
+      idValue: params.oldPath,
+      expectedVersionToken: params.versionToken,
+      changes: { secretPath: params.newPath },
+    });
     if (!lockResult_isAccepted(result)) {
       return result;
     }

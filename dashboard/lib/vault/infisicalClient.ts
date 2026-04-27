@@ -135,7 +135,7 @@ async function authenticate(): Promise<InfisicalSDK> {
  */
 export async function getDashboardVault(): Promise<InfisicalSDK> {
   if (testOverride) return testOverride;
-  if (!cached) cached = authenticate();
+  cached ??= authenticate();
   try {
     return await cached;
   } catch (err) {

@@ -45,7 +45,7 @@ export function DiffView({
   redactValues = false,
   formatValue = defaultFormat,
   redactFields,
-}: DiffViewProps) {
+}: Readonly<DiffViewProps>) {
   const entries = Object.entries(diff);
   if (entries.length === 0) {
     return <p className="text-[12px] text-text-3 italic">no changes</p>;
@@ -62,7 +62,7 @@ export function DiffView({
       <tbody>
         {entries.map(([field, { before, after }]) => {
           const fieldRedacted =
-            redactValues || (redactFields !== undefined && redactFields.has(field));
+            redactValues || (redactFields?.has(field) ?? false);
           return (
             <tr key={field} className="border-b border-border-1/50">
               <td className="py-1.5 pr-3 align-top text-text-2">{field}</td>

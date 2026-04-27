@@ -24,7 +24,7 @@ export interface SecretRowActionsProps {
   secretPath: string;
 }
 
-export function SecretRowActions({ secretPath }: SecretRowActionsProps) {
+export function SecretRowActions({ secretPath }: Readonly<SecretRowActionsProps>) {
   const router = useRouter();
   const [revealOpen, setRevealOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
@@ -60,15 +60,15 @@ export function SecretRowActions({ secretPath }: SecretRowActionsProps) {
   }
 
   // Build the edit href: encode each path segment to handle
-  // characters that need URL escaping (e.g. slashes inside a
-  // segment shouldn't ever appear, but encode defensively).
+  // characters that need URL escaping. Next.js 16 requires the
+  // catch-all `[...path]` to be the LAST route segment, so the
+  // `/vault/edit` prefix sits before the variable path.
   const editHref =
-    '/vault' +
+    '/vault/edit' +
     secretPath
       .split('/')
       .map((s) => (s ? '/' + encodeURIComponent(s) : ''))
-      .join('') +
-    '/edit';
+      .join('');
 
   return (
     <span className="inline-flex items-center gap-2">

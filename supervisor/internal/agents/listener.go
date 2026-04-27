@@ -51,7 +51,7 @@ func StartChangeListener(ctx context.Context, pool *pgxpool.Pool, cache *Cache) 
 		return fmt.Errorf("agents: acquire LISTEN conn: %w", err)
 	}
 
-	if _, err := conn.Exec(ctx, `LISTEN "` + ChannelName + `"`); err != nil {
+	if _, err := conn.Exec(ctx, `LISTEN "`+ChannelName+`"`); err != nil {
 		conn.Release()
 		return fmt.Errorf("agents: LISTEN %s: %w", ChannelName, err)
 	}
@@ -83,7 +83,7 @@ func StartChangeListener(ctx context.Context, pool *pgxpool.Pool, cache *Cache) 
 				}
 				backoff = min(backoff*2, maxBackoff)
 				// Try to re-LISTEN — connection may be unhealthy.
-				if _, relistenErr := conn.Exec(ctx, `LISTEN "` + ChannelName + `"`); relistenErr != nil {
+				if _, relistenErr := conn.Exec(ctx, `LISTEN "`+ChannelName+`"`); relistenErr != nil {
 					slog.WarnContext(ctx, "agents.changed: re-LISTEN failed",
 						slog.String("err", relistenErr.Error()),
 					)
