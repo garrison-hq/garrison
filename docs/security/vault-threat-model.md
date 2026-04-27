@@ -2,17 +2,17 @@
 
 <!-- SPDX-License-Identifier: CC-BY-4.0 -->
 
-**Status**: Design input for M2.3. Not yet specced. This document is binding input to `/speckit.specify` when M2.3 activates.
+**Status**: Threat model and architectural rules. M2.3 (supervisor + data model) shipped 2026-04-24 (`docs/retros/m2-3.md`). M3 (read-only dashboard, including the vault read sub-views) shipped 2026-04-26 (`docs/retros/m3.md`). M4 (write-side dashboard surfaces — secret CRUD, grant editing, rotation initiation, env/path tree management) is the active spec target; the milestone-binding context is `specs/_context/m4-context.md`.
 
-**Last updated**: 2026-04-22.
+**Last updated**: 2026-04-27 (milestone banding amendment splitting the original M2.3-only UI scope across M2.3 / M3 / M4 — see "Milestone banding amendment" below).
 
-**Precedence**: this document lives below `RATIONALE.md` and the active milestone context in the document hierarchy (see `AGENTS.md`). When M2.3 activates, `specs/_context/m2-3-context.md` supersedes this document for operational conflicts; this document supplies the threat model and architectural principles that the context file cannot re-derive cheaply.
+**Precedence**: this document lives below `RATIONALE.md` and the active milestone context in the document hierarchy (see `AGENTS.md`). The active milestone context (`specs/_context/m4-context.md` while M4 is being specified, or the relevant later context thereafter) supersedes this document for operational conflicts; this document supplies the threat model and architectural principles that context files cannot re-derive cheaply.
 
 ---
 
 ## Scope of this document
 
-This is a threat model and a set of architectural rules. It is NOT a spec, a plan, or an implementation. When M2.3 activates, the spec-kit flow begins from the context file that will cite this document as binding input.
+This is a threat model and a set of architectural rules. It is NOT a spec, a plan, or an implementation. The spec-kit flow for any vault-touching milestone begins from the relevant context file that cites this document as binding input.
 
 The document covers:
 
@@ -20,8 +20,25 @@ The document covers:
 2. Who it protects against (adversaries)
 3. What threats it addresses and which it explicitly accepts
 4. Architectural rules Garrison enforces in the vault integration
-5. What Infisical (the chosen backend) provides vs. what Garrison builds
-6. Open questions the spec must resolve
+5. What Infisical (the chosen backend) provides vs. what Garrison builds, with the M2.3 / M3 / M4 milestone split
+6. Open questions later milestone specs must resolve
+7. What each milestone retro must answer (split across M2.3 / M3 / M4)
+
+---
+
+## Milestone banding amendment (2026-04-27)
+
+The original 2026-04-22 draft of this document scoped M2.3 to include both the supervisor-side vault plumbing AND the full operator-facing UI (secret CRUD, grant editing, rotation initiation, env/path tree management). `specs/_context/m2.3-context.md` deviated from that scope — pushing read surfaces to M3 and write surfaces to M4 — and named the threat-model amendment as a follow-up. M2.3 and M3 shipped against the deviated scope; this amendment closes the gap.
+
+Changes landed in this amendment:
+
+- **§5 "Garrison builds"** list now carries inline `[M2.3]` / `[M3]` / `[M4]` tags identifying which milestone owns each Garrison-side build item.
+- **§5 "Realistic estimate"** paragraph updated to reflect the M3 + M4 split rather than the original M2.3 budget.
+- **Rule 7 (§4) consequence** rephrased to separate the rotation *data model* (M2.3, shipped) from the rotation *UI* (M4, active spec). The first-class status of rotation is preserved; only the milestone banding is updated.
+- **§6 open question 6 (rotation UX surface)** annotated with its resolution path: M4's spec confirms the inline-plus-dedicated-dashboard default rather than leaving the question open.
+- **§7** split into "What the M2.3 retro answered" (Rule 1 hold, Infisical performance, unauthorized-access attempts — supervisor-side, captured in `docs/retros/m2-3.md`) and "What the M4 retro must answer" (option-A UI coherence, rotation discipline, audit log usefulness from operator workflow — UI-dependent, deferred to M4).
+
+The threat model's substance — Rules 1-7, the threat-vs-accepted split, the option-A UI commitment — is unchanged. Rule numbering, threat numbering, and asset numbering are stable across the amendment.
 
 ---
 
@@ -136,7 +153,7 @@ Every secret in the vault has a `rotation_cadence` (30 days, 90 days, never) and
 
 Customer OAuth tokens have their own rotation model driven by the OAuth provider's refresh flow. The vault stores both access token and refresh token; the supervisor uses the refresh token to obtain a new access token when the current one is close to expiry. This is rotation for OAuth and is handled distinctly from rotation for static API keys.
 
-**Consequence**: M2.3's UI work includes the rotation view, not just CRUD. Rotation is not deferrable to M4 or later — rule 7 is part of what the vault actually is, not an optional feature.
+**Consequence**: rotation is a first-class concern split across two milestones. The rotation *data model* (`secret_metadata.rotation_cadence`, `last_rotated_at`, M2.3 retro question on rotation discipline) shipped with M2.3. The rotation *UI* — operator-initiated rotation through the dashboard, the "stale secrets" surface, the paste-new-value flow for unsupported types — ships with M4. Either half alone is insufficient; both halves together are what makes rule 7 hold. The M3 read surface (stale-secret table) is a viewing affordance on top of the M2.3 data model and does not by itself satisfy rule 7.
 
 ---
 
@@ -158,18 +175,21 @@ Garrison commits to option A: Garrison owns every operator-facing UI; Infisical 
 
 ### Garrison builds (no Infisical UI surface exposed)
 
-- Secret CRUD screens (create with name/value/environment/path, edit with diff view, delete with "which agents reference this?" warning)
-- Environment and path tree management (create, rename, move)
-- Audit log viewer with filters, pagination, time-range queries, per-identity filtering
-- Rotation configuration UI (which secrets rotate, schedule, integration-specific fields)
-- Access control UI (the agent-role-to-secret mapping screen, which is Garrison-native and not expressible in Infisical's UI)
-- Secret usage view ("this secret is used by agent_roles X, Y, Z; last accessed by ticket #123 at 14:32")
-- Error handling for every Infisical API failure mode (rate limits, auth token expiry, permission-denied, network errors) with operator-facing messages
-- Supervisor-side vault client (Go package) that authenticates to Infisical, fetches secrets per spawn, injects as env vars, audits access in both logs
-- Spawn-time validation that secret values don't appear in agent.md files (enforcement of rule 1)
-- The `agent_role_secrets` table and the per-role-grant enforcement logic (enforcement of rule 2)
+Inline `[M2.3]` / `[M3]` / `[M4]` tags name which milestone ships each item. Items tagged with a single milestone are owned end-to-end by that milestone; items with two tags are split (read in the earlier milestone, write in the later).
 
-Realistic estimate for Garrison-side UI work: two to four weeks of solo frontend work. Accepted as part of the M2.3 budget.
+- `[M4]` Secret CRUD screens (create with name/value/environment/path, edit with diff view, delete with "which agents reference this?" warning)
+- `[M4]` Environment and path tree management (create, rename, move)
+- `[M3 / M4]` Audit log viewer with filters, pagination, time-range queries, per-identity filtering. M3 ships the read view over `vault_access_log`; M4 extends the row vocabulary with mutation outcomes (`secret_created`, `secret_edited`, etc. — exact set is M4's spec to commit) and any new audit-table shape needed for write-side semantics.
+- `[M4]` Rotation configuration UI (which secrets rotate, schedule, integration-specific fields), plus rotation initiation (Infisical API call for supported backends, paste-new-value for unsupported types) and the stale-secret surfacing in §6 Q6's resolution.
+- `[M3 / M4]` Access control UI (the agent-role-to-secret mapping screen). M3 ships the matrix as a read view; M4 ships the grant-edit affordance (add/remove rows in `agent_role_secrets`).
+- `[M3]` Secret usage view ("this secret is used by agent_roles X, Y, Z; last accessed by ticket #123 at 14:32")
+- `[M2.3 / M4]` Error handling for every Infisical API failure mode (rate limits, auth token expiry, permission-denied, network errors). M2.3 enumerated the supervisor-side failure modes (`vault_unavailable`, `vault_auth_expired`, `vault_permission_denied`, `vault_rate_limited`, `vault_secret_not_found`); M4 ships the operator-facing UI on top of that vocabulary plus any vault-write-specific failures (rotation-failed, grant-conflict, secret-in-use-cannot-delete, path-already-exists).
+- `[M2.3]` Supervisor-side vault client (Go package) that authenticates to Infisical, fetches secrets per spawn, injects as env vars, audits access in both logs
+- `[M2.3]` Spawn-time validation that secret values don't appear in agent.md files (enforcement of rule 1)
+- `[M2.3]` The `agent_role_secrets` table and the per-role-grant enforcement logic (enforcement of rule 2)
+- `[M4]` agent.md leak-scan parity at the dashboard's agent settings editor — saving an agent.md with a verbatim secret value must be rejected the way the supervisor rejects it at spawn time, so a bad config does not persist to next spawn.
+
+Garrison-side UI work split across milestones: the read surfaces (M3) shipped on the M3 timeline; the write surfaces (M4) are scoped in `specs/_context/m4-context.md` as one of three mutation surfaces (vault writes alongside ticket and agent mutations). The original "two to four weeks of solo frontend work" estimate covered both halves together; M3's actual ship and M4's active scope re-divide that budget.
 
 ### Deployment shape
 
@@ -196,7 +216,7 @@ Questions that depend on concrete implementation context and should not be pre-d
 
 5. **Secret discovery at spawn time**: how does the supervisor know which secrets to inject for a given agent role? Options: SQL join on `agent_role_secrets` at spawn time; pre-computed denormalized column on `agents`; Infisical's own access policy. Default lean: SQL join on `agent_role_secrets`, which keeps the policy in Postgres where agent config already lives.
 
-6. **Rotation UX**: is rotation initiated from the secret view or from a dedicated rotation dashboard? Default is both surfaces, which is more UI work but matches how operators actually think about rotation.
+6. **Rotation UX**: is rotation initiated from the secret view or from a dedicated rotation dashboard? Default is both surfaces, which is more UI work but matches how operators actually think about rotation. **Resolution path**: M4's spec confirms the dual-surface default (or reduces to one surface with explicit rationale) per `specs/_context/m4-context.md` §"Open questions the spec must resolve" / "Rotation UX surface". This question is no longer open after M4's spec lands.
 
 7. **Bootstrap secret**: Infisical itself requires secrets to operate (`ENCRYPTION_KEY`, `AUTH_SECRET`). These cannot live in Infisical. The spec specifies where these bootstrap secrets live — environment variables set by the orchestration layer, read from a restricted file, or passed in at startup. This is the chicken-and-egg problem every vault solution has; document how we solved it.
 
@@ -204,16 +224,29 @@ Questions that depend on concrete implementation context and should not be pre-d
 
 ---
 
-## 7. What the M2.3 retro must answer
+## 7. What each milestone retro must answer
 
-When M2.3 ships, the retro documents:
+The original draft of this section listed six retro questions for M2.3. The 2026-04-27 milestone-banding amendment splits those questions across the M2.3 / M3 / M4 retros — supervisor-side questions stayed with M2.3 (already shipped), UI-dependent questions moved to M4.
 
-1. **Did rule 1 hold?** Any case of a secret appearing in an agent prompt, context window, log, or MemPalace write. Even one case is a material finding; the architecture may need revision.
-2. **Did the option-A UI actually feel coherent?** The operator uses it for a week; the retro records whether the integrated UI paid off its cost, or whether migrating to option B (Infisical UI + Garrison assignment screen) is warranted. This is the natural checkpoint to revisit the architectural decision.
-3. **How did Infisical perform under real load?** Specifically: API latency for spawn-time secret fetches, audit log write rate, any Infisical-side failures the supervisor had to handle gracefully.
-4. **Rotation discipline**: did the operator actually rotate secrets on the surfaced schedule, or did rotation warnings accumulate? If ignored, the rotation UX needs redesign.
-5. **Audit log usefulness**: did the Garrison-side audit log (with ticket context) prove more useful than Infisical's native log, or was the dual-log overhead not worth it?
-6. **Any unauthorized-access attempts**: if the supervisor's per-role grant enforcement ever denied a secret request (which should theoretically never happen if the system is configured correctly), document why and whether it indicates a bug.
+### What the M2.3 retro answered (supervisor-side)
+
+M2.3 shipped 2026-04-24 against the deviated scope (supervisor + data model only). `docs/retros/m2-3.md` is authoritative for what was actually captured; the questions below are the threat-model-level ones the M2.3 milestone was responsible for closing.
+
+1. **Did rule 1 hold?** Any case of a secret appearing in an agent prompt, context window, log, or MemPalace write. Material finding even in a single case. Closed by the M2.3 vault rules + the `tools/vaultlog` go vet analyzer (`AGENTS.md` §M2.3) + the finalize-path scanner (`scanAndRedactPayload` in `finalize.go`).
+2. **How did Infisical perform under real load?** API latency for spawn-time secret fetches, audit log write rate, any Infisical-side failures the supervisor had to handle gracefully. M2.3 retro captures the Infisical SDK quirks caught at integration test time (eager token caching, 401 renewal, the `accessTokenTTL=1` + `numUsesLimit=1` pattern for auth-expired tests).
+3. **Any unauthorized-access attempts?** If the supervisor's per-role grant enforcement ever denied a secret request which should theoretically never happen if the system is configured correctly — document why and whether it indicates a bug. Closed against the M2.3 spawn ordering (D4.5 / FR-416).
+
+### What the M3 retro answered (read-side UI partially)
+
+M3 shipped 2026-04-26. The vault read sub-views (secrets list, audit log viewer, agent-role-to-secret matrix) reach the operator through a dedicated `garrison_dashboard_ro` Postgres role with explicit grants, not through any agent-facing role. `docs/retros/m3.md` is authoritative for the vault read-side surface and visual language. Operator-workflow questions about audit log usefulness and rotation discipline are deferred to M4 because the operator does not have actionable rotation or write paths until M4 ships.
+
+### What the M4 retro must answer (UI-dependent)
+
+When M4 ships, the retro documents:
+
+4. **Did the option-A UI actually feel coherent?** The operator uses the integrated dashboard (read + write) for a week or two; the retro records whether the all-Garrison-built UI paid off its cost, or whether migrating to option B (Infisical UI + Garrison assignment screen) is warranted. This is the natural checkpoint to revisit the architectural decision now that both halves of the UI exist.
+5. **Rotation discipline**: did the operator actually rotate secrets on the surfaced schedule once initiation was available, or did rotation warnings accumulate? If ignored, the rotation UX needs redesign — both the visibility (M3 stale-secret surface) and the action (M4 rotation initiation) sit on the table for revision.
+6. **Audit log usefulness**: did the Garrison-side audit log (with ticket context, plus M4's mutation events) prove more useful than Infisical's native log, or was the dual-log overhead not worth it? M3 surfaced the read-side audit; M4 extends it with mutation events — the operator's actual workflow over both is what answers the question.
 ---
 
 ## M2.2 deployment assumptions (socket-proxy)
