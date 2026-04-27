@@ -418,6 +418,172 @@ function snapshotFrom(row: Record<string, unknown>): SecretSnapshot {
   };
 }
 
+// ─── initiateRotation (T009) ──────────────────────────────────
+
+export interface InitiateRotationParams {
+  secretPath: string;
+  /** Required for manual_paste. For infisical_native rotations
+   *  the operator may still pass a value (the SDK 5.0.2 does
+   *  not expose Infisical's built-in rotation API; M4 treats
+   *  both provider types as "operator-provided new value" at
+   *  the SDK layer — the rotation_provider tag drives UX
+   *  (auto-generate button vs paste-only) but not the
+   *  underlying SDK call). */
+  newValue: string;
+}
+
+export type RotationOutcome =
+  | { status: 'completed'; rotatedAt: string }
+  | { status: 'failed'; failedStep: 'infisical_write' | 'metadata_update' | 'audit'; error: string };
+
+export async function initiateRotation(
+  params: InitiateRotationParams,
+): Promise<RotationOutcome> {
+  const actorUserId = await requireOperatorUserId();
+
+  // Read secret_metadata to determine the rotation_provider.
+  const metaRows = await appDb
+    .select({
+      customerId: secretMetadata.customerId,
+      rotationProvider: secretMetadata.rotationProvider,
+    })
+    .from(secretMetadata)
+    .where(eq(secretMetadata.secretPath, params.secretPath))
+    .limit(1);
+  if (metaRows.length === 0) {
+    throw new VaultError(VaultErrorKind.SecretNotFound, { secretPath: params.secretPath });
+  }
+  const customerId = metaRows[0].customerId;
+  const rotationProvider = metaRows[0].rotationProvider;
+
+  if (rotationProvider === 'not_rotatable') {
+    throw new VaultError(VaultErrorKind.RotationUnsupported, {
+      secretPath: params.secretPath,
+      rotationProvider,
+    });
+  }
+  if (!params.newValue || params.newValue.length === 0) {
+    throw new VaultError(VaultErrorKind.ValidationRejected, {
+      field: 'newValue',
+      reason: 'rotation requires a new value (manual_paste); SDK 5.0.2 does not expose Infisical-native rotation',
+    });
+  }
+
+  // Step 1: write rotation_initiated audit + pg_notify so the
+  // operator's activity feed shows the rotation in flight before
+  // we hit Infisical (rotation can take seconds; visibility
+  // matters per FR-094).
+  await appDb.transaction(async (tx) => {
+    const tx2 = tx as unknown as MutationTx;
+    await writeVaultMutationLog(tx2, {
+      outcome: VaultWriteOutcome.RotationInitiated,
+      secretPath: params.secretPath,
+      customerId,
+      actorUserId,
+      metadata: { rotation_provider: rotationProvider },
+    });
+    await emitPgNotify(tx2, 'work.vault.rotation_initiated', params.secretPath);
+  });
+
+  // Step 2: write the new value to Infisical.
+  const sdk = await getDashboardVault();
+  const cfg = getDashboardVaultConfig();
+  try {
+    await sdk.secrets().updateSecret(extractSecretName(params.secretPath), {
+      projectId: cfg.projectId,
+      environment: cfg.environment,
+      secretValue: params.newValue,
+      // vault-discipline-allow
+      secretPath: extractPathPrefix(params.secretPath),
+    });
+  } catch (err) {
+    // Infisical write failed before any local state changed.
+    // Record rotation_failed with failedStep='infisical_write'.
+    const message = err instanceof Error ? err.message : String(err);
+    await appDb.transaction(async (tx) => {
+      const tx2 = tx as unknown as MutationTx;
+      await writeVaultMutationLog(tx2, {
+        outcome: VaultWriteOutcome.RotationFailed,
+        secretPath: params.secretPath,
+        customerId,
+        actorUserId,
+        metadata: {
+          failed_step: 'infisical_write',
+          rotation_provider: rotationProvider,
+          error_class: classifyError(message),
+        },
+      });
+      await emitPgNotify(tx2, 'work.vault.rotation_failed', params.secretPath);
+    });
+    return { status: 'failed', failedStep: 'infisical_write', error: classifyError(message) };
+  }
+
+  // Step 3: update secret_metadata.last_rotated_at + record
+  // rotation_completed audit + emit pg_notify, all atomically.
+  // If THIS fails after Infisical has the new value, the desync
+  // alert per FR-094 / FR-080 surfaces — the rotation is recorded
+  // as failed_step='metadata_update', and the operator must
+  // re-sync via the matrix view's "re-sync" affordance.
+  const rotatedAtIso = new Date().toISOString();
+  try {
+    await appDb.transaction(async (tx) => {
+      const tx2 = tx as unknown as MutationTx;
+      await tx
+        .update(secretMetadata)
+        .set({ lastRotatedAt: rotatedAtIso })
+        .where(eq(secretMetadata.secretPath, params.secretPath));
+      await writeVaultMutationLog(tx2, {
+        outcome: VaultWriteOutcome.RotationCompleted,
+        secretPath: params.secretPath,
+        customerId,
+        actorUserId,
+        metadata: {
+          rotation_provider: rotationProvider,
+          rotated_at: rotatedAtIso,
+        },
+      });
+      await emitPgNotify(tx2, 'work.vault.rotation_completed', params.secretPath);
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    // Best-effort: write a separate rotation_failed audit row to
+    // surface the desync. We can't roll back Infisical from here
+    // (no inverse operation); operator drives recovery.
+    try {
+      await appDb.transaction(async (tx) => {
+        const tx2 = tx as unknown as MutationTx;
+        await writeVaultMutationLog(tx2, {
+          outcome: VaultWriteOutcome.RotationFailed,
+          secretPath: params.secretPath,
+          customerId,
+          actorUserId,
+          metadata: {
+            failed_step: 'metadata_update',
+            rotation_provider: rotationProvider,
+            desync: true,
+            error_class: classifyError(message),
+          },
+        });
+        await emitPgNotify(tx2, 'work.vault.rotation_failed', params.secretPath);
+      });
+    } catch {
+      // If even the desync audit fails, fall through — the
+      // exception bubbles up to the operator-facing error UI.
+    }
+    return { status: 'failed', failedStep: 'metadata_update', error: classifyError(message) };
+  }
+
+  return { status: 'completed', rotatedAt: rotatedAtIso };
+}
+
+function classifyError(msg: string): string {
+  if (/rate limit|429/i.test(msg)) return 'rate_limited';
+  if (/unauthor|401/i.test(msg)) return 'auth_expired';
+  if (/forbidden|403/i.test(msg)) return 'permission_denied';
+  if (/not found|404/i.test(msg)) return 'not_found';
+  return 'transport_error';
+}
+
 // ─── addGrant / removeGrant (T008) ────────────────────────────
 
 export interface AddGrantParams {
