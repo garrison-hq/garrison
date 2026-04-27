@@ -418,7 +418,210 @@ function snapshotFrom(row: Record<string, unknown>): SecretSnapshot {
   };
 }
 
-// ─── initiateRotation (T009) ──────────────────────────────────
+// ─── revealSecret / movePath / renamePath (T010) ──────────────
+
+export interface RevealSecretParams {
+  secretPath: string;
+}
+
+export interface RevealSecretResult {
+  value: string;
+  revealedAt: string;
+}
+
+export async function revealSecret(params: RevealSecretParams): Promise<RevealSecretResult> {
+  const actorUserId = await requireOperatorUserId();
+
+  // Resolve customer_id for the audit row.
+  const metaRows = await appDb
+    .select({ customerId: secretMetadata.customerId })
+    .from(secretMetadata)
+    .where(eq(secretMetadata.secretPath, params.secretPath))
+    .limit(1);
+  if (metaRows.length === 0) {
+    throw new VaultError(VaultErrorKind.SecretNotFound, { secretPath: params.secretPath });
+  }
+  const customerId = metaRows[0].customerId;
+
+  const sdk = await getDashboardVault();
+  const cfg = getDashboardVaultConfig();
+
+  // The SDK getSecret() returns the secret object including the
+  // value. Write the audit row BEFORE returning the value to
+  // the caller — guarantees the audit lands even if the caller's
+  // continuation throws.
+  // vault-discipline-allow
+  let response;
+  try {
+    response = await sdk.secrets().getSecret({
+      environment: cfg.environment,
+      secretName: extractSecretName(params.secretPath),
+      // The SDK GetSecretOptions uses different shape across
+      // SDK versions; pass the documented fields.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ...({
+        projectId: cfg.projectId,
+        secretPath: extractPathPrefix(params.secretPath),
+      } as any),
+    });
+  } catch (err) {
+    throw mapInfisicalError(err, 'edit');
+  }
+
+  const revealedAtIso = new Date().toISOString();
+
+  await appDb.transaction(async (tx) => {
+    const tx2 = tx as unknown as MutationTx;
+    await writeVaultMutationLog(tx2, {
+      outcome: VaultWriteOutcome.ValueRevealed,
+      secretPath: params.secretPath,
+      customerId,
+      actorUserId,
+      // Per Rule 6 / FR-023: NO secret value in metadata.
+      // Just the timestamp + a confirmation flag.
+      metadata: { revealed_at: revealedAtIso },
+    });
+    await emitPgNotify(tx2, 'work.vault.value_revealed', params.secretPath);
+  });
+
+  // vault-discipline-allow
+  return {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    value: (response as any).secretValue ?? (response as any).value ?? '',
+    revealedAt: revealedAtIso,
+  };
+}
+
+export interface RenamePathParams {
+  /** Current full secret path. */
+  oldPath: string;
+  /** Desired full secret path. The path prefix is preserved or
+   *  changed — Rule 4 conventions are revalidated against the
+   *  new prefix. */
+  newPath: string;
+  /** Optimistic-lock token from the load-time read. */
+  versionToken: string;
+}
+
+export async function renamePath(params: RenamePathParams): Promise<{ renamed: boolean }> {
+  const actorUserId = await requireOperatorUserId();
+
+  validatePathPrefix(extractPathPrefix(params.newPath));
+  validateSecretName(extractSecretName(params.newPath));
+
+  if (params.oldPath === params.newPath) {
+    return { renamed: false };
+  }
+
+  // Look up customer_id for both old and new (the rename can't
+  // cross customer_id boundaries — Rule 4 path conventions
+  // include customer_id in the prefix, so a rename that moves
+  // between customers would mismatch the secret_metadata row).
+  const metaRows = await appDb
+    .select({ customerId: secretMetadata.customerId })
+    .from(secretMetadata)
+    .where(eq(secretMetadata.secretPath, params.oldPath))
+    .limit(1);
+  if (metaRows.length === 0) {
+    throw new VaultError(VaultErrorKind.SecretNotFound, { secretPath: params.oldPath });
+  }
+  const customerId = metaRows[0].customerId;
+
+  // Step 1: rename in Infisical via updateSecret with
+  // newSecretName. The SDK accepts a new name; if the path
+  // prefix changes too, that's a separate operation (the SDK
+  // doesn't support cross-path move directly).
+  const sdk = await getDashboardVault();
+  const cfg = getDashboardVaultConfig();
+  try {
+    await sdk.secrets().updateSecret(extractSecretName(params.oldPath), {
+      projectId: cfg.projectId,
+      environment: cfg.environment,
+      newSecretName: extractSecretName(params.newPath),
+      // vault-discipline-allow
+      secretPath: extractPathPrefix(params.oldPath),
+    });
+  } catch (err) {
+    throw mapInfisicalError(err, 'edit');
+  }
+
+  // If the path prefix changed, this rename is incomplete —
+  // we need a separate move (Infisical's API). For M4 we
+  // surface ValidationRejected on prefix changes, deferring
+  // cross-prefix moves to a future milestone.
+  if (extractPathPrefix(params.oldPath) !== extractPathPrefix(params.newPath)) {
+    throw new VaultError(VaultErrorKind.ValidationRejected, {
+      reason: 'cross-prefix renames are not supported in M4; rename within the same prefix',
+      oldPrefix: extractPathPrefix(params.oldPath),
+      newPrefix: extractPathPrefix(params.newPath),
+    });
+  }
+
+  // Step 2: update secret_metadata.secret_path + write audit
+  // + pg_notify atomically. Optimistic lock on the original
+  // row's updated_at; if stale, rollback.
+  const lockResult = await appDb.transaction(async (tx) => {
+    const tx2 = tx as unknown as MutationTx;
+
+    const result = await checkAndUpdate<{ secret_path: string; updated_at: string }>(
+      tx2,
+      secretMetadata,
+      secretMetadata.secretPath,
+      secretMetadata.updatedAt,
+      'updatedAt',
+      params.oldPath,
+      params.versionToken,
+      { secretPath: params.newPath },
+    );
+    if (!lockResult_isAccepted(result)) {
+      return result;
+    }
+
+    // Cascade: agent_role_secrets.secret_path also needs to
+    // update so existing grants point to the new path.
+    await tx.execute(sql`
+      UPDATE agent_role_secrets
+         SET secret_path = ${params.newPath},
+             updated_at = now()
+       WHERE secret_path = ${params.oldPath}
+    `);
+
+    await writeVaultMutationLog(tx2, {
+      outcome: VaultWriteOutcome.SecretEdited,
+      secretPath: params.newPath,
+      customerId,
+      actorUserId,
+      metadata: {
+        operation: 'rename',
+        old_path: params.oldPath,
+      },
+    });
+    await emitPgNotify(tx2, 'work.vault.secret_edited', params.newPath);
+
+    return result;
+  });
+
+  if (!lockResult_isAccepted(lockResult)) {
+    // Stale token — rolled back, but the Infisical-side rename
+    // already happened. Surface the desync for the operator to
+    // investigate.
+    throw new ConflictError(
+      ConflictKind.StaleVersion,
+      lockResult.serverState,
+      'rename: optimistic-lock check failed after Infisical rename succeeded — desync',
+    );
+  }
+
+  return { renamed: true };
+}
+
+function lockResult_isAccepted(
+  r: { accepted: true; newVersionToken: string; row: unknown } | { accepted: false; serverState: unknown },
+): r is { accepted: true; newVersionToken: string; row: unknown } {
+  return r.accepted === true;
+}
+
+
 
 export interface InitiateRotationParams {
   secretPath: string;
