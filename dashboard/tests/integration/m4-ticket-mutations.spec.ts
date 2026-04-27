@@ -1,4 +1,4 @@
-import { test, expect, type BrowserContext } from '@playwright/test';
+import { test, expect, type BrowserContext } from './_coverage';
 import postgres from 'postgres';
 import { bootHarness, truncateDashboardState, type HarnessEnv } from './_harness';
 

@@ -100,14 +100,14 @@ export function SecretEditForm({ initial }: Readonly<SecretEditFormProps>) {
           changes,
         });
         if (result.accepted) {
-          // Update version token via re-read; the editSecret
-          // server action's `accepted: true` doesn't return the
-          // new updated_at directly. router.refresh() pulls
-          // canonical state.
-          setVersionToken('');
-          setNewValue('');
-          router.push('/vault');
-          router.refresh();
+          // Hard navigation. router.push + router.refresh inside
+          // a startTransition can leave pending=true indefinitely
+          // when the destination triggers a server-side re-fetch
+          // (the /vault list page); the Save button stays
+          // disabled and the URL doesn't change even though the
+          // server action returned 200. window.location.assign
+          // sidesteps that race entirely.
+          window.location.assign('/vault');
         } else {
           setConflict(result.serverState);
         }

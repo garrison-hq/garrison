@@ -219,6 +219,16 @@ jobs:
       # before a release.
       - name: Run Playwright integration suite
         run: bunx playwright test --project=chromium-1280
+      # Browser-side V8 coverage from monocart-coverage-reports →
+      # consumed by the SonarCloud job below. See
+      # tests/integration/_coverage.ts + global-teardown.ts.
+      - name: Upload integration coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dashboard-integration-coverage
+          path: dashboard/coverage/integration/lcov.info
+          if-no-files-found: warn
       - name: Upload Playwright trace + report on failure
         if: failure()
         uses: actions/upload-artifact@v4
@@ -235,8 +245,10 @@ jobs:
     runs-on: ubuntu-latest
     # Needs all test suites that produce coverage. If any fails,
     # Sonar doesn't run — better than posting a stale coverage
-    # number.
-    needs: [test-unit, test-integration, dashboard-test-unit]
+    # number. dashboard-test-integration is included so the
+    # browser-side V8 coverage (Path B, M4 retro) is read alongside
+    # the supervisor + vitest lcov.
+    needs: [test-unit, test-integration, dashboard-test-unit, dashboard-test-integration]
     steps:
       # fetch-depth 0 gives Sonar full git history so blame-based
       # new-code detection and authorship work correctly.
@@ -261,6 +273,14 @@ jobs:
         with:
           name: dashboard-coverage
           path: dashboard/coverage
+      # Browser-side V8 coverage (Playwright + monocart). Sonar
+      # reads sonar.javascript.lcov.reportPaths as a comma-list
+      # → both unit + integration lcov contribute to the metric.
+      - name: Download dashboard integration coverage
+        uses: actions/download-artifact@v4
+        with:
+          name: dashboard-integration-coverage
+          path: dashboard/coverage/integration
       # Pinned to the full commit SHA of v5.0.0 per SonarQube's own
       # githubactions:S7637 rule. The tag-form (`@v5.0.0`) would let a
       # compromised publisher silently retag to a malicious commit.

@@ -95,8 +95,14 @@ export function SecretCreateForm({ customerId }: Readonly<SecretCreateFormProps>
           rotationProvider,
           ...(provenance === 'customer_delegated' ? { customerId } : {}),
         });
-        router.push('/vault');
-        router.refresh();
+        // Hard navigation. router.push + router.refresh inside a
+        // startTransition can leave pending=true indefinitely on
+        // navigations whose destination triggers a server-side
+        // re-fetch (the /vault list page); the button stays
+        // disabled and the URL doesn't change even though the
+        // server action returned 200. window.location.assign
+        // sidesteps that race entirely.
+        window.location.assign('/vault');
       } catch (err) {
         if (err instanceof VaultError) {
           const reason = (err.detail?.reason as string | undefined) ?? err.kind;
@@ -156,14 +162,14 @@ export function SecretCreateForm({ customerId }: Readonly<SecretCreateFormProps>
 
       <FieldBlock
         label="path prefix"
-        hint="Must match /<customer_id>/<provenance>[/<remainder>] per threat-model Rule 4."
+        hint="Derived from customer + provenance per threat-model Rule 4. Read-only; pick a different provenance to change it."
       >
         <input
           type="text"
           value={pathPrefix}
-          onChange={(e) => setPathPrefix(e.target.value)}
+          readOnly
           spellCheck={false}
-          className="w-full font-mono bg-surface-2 border border-border-1 rounded px-3 py-2 text-[12.5px] text-text-1 focus:outline-none focus:border-accent"
+          className="w-full font-mono bg-surface-3 border border-border-1 rounded px-3 py-2 text-[12.5px] text-text-3 cursor-not-allowed"
         />
       </FieldBlock>
 
