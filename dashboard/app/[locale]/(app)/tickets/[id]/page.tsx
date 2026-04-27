@@ -4,6 +4,7 @@ import { MetadataBlock } from '@/components/features/ticket-detail/MetadataBlock
 import { HistoryBlock } from '@/components/features/ticket-detail/HistoryBlock';
 import { AgentInstancesBlock } from '@/components/features/ticket-detail/AgentInstancesBlock';
 import { PalaceLinksBlock } from '@/components/features/ticket-detail/PalaceLinksBlock';
+import { TicketInlineEditor } from '@/components/features/ticket-inline-edit/TicketInlineEditor';
 
 export const dynamic = 'force-dynamic';
 
@@ -20,6 +21,11 @@ export default async function TicketDetailPage({
   return (
     <div className="p-6 space-y-6 max-w-4xl">
       <MetadataBlock metadata={detail.metadata} />
+      <TicketInlineEditor
+        ticketId={detail.metadata.id}
+        initialObjective={detail.metadata.objective}
+        initialAcceptanceCriteria={detail.metadata.acceptanceCriteria}
+      />
       <HistoryBlock history={detail.history} />
       <AgentInstancesBlock instances={detail.instances} />
       <PalaceLinksBlock ticketId={detail.metadata.id} />
