@@ -174,8 +174,10 @@ export const chatSessions = pgTable("chat_sessions", {
 	status: text().default('active').notNull(),
 	totalCostUsd: numeric("total_cost_usd", { precision: 20, scale:  10 }).default('0').notNull(),
 	claudeSessionLabel: text("claude_session_label"),
+	isArchived: boolean("is_archived").default(false).notNull(),
 }, (table) => [
 	index("idx_chat_sessions_active").using("btree", table.status.asc().nullsLast().op("text_ops")).where(sql`(status = 'active'::text)`),
+	index("idx_chat_sessions_user_active_unarchived").using("btree", table.startedByUserId.asc().nullsLast().op("uuid_ops"), table.startedAt.desc().nullsFirst().op("timestamptz_ops")).where(sql`(is_archived = false)`),
 	index("idx_chat_sessions_user_started").using("btree", table.startedByUserId.asc().nullsLast().op("timestamptz_ops"), table.startedAt.desc().nullsFirst().op("timestamptz_ops")),
 	check("chat_sessions_status_check", sql`status = ANY (ARRAY['active'::text, 'ended'::text, 'aborted'::text])`),
 ]);
@@ -200,7 +202,7 @@ export const chatMessages = pgTable("chat_messages", {
 			columns: [table.sessionId],
 			foreignColumns: [chatSessions.id],
 			name: "chat_messages_session_id_fkey"
-		}),
+		}).onDelete("cascade"),
 	unique("chat_messages_session_id_turn_index_key").on(table.sessionId, table.turnIndex),
 	check("chat_messages_role_check", sql`role = ANY (ARRAY['operator'::text, 'assistant'::text])`),
 	check("chat_messages_status_check", sql`status = ANY (ARRAY['pending'::text, 'streaming'::text, 'completed'::text, 'failed'::text, 'aborted'::text])`),

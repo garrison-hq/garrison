@@ -88,7 +88,7 @@ const createChatSession = `-- name: CreateChatSession :one
 
 INSERT INTO chat_sessions (id, started_by_user_id, status, total_cost_usd, started_at)
 VALUES (gen_random_uuid(), $1, 'active', 0, NOW())
-RETURNING id, started_by_user_id, started_at, ended_at, status, total_cost_usd, claude_session_label
+RETURNING id, started_by_user_id, started_at, ended_at, status, total_cost_usd, claude_session_label, is_archived
 `
 
 // M5.1 chat backend queries.
@@ -108,8 +108,64 @@ func (q *Queries) CreateChatSession(ctx context.Context, startedByUserID pgtype.
 		&i.Status,
 		&i.TotalCostUsd,
 		&i.ClaudeSessionLabel,
+		&i.IsArchived,
 	)
 	return i, err
+}
+
+const findOrphanedOperatorSessions = `-- name: FindOrphanedOperatorSessions :many
+SELECT cm.session_id AS session_id,
+       cm.id AS operator_message_id,
+       cm.turn_index AS orphan_turn_index
+  FROM chat_messages cm
+  JOIN chat_sessions cs ON cs.id = cm.session_id
+ WHERE cs.status = 'active'
+   AND cm.role = 'operator'
+   AND cm.created_at < $1
+   AND cm.turn_index = (
+       SELECT MAX(turn_index)
+         FROM chat_messages cmx
+        WHERE cmx.session_id = cm.session_id
+   )
+   AND NOT EXISTS (
+       SELECT 1 FROM chat_messages cm2
+        WHERE cm2.session_id = cm.session_id
+          AND cm2.turn_index = cm.turn_index + 1
+   )
+`
+
+type FindOrphanedOperatorSessionsRow struct {
+	SessionID         pgtype.UUID
+	OperatorMessageID pgtype.UUID
+	OrphanTurnIndex   int32
+}
+
+// M5.2 — orphan-row sweep query (FR-290).
+// Detect chat_sessions with status='active' whose newest chat_messages
+// row is role='operator', older than the supplied cutoff, with no
+// assistant pair at turn_index+1. The boot-time sweep in
+// internal/chat/listener.go uses this to detect sessions where the
+// supervisor crashed between the operator INSERT and the assistant
+// pending row creation; the M5.1 pending-message sweep cannot catch
+// these because there's no pending/streaming row to filter on.
+func (q *Queries) FindOrphanedOperatorSessions(ctx context.Context, cutoff pgtype.Timestamptz) ([]FindOrphanedOperatorSessionsRow, error) {
+	rows, err := q.db.Query(ctx, findOrphanedOperatorSessions, cutoff)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []FindOrphanedOperatorSessionsRow
+	for rows.Next() {
+		var i FindOrphanedOperatorSessionsRow
+		if err := rows.Scan(&i.SessionID, &i.OperatorMessageID, &i.OrphanTurnIndex); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const getChatMessageByID = `-- name: GetChatMessageByID :one
@@ -141,7 +197,7 @@ func (q *Queries) GetChatMessageByID(ctx context.Context, id pgtype.UUID) (ChatM
 }
 
 const getChatSession = `-- name: GetChatSession :one
-SELECT id, started_by_user_id, started_at, ended_at, status, total_cost_usd, claude_session_label FROM chat_sessions WHERE id = $1
+SELECT id, started_by_user_id, started_at, ended_at, status, total_cost_usd, claude_session_label, is_archived FROM chat_sessions WHERE id = $1
 `
 
 func (q *Queries) GetChatSession(ctx context.Context, id pgtype.UUID) (ChatSession, error) {
@@ -155,6 +211,7 @@ func (q *Queries) GetChatSession(ctx context.Context, id pgtype.UUID) (ChatSessi
 		&i.Status,
 		&i.TotalCostUsd,
 		&i.ClaudeSessionLabel,
+		&i.IsArchived,
 	)
 	return i, err
 }
@@ -318,8 +375,45 @@ func (q *Queries) InsertOperatorMessage(ctx context.Context, arg InsertOperatorM
 	return i, err
 }
 
+const insertSyntheticAssistantAborted = `-- name: InsertSyntheticAssistantAborted :exec
+INSERT INTO chat_messages (
+    id, session_id, turn_index, role, status, content, error_kind, terminated_at
+)
+VALUES (
+    gen_random_uuid(),
+    $1,
+    $2,
+    'assistant',
+    'aborted',
+    $3,
+    $4,
+    NOW()
+)
+`
+
+type InsertSyntheticAssistantAbortedParams struct {
+	SessionID pgtype.UUID
+	TurnIndex int32
+	Content   *string
+	ErrorKind *string
+}
+
+// M5.2 — synthesise an aborted assistant row for an orphaned operator
+// turn. Used only by the M5.2 orphan-sweep extension at supervisor boot.
+// The synthetic row is aborted-from-inception; it never transitions
+// through pending/streaming.
+func (q *Queries) InsertSyntheticAssistantAborted(ctx context.Context, arg InsertSyntheticAssistantAbortedParams) error {
+	_, err := q.db.Exec(ctx, insertSyntheticAssistantAborted,
+		arg.SessionID,
+		arg.TurnIndex,
+		arg.Content,
+		arg.ErrorKind,
+	)
+	return err
+}
+
 const listSessionsForUser = `-- name: ListSessionsForUser :many
-SELECT id, started_by_user_id, started_at, ended_at, status, total_cost_usd, claude_session_label FROM chat_sessions
+SELECT id, started_by_user_id, started_at, ended_at, status, total_cost_usd, claude_session_label, is_archived FROM chat_sessions
  WHERE started_by_user_id = $1
  ORDER BY started_at DESC
  LIMIT $2
@@ -347,6 +441,7 @@ func (q *Queries) ListSessionsForUser(ctx context.Context, arg ListSessionsForUs
 			&i.Status,
 			&i.TotalCostUsd,
 			&i.ClaudeSessionLabel,
+			&i.IsArchived,
 		); err != nil {
 			return nil, err
 		}
@@ -435,6 +530,23 @@ func (q *Queries) MarkPendingMessagesAborted(ctx context.Context, arg MarkPendin
 		return nil, err
 	}
 	return items, nil
+}
+
+const markSessionAborted = `-- name: MarkSessionAborted :exec
+UPDATE chat_sessions
+   SET status = 'aborted', ended_at = NOW()
+ WHERE id = $1
+   AND status = 'active'
+`
+
+// M5.2 — marks a single chat_sessions row aborted. Used by the orphan
+// sweep alongside InsertSyntheticAssistantAborted. The existing M5.1
+// AbortSessionsWithAbortedMessages query takes a different shape (it
+// joins via error_kind across all aborted messages); this is the
+// single-row-by-id companion.
+func (q *Queries) MarkSessionAborted(ctx context.Context, id pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, markSessionAborted, id)
+	return err
 }
 
 const rollUpSessionCost = `-- name: RollUpSessionCost :exec

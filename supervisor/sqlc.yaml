@@ -13,6 +13,7 @@ sql:
       - ../migrations/20260427000011_m4_vault_access_log_optional_agent.sql
       - ../migrations/20260427000013_m4_agents_updated_at.sql
       - ../migrations/20260428000015_m5_1_chat_backend.sql
+      - ../migrations/20260429000016_m5_2_chat_archive_and_cascade.sql
     gen:
       go:
         package: store
