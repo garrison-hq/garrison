@@ -748,11 +748,13 @@ func runRealClaude(
 
 	go func() {
 		defer close(pipelineDone)
-		result, pipelineErr = Run(execCtx, stdout, instanceID, ticketUUID, logger, onBail, FinalizeDeps{
+		result = Result{}
+		policy := NewFinalizePolicy(logger, instanceID, ticketUUID, &result, FinalizeDeps{
 			Expected: finalizeExpected,
 			State:    finalizeState,
 			OnCommit: onCommit,
-		})
+		}, onBail)
+		result, pipelineErr = Run(execCtx, stdout, policy, logger)
 	}()
 	go func() {
 		defer close(stderrDone)
