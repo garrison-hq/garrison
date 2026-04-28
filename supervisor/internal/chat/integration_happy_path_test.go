@@ -37,8 +37,12 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-// fakeVault returns a canned token for any GrantRow that asks for
-// CLAUDE_CODE_OAUTH_TOKEN.
+// fakeVault is RETAINED for tests where the chat path SHORT-CIRCUITS
+// before reaching Fetch (cost-cap reached, session ended, restart-sweep).
+// In those tests vault is never actually called, so the mock is invisible.
+// Tests that DO exercise the vault path (T017 happy path, T018
+// TokenAbsent) wire chatVaultStack() against a real testcontainer
+// Infisical per the M4 retro discipline.
 type fakeVault struct {
 	calls int
 }
@@ -116,19 +120,22 @@ func TestM5_1_HappyPath_SingleTurn(t *testing.T) {
 	pool := testdb.Start(t)
 	q := store.New(pool)
 
-	// Seed a user row so the FK-less started_by_user_id has a
-	// realistic value (the better-auth users table is dashboard-
-	// owned but the goose migrations don't touch it; tests insert
-	// a synthetic id that's just a UUID).
+	// Real testcontainer Infisical wired with the M5.1 path convention.
+	// Operator's choice over the mock route per the M4 retro lesson
+	// ("skipped tests hide grants regressions too"): exercising real
+	// vault.Client.Fetch proves the chat path's GrantRow shape +
+	// path-prefix composition lines up with M2.3's existing fetcher.
+	vaultClient, customerID := chatVaultStack(t, true /* seed token */)
+
 	userID := newUUID(t)
 
 	deps := Deps{
 		Pool:        pool,
 		Queries:     q,
-		VaultClient: &fakeVault{},
+		VaultClient: vaultClient,
 		DockerExec:  &fakeDockerExec{cannedNDJSON: cannedHappyPathNDJSON},
 		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
-		CustomerID:  newUUID(t),
+		CustomerID:  customerID,
 		OAuthVaultPath: "/operator/CLAUDE_CODE_OAUTH_TOKEN",
 		ChatContainerImage: "garrison-mockclaude:m5",
 		MCPConfigDir:       t.TempDir(),
