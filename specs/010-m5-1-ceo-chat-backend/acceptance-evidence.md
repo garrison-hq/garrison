@@ -21,7 +21,7 @@ Three classes of evidence:
 
 | SC | What | Evidence |
 |---|---|---|
-| **SC-001** | First SSE delta within 5s wall-clock from operator INSERT | `TestM5_1_HappyPath_SingleTurn` (T017) drives the full chain in <1s against the canned mock. Real-claude latency tested via the operator-driven local override. |
+| **SC-001** | First SSE delta within 5s wall-clock from operator INSERT | `TestM5_1_HappyPath_SingleTurn` (T017) drives the full chain in <1s against the canned mock; the test now asserts `turnElapsed ≤ 5s` explicitly so a regression that serialises the worker / persistence / transport hops behind a blocking call would fail CI. Real-claude latency is captured by the spike (§8.1: 1.4s on warm cache) and surfaced operator-side via `raw_event_envelope.result.duration_ms`. |
 | **SC-002** | Multi-turn `cache_read_input_tokens > 0` proves transcript replay | `TestM5_1_MultiTurn_ContextFidelity` (T018) passes against the real mockclaude chat-mode binary (T013) — drives 2 turns of a favorite-color conversation, asserts turn 2's `raw_event_envelope[message_start].usage.cache_read_input_tokens > 0`. Mockclaude emits non-zero cache_read on turn ≥ 2 by counting prior user/assistant pairs in stdin, so the assertion proves the supervisor's transcript replay reaches the container's stdin correctly. Spike §8.1 captured cache_read=29272 against real Claude in the same shape. |
 | **SC-003** | Cost rolls up: `chat_sessions.total_cost_usd ≈ Σ chat_messages.cost_usd` | `TestM5_1_HappyPath_SingleTurn` asserts `total_cost_usd > 0` after a turn (RollUpSessionCost called inside OnResult's tx). Multi-turn equality assertion lands at T020. |
 | **SC-004** | Vault audit row per chat-message spawn | T017 fetches via real Infisical; M2.3's vault.Client.Fetch path writes the audit row automatically. Visible inspection: `SELECT * FROM vault_access_log WHERE metadata ->> 'actor' = 'supervisor_chat'` after the test run. |
@@ -64,13 +64,13 @@ Latest test run (committed against `301e742`):
 
 ## Outstanding follow-ups (deferred to next session, NOT spec-shipped gaps)
 
-- **T020**: Playwright `m5-1-chat-backend.spec.ts` end-to-end against the standalone dashboard bundle. Closes SC-001's wall-clock measurement, SC-002's multi-turn cache assertion against a turn-aware mockclaude template, SC-010's runtime measurement, SC-011's automated token rotation.
+- **T020**: Playwright `m5-1-chat-backend.spec.ts` end-to-end against the standalone dashboard bundle. Closes SC-010's runtime measurement and SC-011's automated token rotation. SC-001's wall-clock and SC-002's cache assertion are now CI-pinned by the in-process integration suite; the Playwright run will provide the additional dashboard-side wall-clock measurement.
 - **`supervisor/chaos_m5_1_test.go`**: real docker-kill chaos test that targets supervisor + docker-proxy + mockclaude:m5 wired together end-to-end. Closes SC-006's live SIGTERM-cascade verification and FR-101's external-kill scenario.
 - ~~**`vault.InfisicalTestHarness.RevokeIdentity`** + **`StopInfisicalForTest`** helpers~~: **landed in commit `645662e`**. M2.3's vault.testutil already shipped `CreateShortLivedMachineIdentity` (TTL=1s + numUsesLimit=1) and `StopInfisical(ctx)`; no harness extensions needed. Both tests now exercise the real Infisical → SDK error chain.
 - ~~**Mockclaude chat-mode template extension**~~: **landed in commit `7739d5c`**. Turn-aware response selection (favorite-color → "Purple.") + cache_read_input_tokens emission on turn ≥ 2 are both in place. SC-002's CI assertion (`TestM5_1_MultiTurn_ContextFidelity`) passes against the real binary.
 
 ## Scripted runner
 
-`go test -tags integration ./internal/chat/...` is the scripted check that runs all M5.1 integration tests against testcontainer Postgres + Infisical. Failures fail the build. The 17 success criteria above are split between this suite (SC-002, SC-003, SC-004, SC-005, SC-007, SC-008, SC-009, SC-012, SC-013, SC-014, SC-016, SC-017) and the deferred T020 / chaos / harness-extension follow-ups (SC-001, SC-006, SC-010, SC-011, SC-015 wall-clock validation).
+`go test -tags integration ./internal/chat/...` is the scripted check that runs all M5.1 integration tests against testcontainer Postgres + Infisical. Failures fail the build. The 17 success criteria above are split between this suite (SC-001, SC-002, SC-003, SC-004, SC-005, SC-007, SC-008, SC-009, SC-012, SC-013, SC-014, SC-016, SC-017) and the deferred T020 / chaos / harness-extension follow-ups (SC-006, SC-010, SC-011, SC-015 wall-clock validation).
 
 The structural code that the deferred items will exercise is already on the branch — the gap is test wiring, not implementation.

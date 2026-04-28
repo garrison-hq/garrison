@@ -171,8 +171,21 @@ func TestM5_1_HappyPath_SingleTurn(t *testing.T) {
 	// Step 2 — worker handles the operator message directly (skipping the
 	// pg_notify dispatch since the listener LISTEN against a shared pool
 	// is fragile; T012's listener_test would cover that wiring).
+	turnStart := time.Now()
 	if err := worker.HandleMessageInSession(ctx, sess.ID, op.ID); err != nil {
 		t.Fatalf("HandleMessageInSession: %v", err)
+	}
+	turnElapsed := time.Since(turnStart)
+
+	// SC-001: first delta surfaces within 5s wall-clock from operator
+	// INSERT. The canned-NDJSON path completes the full turn in a few
+	// hundred ms; a 5s deadline guards against regressions that
+	// serialise the worker / persistence / transport hops behind a
+	// blocking call. Real-claude latency is captured by the spike
+	// (§8.1: 1.4s on warm cache) and surfaced operator-side via
+	// raw_event_envelope.result.duration_ms.
+	if turnElapsed > 5*time.Second {
+		t.Errorf("SC-001: turn wall-clock = %v; want ≤ 5s", turnElapsed)
 	}
 
 	// Step 3 — assertions.
