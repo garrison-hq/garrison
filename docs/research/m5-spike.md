@@ -174,3 +174,49 @@ These are decisions the spike *deliberately doesn't make* — they belong in the
 ## Summary in one paragraph
 
 The chat runtime is `docker run --rm -e CLAUDE_CODE_OAUTH_TOKEN=$TOKEN garrison-claude:m5 -p "<prompt>" --output-format stream-json --include-partial-messages [--resume <session-id>] --mcp-config <per-session config>`, where the per-session MCP config mounts postgres-RO + mempalace + (optionally) `garrison-mutate`. Per-turn cold-start is ~3-4s with a pre-baked image. Token-level streaming flows out as `text_delta` NDJSON events that the existing M2.1 parser already handles; the supervisor pipes them to a new SSE endpoint the dashboard reads. Mutation tools live in a new supervisor-owned MCP server with typed-name confirmation gates. Container creation broadens the docker-proxy allow-list by one verb (`POST /containers/create`); that change needs to land alongside the M5.1 supervisor work, not after. Single-operator assumption holds; multi-operator OAuth is post-M5.
+
+---
+
+## §8 — stdin stream-json multi-turn verification (extension, 2026-04-28)
+
+Run during M5.1 plan-drafting after the clarify-round resolved Q2 (no `--resume`; transcript replayed each turn). Two findings load-bearing for the plan:
+
+**Finding 8.1 — stdin stream-json multi-turn replay works.**
+
+```bash
+cat <<'NDJSON' | docker run --rm -i -e CLAUDE_CODE_OAUTH_TOKEN="$TOKEN" \
+  claude-multiturn-spike \
+  -p --verbose --input-format stream-json --output-format stream-json
+{"type":"user","message":{"role":"user","content":"My favorite color is purple."}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Noted — your favorite color is purple."}]}}
+{"type":"user","message":{"role":"user","content":"What is my favorite color? Answer with one word."}}
+NDJSON
+# → result: "Purple."
+# → cache_read_input_tokens: 29272 (prompt-cache hit on replayed prefix)
+# → num_turns: 2
+```
+
+The model treats the user/assistant alternation on stdin as a continuous conversation. The supervisor's transcript-replay design (FR-013, clarify Q2) maps onto this shape directly: turns serialised as user-and-assistant message envelopes, EOF on stdin signals the prompt is complete, claude runs once and exits. Two requirements this imposes on the plan:
+
+- The supervisor MUST close stdin (`cmd.StdinPipe().Close()`) after writing the final turn — claude blocks waiting for more input until EOF.
+- `--input-format stream-json` requires `--verbose` when paired with `--output-format stream-json` (claude rejects the combination otherwise with "When using --print, --output-format=stream-json requires --verbose").
+
+**Finding 8.2 — `--tools ""` disables ALL built-in agentic tools.**
+
+The default Claude Code subprocess exposes Bash, Edit, Write, Read, Task, Skill, TodoWrite, AskUserQuestion, etc. — verified empirically: a single-shot prompt with no `--tools` flag returned the model trying to call `TodoWrite` to "save the favorite color to memory." For chat mode this is wrong; the chat must only see the MCP-supplied surface (postgres + mempalace). `--tools ""` zeroes the built-in set:
+
+```bash
+cat <<'NDJSON' | docker run --rm -i -e ... claude-multiturn-spike \
+  -p --verbose --input-format stream-json --output-format stream-json --tools ""
+{"type":"user","message":{"role":"user","content":"hi"}}
+NDJSON
+# init event: tools: [], mcp_servers: []
+```
+
+Combined with `--strict-mcp-config` (which already drops any MCP server not in the `--mcp-config` file), the chat container's tool surface is exactly `--mcp-config` + nothing else. Plan locks the chat invocation flags as: `--input-format stream-json --output-format stream-json --include-partial-messages --verbose --tools "" --mcp-config /etc/garrison/mcp.json --strict-mcp-config --permission-mode bypassPermissions --model <default>`.
+
+**Finding 8.3 — `--include-partial-messages` produces token-level deltas in stream-json output.**
+
+Confirmed during the §8.1 run: `stream_event` envelopes with `event.type=content_block_delta` carry `delta.text_delta` payloads at the token-batch level. These map directly to the FR-051 `pg_notify('chat.assistant.delta', …)` payload the supervisor emits. The existing `internal/spawn/pipeline.go` parser routes `stream_event` lines to `OnUnknown` today; the plan extends `claudeproto.Router` with `OnStreamEvent` so chat policy can handle them as deltas while the existing finalize policy continues to ignore them.
+
+**Closes spike open questions §7.1 (container shape — ephemeral confirmed), §7.4 (session persistence — replay confirmed, no `--resume` needed), and §7.10 (parser policy — chat needs distinct policy + new `OnStreamEvent` event surface).**
