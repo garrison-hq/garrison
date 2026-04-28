@@ -107,7 +107,7 @@ export function SecretEditForm({ initial }: Readonly<SecretEditFormProps>) {
           // disabled and the URL doesn't change even though the
           // server action returned 200. window.location.assign
           // sidesteps that race entirely.
-          window.location.assign('/vault');
+          globalThis.location.assign('/vault');
         } else {
           setConflict(result.serverState);
         }

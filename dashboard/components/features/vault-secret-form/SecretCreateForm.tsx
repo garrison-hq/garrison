@@ -100,9 +100,9 @@ export function SecretCreateForm({ customerId }: Readonly<SecretCreateFormProps>
         // navigations whose destination triggers a server-side
         // re-fetch (the /vault list page); the button stays
         // disabled and the URL doesn't change even though the
-        // server action returned 200. window.location.assign
+        // server action returned 200. globalThis.location.assign
         // sidesteps that race entirely.
-        window.location.assign('/vault');
+        globalThis.location.assign('/vault');
       } catch (err) {
         if (err instanceof VaultError) {
           const reason = (err.detail?.reason as string | undefined) ?? err.kind;

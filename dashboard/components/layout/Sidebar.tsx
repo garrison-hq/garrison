@@ -59,6 +59,23 @@ export async function Sidebar() {
         />
       </Link>
 
+      {/* Persistent primary action — operator-driven ticket
+          creation per FR-025. The button is always visible so the
+          operator can create a ticket from any surface; the form's
+          department dropdown lets them pick the workflow. The
+          per-department kanban page also has a button that
+          prefills the workflow for that department. */}
+      <div className="px-3 pb-3">
+        <Link
+          href="/tickets/new"
+          className="flex items-center justify-center gap-1.5 w-full px-3 py-2 rounded bg-accent text-white hover:bg-accent/90 text-[13px] font-medium"
+          data-testid="sidebar-new-ticket"
+        >
+          <span aria-hidden>+</span>
+          <span>New ticket</span>
+        </Link>
+      </div>
+
       <nav aria-label={t('primaryNavigationLabel')} className="flex-1 flex flex-col gap-0.5 px-2">
         <NavLink href="/" label={t('orgOverview')} icon={<HomeIcon />} />
         <NavGroup label={t('departments')} icon={<DeptIcon />}>
