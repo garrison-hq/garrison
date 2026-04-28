@@ -480,6 +480,20 @@ func (p *FinalizePolicy) OnUnknown(_ context.Context, e claudeproto.UnknownEvent
 		"raw", string(e.Raw))
 }
 
+// OnStreamEvent is a no-op for finalize-shaped flows. Pre-M5.1
+// stream_event lines (produced when --include-partial-messages is
+// passed) routed to OnUnknown; the M2.x ticket-spawn path doesn't
+// pass that flag and so never sees them. M5.1 chat invocations DO
+// pass the flag — ChatPolicy.OnStreamEvent (internal/chat/policy.go)
+// is the consumer that aggregates text_delta events into per-batch
+// pg_notify deltas. FinalizePolicy ignores the events explicitly so
+// that if a future ticket-spawn path ever passes the flag, the
+// behaviour is "stream_event observed, no side effect" rather than
+// "logged at warn via OnUnknown."
+func (p *FinalizePolicy) OnStreamEvent(_ context.Context, _ claudeproto.StreamEvent) {
+	// observational only; no side effects for finalize flows
+}
+
 // OnTerminate is the Policy hook Run calls when the scanner stops
 // because of a parse error or RouterActionBail. The reason argument is
 // either "parse_error" or "bail"; FinalizePolicy translates that into

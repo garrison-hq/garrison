@@ -367,6 +367,31 @@ func TestPolicy_FinalizeUnchanged(t *testing.T) {
 	}
 }
 
+// TestFinalizePolicy_OnStreamEvent_NoOp verifies that calling
+// FinalizePolicy.OnStreamEvent has no observable side effects: no
+// Result mutation, no logger calls (test uses a recording handler
+// asserting zero records), no panic. Adding the no-op was T004's
+// way of letting M5.1's Router-interface extension land without
+// changing finalize behaviour.
+func TestFinalizePolicy_OnStreamEvent_NoOp(t *testing.T) {
+	rec := &recordingHandler{}
+	logger := slog.New(rec)
+	result := &Result{}
+	policy := NewFinalizePolicy(logger, pgtype.UUID{}, pgtype.UUID{}, result, FinalizeDeps{}, nil)
+
+	before := *result
+	policy.OnStreamEvent(context.Background(), claudeproto.StreamEvent{
+		InnerType: "content_block_delta",
+		Inner:     claudeproto.StreamInner{DeltaType: "text_delta", DeltaText: "hi"},
+	})
+	if *result != before {
+		t.Errorf("OnStreamEvent mutated Result: before=%+v after=%+v", before, *result)
+	}
+	if len(rec.records) != 0 {
+		t.Errorf("OnStreamEvent emitted log records: %v", rec.records)
+	}
+}
+
 // TestPolicy_RunCallsOnTerminateOnParseError verifies the new
 // OnTerminate hook fires with reason="parse_error" when the scanner
 // hits a malformed NDJSON line (and that FinalizePolicy translates

@@ -154,3 +154,70 @@ type UnknownEvent struct {
 	Subtype string `json:"subtype"`
 	Raw     []byte `json:"-"`
 }
+
+// StreamEvent corresponds to the `stream_event` lines Claude emits when
+// invoked with `--include-partial-messages`. Each carries a nested
+// `event` object whose `type` discriminates the inner shape:
+//
+//   - "message_start"        — turn begins; `event.message.usage` carries
+//                              cache-token counts (cache_creation_input_
+//                              tokens + cache_read_input_tokens) that
+//                              prove prompt-cache behavior across
+//                              multi-turn replay (M5.1 SC-002).
+//   - "content_block_start"  — assistant content block begins; index
+//                              identifies which block of the message.
+//   - "content_block_delta"  — the load-bearing event for chat. Inner
+//                              `delta.type` is typically "text_delta"
+//                              with `delta.text` carrying the appended
+//                              characters; the chat policy aggregates
+//                              these into the assistant message content
+//                              and emits per-batch pg_notify deltas
+//                              (FR-051).
+//   - "content_block_stop"   — assistant content block done.
+//   - "message_delta"        — usage / stop_reason updates for the
+//                              in-flight message.
+//   - "message_stop"         — turn ends.
+//
+// Pre-M5.1 stream_event lines routed to OnUnknown (the M2.x ticket-spawn
+// path doesn't pass --include-partial-messages and so never sees them).
+// M5.1 chat invocations DO pass the flag; ChatPolicy.OnStreamEvent
+// (internal/chat/policy.go) is the consumer.
+//
+// FinalizePolicy.OnStreamEvent is a no-op so M2.x callers stay
+// behavior-compatible if the flag ever lands on a ticket spawn path.
+type StreamEvent struct {
+	SessionID string
+	// InnerType is one of the strings enumerated above.
+	InnerType string
+	// Inner carries the typed fields the supervisor acts on for each
+	// stream_event subtype. Unused fields stay zero-value.
+	Inner StreamInner
+	Raw   []byte
+}
+
+// StreamInner is the flattened, opinionated view of the StreamEvent's
+// nested `event` object. Field selection mirrors what M5.1 acts on;
+// future fields can be added here without breaking the existing
+// content_block_delta / message_start / message_delta consumers.
+type StreamInner struct {
+	// Index is the content-block index for content_block_* events.
+	Index int
+	// DeltaType is the inner `delta.type` for content_block_delta —
+	// typically "text_delta"; other observed values include
+	// "input_json_delta" (for tool_use streaming) and "thinking_delta".
+	DeltaType string
+	// DeltaText is the appended text for text_delta events. Empty for
+	// other delta types.
+	DeltaText string
+	// StopReason is populated on message_delta + message_stop.
+	StopReason string
+
+	// Cache + token usage fields populated on message_start (and
+	// partially on message_delta). cache_read_input_tokens > 0 on
+	// turn ≥ 2 of a multi-turn chat is the SC-002 signal that the
+	// supervisor's transcript replay produced a cache hit.
+	InputTokens         int
+	OutputTokens        int
+	CacheReadInput      int
+	CacheCreationInput  int
+}
