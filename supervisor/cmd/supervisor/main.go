@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/garrison-hq/garrison/supervisor/internal/agents"
+	"github.com/garrison-hq/garrison/supervisor/internal/chat"
 	"github.com/garrison-hq/garrison/supervisor/internal/config"
 	"github.com/garrison-hq/garrison/supervisor/internal/dockerexec"
 	"github.com/garrison-hq/garrison/supervisor/internal/events"
@@ -314,6 +315,45 @@ func runDaemon() int {
 			return hygiene.RunSweep(gctx, hygieneDeps)
 		})
 	}
+
+	// M5.1 — chat backend subsystem. RestartSweep runs once
+	// synchronously before the listener starts LISTEN; the listener +
+	// idle sweep join the errgroup so SIGTERM cascades cleanly via
+	// root-ctx cancellation per AGENTS.md concurrency rule 1.
+	chatDeps := chat.Deps{
+		Pool:                 pool,
+		Queries:              queries,
+		VaultClient:          vaultClient,
+		DockerExec:           dockerexec.RealDockerExec{DockerBin: cfg.DockerBin},
+		Logger:               logger,
+		CustomerID:           cfg.CustomerID(),
+		OAuthVaultPath:       cfg.ChatOAuthVaultPath,
+		ChatContainerImage:   cfg.ChatContainerImage,
+		MCPConfigDir:         cfg.MCPConfigDir,
+		DockerNetwork:        cfg.ChatDockerNetwork,
+		TurnTimeout:          cfg.ChatTurnTimeout,
+		SessionIdleTimeout:   cfg.ChatSessionIdleTimeout,
+		SessionCostCapUSD:    cfg.ChatSessionCostCapUSD,
+		TerminalWriteGrace:   spawn.TerminalWriteGrace,
+		ShutdownSignalGrace:  spawn.ShutdownSignalGrace,
+		ClaudeBinInContainer: "/usr/local/bin/claude",
+		DefaultModel:         cfg.ChatDefaultModel,
+	}
+	if err := chat.RunRestartSweep(ctx, chatDeps); err != nil {
+		logger.Warn("chat: restart sweep failed; continuing", "err", err)
+	}
+	chatWorker := chat.NewWorker(chatDeps, supervisorBin, cfg.AgentRODSN(), chat.MempalaceWiring{
+		DockerBin:          cfg.DockerBin,
+		MempalaceContainer: cfg.MempalaceContainer,
+		PalacePath:         cfg.PalacePath,
+		DockerHost:         cfg.DockerHost,
+	})
+	g.Go(func() error {
+		return chat.RunListener(gctx, chatDeps, chatWorker)
+	})
+	g.Go(func() error {
+		return chat.RunIdleSweep(gctx, chatDeps)
+	})
 
 	if err := g.Wait(); err != nil && !errors.Is(err, context.Canceled) {
 		logger.Error("subsystem exited with error", "error", err)

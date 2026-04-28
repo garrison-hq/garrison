@@ -119,6 +119,16 @@ type Config struct {
 	// designed. Not documented for operator use.
 	DisablePalaceBootstrap bool
 
+	// M5.1 chat-runtime fields. Defaults set by Load; operator overrides
+	// via GARRISON_CHAT_* env vars (per ops-checklist M5.1 section).
+	ChatContainerImage     string
+	ChatTurnTimeout        time.Duration
+	ChatSessionIdleTimeout time.Duration
+	ChatSessionCostCapUSD  float64
+	ChatOAuthVaultPath     string
+	ChatDockerNetwork      string
+	ChatDefaultModel       string
+
 	agentROPassword        string
 	agentMempalacePassword string
 
@@ -200,6 +210,44 @@ func Load() (*Config, error) {
 		HygieneDelay:         DefaultHygieneDelay,
 		HygieneSweepInterval: DefaultHygieneSweepInterval,
 		FinalizeWriteTimeout: DefaultFinalizeWriteTimeout,
+		// M5.1 chat-runtime defaults.
+		ChatContainerImage:     "garrison-claude:m5",
+		ChatTurnTimeout:        5 * time.Minute,
+		ChatSessionIdleTimeout: 30 * time.Minute,
+		ChatSessionCostCapUSD:  1.00,
+		ChatOAuthVaultPath:     "/operator/CLAUDE_CODE_OAUTH_TOKEN",
+		ChatDockerNetwork:      "garrison-net",
+		ChatDefaultModel:       "claude-sonnet-4-6",
+	}
+
+	// M5.1 env overrides — all optional; defaults above are used
+	// when unset.
+	if v := os.Getenv("GARRISON_CHAT_CONTAINER_IMAGE"); v != "" {
+		cfg.ChatContainerImage = v
+	}
+	if v := os.Getenv("GARRISON_CHAT_TURN_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.ChatTurnTimeout = d
+		}
+	}
+	if v := os.Getenv("GARRISON_CHAT_SESSION_IDLE_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.ChatSessionIdleTimeout = d
+		}
+	}
+	if v := os.Getenv("GARRISON_CHAT_SESSION_COST_CAP_USD"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			cfg.ChatSessionCostCapUSD = f
+		}
+	}
+	if v := os.Getenv("GARRISON_CHAT_OAUTH_VAULT_PATH"); v != "" {
+		cfg.ChatOAuthVaultPath = v
+	}
+	if v := os.Getenv("GARRISON_CHAT_DOCKER_NETWORK"); v != "" {
+		cfg.ChatDockerNetwork = v
+	}
+	if v := os.Getenv("GARRISON_CHAT_DEFAULT_MODEL"); v != "" {
+		cfg.ChatDefaultModel = v
 	}
 
 	dbURL := os.Getenv("GARRISON_DATABASE_URL")

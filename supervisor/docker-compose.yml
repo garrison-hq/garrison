@@ -66,6 +66,9 @@ services:
       POST: 1
       EXEC: 1
       CONTAINERS: 1
+      # M5.1 — chat runtime needs POST /containers/create to spawn
+      # ephemeral garrison-claude:m5 containers per chat message.
+      CREATE: 1
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     # Listens on TCP :2375 inside the container. Not published to host —
