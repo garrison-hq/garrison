@@ -168,12 +168,11 @@ type streamEventDeltaUsageWire struct {
 // lines whose `event.type == "message_delta"` — those carry usage at
 // event.usage rather than event.message.usage.
 type messageDeltaUsageWire struct {
-	Event struct {
-		Usage struct {
-			InputTokens  int `json:"input_tokens"`
-			OutputTokens int `json:"output_tokens"`
-		} `json:"usage"`
-	} `json:"event"`
+	Event messageDeltaEventWire `json:"event"`
+}
+
+type messageDeltaEventWire struct {
+	Usage streamEventDeltaUsageWire `json:"usage"`
 }
 
 func routeStreamEvent(ctx context.Context, raw []byte, r Router) (RouterAction, error) {

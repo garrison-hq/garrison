@@ -583,3 +583,118 @@ func TestWriteWithOpsExtraServersBannedName(t *testing.T) {
 		t.Errorf("expected ErrVaultMCPBanned for banned server in extra; got %v", err)
 	}
 }
+
+// chatConfigCfg is the minimal struct for decoding BuildChatConfig output.
+// Lives at file scope so the M5.1 BuildChatConfig tests below can share it.
+type chatConfigCfg struct {
+	MCPServers map[string]struct {
+		Command string            `json:"command"`
+		Args    []string          `json:"args"`
+		Env     map[string]string `json:"env"`
+	} `json:"mcpServers"`
+}
+
+// TestBuildChatConfigShape pins the M5.1 chat MCP set: exactly two
+// servers (postgres + mempalace), postgres pointing at the supervisor
+// binary's mcp-postgres subcommand with the read-only DSN, mempalace
+// pointing at `docker exec` against the long-lived sidecar. T010
+// completion condition.
+func TestBuildChatConfigShape(t *testing.T) {
+	mp := MempalaceParams{
+		DockerBin:          "/usr/bin/docker",
+		MempalaceContainer: "garrison-mempalace",
+		PalacePath:         "/palace",
+		DockerHost:         "tcp://garrison-docker-proxy:2375",
+	}
+	raw, err := BuildChatConfig(ChatConfigParams{
+		SupervisorBin: "/usr/local/bin/supervisor",
+		AgentRoDSN:    "postgres://garrison_agent_ro:pw@localhost/garrison",
+		Mempalace:     mp,
+	})
+	if err != nil {
+		t.Fatalf("BuildChatConfig: %v", err)
+	}
+	var cfg chatConfigCfg
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got := len(cfg.MCPServers); got != 2 {
+		t.Errorf("len(mcpServers) = %d; want 2 (postgres + mempalace only)", got)
+	}
+	pg, ok := cfg.MCPServers["postgres"]
+	if !ok {
+		t.Fatalf("postgres entry missing; keys=%v", keys(cfg.MCPServers))
+	}
+	if pg.Command != "/usr/local/bin/supervisor" {
+		t.Errorf("postgres.command = %q; want supervisor bin", pg.Command)
+	}
+	if len(pg.Args) != 1 || pg.Args[0] != "mcp-postgres" {
+		t.Errorf("postgres.args = %v; want [mcp-postgres]", pg.Args)
+	}
+	if pg.Env["GARRISON_PGMCP_DSN"] != "postgres://garrison_agent_ro:pw@localhost/garrison" {
+		t.Errorf("postgres.env.GARRISON_PGMCP_DSN = %q", pg.Env["GARRISON_PGMCP_DSN"])
+	}
+	mem, ok := cfg.MCPServers["mempalace"]
+	if !ok {
+		t.Fatalf("mempalace entry missing; keys=%v", keys(cfg.MCPServers))
+	}
+	if mem.Command != "/usr/bin/docker" {
+		t.Errorf("mempalace.command = %q", mem.Command)
+	}
+	if mem.Env["DOCKER_HOST"] != "tcp://garrison-docker-proxy:2375" {
+		t.Errorf("mempalace.env.DOCKER_HOST = %q", mem.Env["DOCKER_HOST"])
+	}
+}
+
+// TestBuildChatConfigRejectsEmptySupervisorBin guards FR-022 / Q-E:
+// the supervisor binary must resolve to a path; an empty value would
+// produce an unrunnable mcp-postgres entry.
+func TestBuildChatConfigRejectsEmptySupervisorBin(t *testing.T) {
+	_, err := BuildChatConfig(ChatConfigParams{
+		AgentRoDSN: "postgres://x@y/z",
+		Mempalace: MempalaceParams{
+			DockerBin: "/usr/bin/docker", MempalaceContainer: "c", PalacePath: "/p",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected error for empty SupervisorBin, got nil")
+	}
+	if !strings.Contains(err.Error(), "SupervisorBin") {
+		t.Errorf("error should mention SupervisorBin; got %v", err)
+	}
+}
+
+// TestBuildChatConfigRejectsEmptyAgentRoDSN guards the read-only DSN
+// (NFR-111): an empty DSN would let mcp-postgres connect to whatever
+// PG* env happens to be set, leaking write capability.
+func TestBuildChatConfigRejectsEmptyAgentRoDSN(t *testing.T) {
+	_, err := BuildChatConfig(ChatConfigParams{
+		SupervisorBin: "/bin/sup",
+		Mempalace: MempalaceParams{
+			DockerBin: "/usr/bin/docker", MempalaceContainer: "c", PalacePath: "/p",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected error for empty AgentRoDSN, got nil")
+	}
+	if !strings.Contains(err.Error(), "AgentRoDSN") {
+		t.Errorf("error should mention AgentRoDSN; got %v", err)
+	}
+}
+
+// TestBuildChatConfigRejectsDisabledMempalace pins the chat-MCP
+// invariant: mempalace MUST be enabled (FR-022 expects both servers).
+// Empty MempalaceParams returns an error rather than silently dropping
+// the entry the way Write does for the M2.1 back-compat path.
+func TestBuildChatConfigRejectsDisabledMempalace(t *testing.T) {
+	_, err := BuildChatConfig(ChatConfigParams{
+		SupervisorBin: "/bin/sup",
+		AgentRoDSN:    "dsn",
+	})
+	if err == nil {
+		t.Fatal("expected error for disabled mempalace, got nil")
+	}
+	if !strings.Contains(err.Error(), "mempalace") {
+		t.Errorf("error should mention mempalace; got %v", err)
+	}
+}
