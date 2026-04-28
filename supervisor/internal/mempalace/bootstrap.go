@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"time"
+
+	"github.com/garrison-hq/garrison/supervisor/internal/dockerexec"
 )
 
 // BootstrapConfig wires Bootstrap's collaborators and tunables. DockerBin
@@ -19,7 +21,7 @@ type BootstrapConfig struct {
 	PalacePath         string
 	Logger             *slog.Logger
 	InitTimeout        time.Duration // default 30s
-	Exec               DockerExec    // injection seam; nil → RealDockerExec{DockerBin}
+	Exec               dockerexec.DockerExec // injection seam; nil → dockerexec.RealDockerExec{DockerBin}
 }
 
 // ErrPalaceInitFailed wraps a non-zero exit from `mempalace init --yes`.
@@ -52,7 +54,7 @@ func Bootstrap(ctx context.Context, cfg BootstrapConfig) error {
 	}
 	exe := cfg.Exec
 	if exe == nil {
-		exe = RealDockerExec{DockerBin: cfg.DockerBin}
+		exe = dockerexec.RealDockerExec{DockerBin: cfg.DockerBin}
 	}
 	logger := cfg.Logger
 	if logger == nil {

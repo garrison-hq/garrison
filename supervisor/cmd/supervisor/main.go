@@ -12,6 +12,7 @@ import (
 
 	"github.com/garrison-hq/garrison/supervisor/internal/agents"
 	"github.com/garrison-hq/garrison/supervisor/internal/config"
+	"github.com/garrison-hq/garrison/supervisor/internal/dockerexec"
 	"github.com/garrison-hq/garrison/supervisor/internal/events"
 	"github.com/garrison-hq/garrison/supervisor/internal/health"
 	"github.com/garrison-hq/garrison/supervisor/internal/hygiene"
@@ -432,7 +433,7 @@ func buildSharedPalaceClient(cfg *config.Config) *mempalace.Client {
 		PalacePath:         cfg.PalacePath,
 		DockerHost:         cfg.DockerHost,
 		Timeout:            10 * time.Second,
-		Exec:               mempalace.RealDockerExec{DockerBin: cfg.DockerBin},
+		Exec:               dockerexec.RealDockerExec{DockerBin: cfg.DockerBin},
 	}
 }
 

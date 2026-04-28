@@ -45,6 +45,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/garrison-hq/garrison/supervisor/internal/dockerexec"
 	"github.com/garrison-hq/garrison/supervisor/internal/mempalace"
 	"github.com/garrison-hq/garrison/supervisor/internal/testdb"
 	"github.com/garrison-hq/garrison/supervisor/internal/vault"
@@ -2103,7 +2104,7 @@ func TestSecretPatternScanRedactsBeforeMemPalaceWrite(t *testing.T) {
 	palaceClient := &mempalace.Client{
 		MempalaceContainer: m22MempalaceContainer,
 		PalacePath:         "/palace",
-		Exec:               mempalace.RealDockerExec{},
+		Exec:               dockerexec.RealDockerExec{},
 		Timeout:            20 * time.Second,
 	}
 	window := mempalace.TimeWindow{
