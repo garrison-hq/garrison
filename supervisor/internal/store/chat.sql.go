@@ -112,6 +112,34 @@ func (q *Queries) CreateChatSession(ctx context.Context, startedByUserID pgtype.
 	return i, err
 }
 
+const getChatMessageByID = `-- name: GetChatMessageByID :one
+SELECT id, session_id, turn_index, role, status, content, tokens_input, tokens_output, cost_usd, error_kind, raw_event_envelope, created_at, terminated_at FROM chat_messages WHERE id = $1
+`
+
+// Listener fast-path lookup: given the message_id from a
+// chat.message.sent notify, find the row + its parent session_id
+// so the worker can scope its serial mutex.
+func (q *Queries) GetChatMessageByID(ctx context.Context, id pgtype.UUID) (ChatMessage, error) {
+	row := q.db.QueryRow(ctx, getChatMessageByID, id)
+	var i ChatMessage
+	err := row.Scan(
+		&i.ID,
+		&i.SessionID,
+		&i.TurnIndex,
+		&i.Role,
+		&i.Status,
+		&i.Content,
+		&i.TokensInput,
+		&i.TokensOutput,
+		&i.CostUsd,
+		&i.ErrorKind,
+		&i.RawEventEnvelope,
+		&i.CreatedAt,
+		&i.TerminatedAt,
+	)
+	return i, err
+}
+
 const getChatSession = `-- name: GetChatSession :one
 SELECT id, started_by_user_id, started_at, ended_at, status, total_cost_usd, claude_session_label FROM chat_sessions WHERE id = $1
 `

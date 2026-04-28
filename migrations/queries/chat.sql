@@ -150,6 +150,12 @@ SELECT id, session_id, turn_index, role, status, content, created_at
         OR (role = 'assistant' AND status = 'completed'))
  ORDER BY turn_index ASC;
 
+-- name: GetChatMessageByID :one
+-- Listener fast-path lookup: given the message_id from a
+-- chat.message.sent notify, find the row + its parent session_id
+-- so the worker can scope its serial mutex.
+SELECT * FROM chat_messages WHERE id = @id;
+
 -- name: GetMaxTurnIndex :one
 -- Used by the supervisor when computing the assistant turn_index for
 -- a fresh INSERT. Returns -1 (via COALESCE) when the session has no
