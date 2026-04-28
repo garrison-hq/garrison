@@ -2,7 +2,7 @@
 // Run `bun run drizzle:pull` to regenerate.
 // Source: goose-managed migrations under ../../migrations/.
 
-import { pgTable, integer, bigint, boolean, timestamp, index, foreignKey, uuid, text, numeric, jsonb, unique, primaryKey, check, interval } from "drizzle-orm/pg-core"
+import { pgTable, integer, bigint, boolean, timestamp, index, foreignKey, uuid, text, numeric, jsonb, unique, check, primaryKey, interval } from "drizzle-orm/pg-core"
 import { sql } from "drizzle-orm"
 
 
@@ -51,6 +51,23 @@ export const eventOutbox = pgTable("event_outbox", {
 	index("idx_event_outbox_unprocessed").using("btree", table.createdAt.asc().nullsLast().op("timestamptz_ops")).where(sql`(processed_at IS NULL)`),
 ]);
 
+export const tickets = pgTable("tickets", {
+	id: uuid().defaultRandom().primaryKey().notNull(),
+	departmentId: uuid("department_id").notNull(),
+	objective: text().notNull(),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	columnSlug: text("column_slug").default('todo').notNull(),
+	acceptanceCriteria: text("acceptance_criteria"),
+	metadata: jsonb().default({}).notNull(),
+	origin: text().default('sql').notNull(),
+}, (table) => [
+	foreignKey({
+			columns: [table.departmentId],
+			foreignColumns: [departments.id],
+			name: "tickets_department_id_fkey"
+		}),
+]);
+
 export const departments = pgTable("departments", {
 	id: uuid().defaultRandom().primaryKey().notNull(),
 	slug: text().notNull(),
@@ -75,21 +92,28 @@ export const companies = pgTable("companies", {
 	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
 });
 
-export const tickets = pgTable("tickets", {
+export const agents = pgTable("agents", {
 	id: uuid().defaultRandom().primaryKey().notNull(),
 	departmentId: uuid("department_id").notNull(),
-	objective: text().notNull(),
+	roleSlug: text("role_slug").notNull(),
+	agentMd: text("agent_md").notNull(),
+	model: text().notNull(),
+	skills: jsonb().default([]).notNull(),
+	mcpTools: jsonb("mcp_tools").default([]).notNull(),
+	listensFor: jsonb("listens_for").notNull(),
+	palaceWing: text("palace_wing"),
+	status: text().default('active').notNull(),
 	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-	columnSlug: text("column_slug").default('todo').notNull(),
-	acceptanceCriteria: text("acceptance_criteria"),
-	metadata: jsonb().default({}).notNull(),
-	origin: text().default('sql').notNull(),
+	mcpConfig: jsonb("mcp_config").default({}).notNull(),
+	updatedAt: timestamp("updated_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
 }, (table) => [
+	index("idx_agents_active_by_dept").using("btree", table.departmentId.asc().nullsLast().op("text_ops"), table.roleSlug.asc().nullsLast().op("text_ops")).where(sql`(status = 'active'::text)`),
 	foreignKey({
 			columns: [table.departmentId],
 			foreignColumns: [departments.id],
-			name: "tickets_department_id_fkey"
+			name: "agents_department_id_fkey"
 		}),
+	unique("agents_department_id_role_slug_key").on(table.departmentId, table.roleSlug),
 ]);
 
 export const ticketTransitions = pgTable("ticket_transitions", {
@@ -142,28 +166,44 @@ export const vaultAccessLog = pgTable("vault_access_log", {
 		}),
 ]);
 
-export const agents = pgTable("agents", {
+export const chatSessions = pgTable("chat_sessions", {
 	id: uuid().defaultRandom().primaryKey().notNull(),
-	departmentId: uuid("department_id").notNull(),
-	roleSlug: text("role_slug").notNull(),
-	agentMd: text("agent_md").notNull(),
-	model: text().notNull(),
-	skills: jsonb().default([]).notNull(),
-	mcpTools: jsonb("mcp_tools").default([]).notNull(),
-	listensFor: jsonb("listens_for").notNull(),
-	palaceWing: text("palace_wing"),
+	startedByUserId: uuid("started_by_user_id").notNull(),
+	startedAt: timestamp("started_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	endedAt: timestamp("ended_at", { withTimezone: true, mode: 'string' }),
 	status: text().default('active').notNull(),
-	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-	mcpConfig: jsonb("mcp_config").default({}).notNull(),
-	updatedAt: timestamp("updated_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	totalCostUsd: numeric("total_cost_usd", { precision: 20, scale:  10 }).default('0').notNull(),
+	claudeSessionLabel: text("claude_session_label"),
 }, (table) => [
-	index("idx_agents_active_by_dept").using("btree", table.departmentId.asc().nullsLast().op("text_ops"), table.roleSlug.asc().nullsLast().op("text_ops")).where(sql`(status = 'active'::text)`),
+	index("idx_chat_sessions_active").using("btree", table.status.asc().nullsLast().op("text_ops")).where(sql`(status = 'active'::text)`),
+	index("idx_chat_sessions_user_started").using("btree", table.startedByUserId.asc().nullsLast().op("timestamptz_ops"), table.startedAt.desc().nullsFirst().op("timestamptz_ops")),
+	check("chat_sessions_status_check", sql`status = ANY (ARRAY['active'::text, 'ended'::text, 'aborted'::text])`),
+]);
+
+export const chatMessages = pgTable("chat_messages", {
+	id: uuid().defaultRandom().primaryKey().notNull(),
+	sessionId: uuid("session_id").notNull(),
+	turnIndex: integer("turn_index").notNull(),
+	role: text().notNull(),
+	status: text().notNull(),
+	content: text(),
+	tokensInput: integer("tokens_input"),
+	tokensOutput: integer("tokens_output"),
+	costUsd: numeric("cost_usd", { precision: 20, scale:  10 }),
+	errorKind: text("error_kind"),
+	rawEventEnvelope: jsonb("raw_event_envelope"),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	terminatedAt: timestamp("terminated_at", { withTimezone: true, mode: 'string' }),
+}, (table) => [
+	index("idx_chat_messages_inflight").using("btree", table.sessionId.asc().nullsLast().op("text_ops"), table.status.asc().nullsLast().op("text_ops")).where(sql`(status = ANY (ARRAY['pending'::text, 'streaming'::text]))`),
 	foreignKey({
-			columns: [table.departmentId],
-			foreignColumns: [departments.id],
-			name: "agents_department_id_fkey"
+			columns: [table.sessionId],
+			foreignColumns: [chatSessions.id],
+			name: "chat_messages_session_id_fkey"
 		}),
-	unique("agents_department_id_role_slug_key").on(table.departmentId, table.roleSlug),
+	unique("chat_messages_session_id_turn_index_key").on(table.sessionId, table.turnIndex),
+	check("chat_messages_role_check", sql`role = ANY (ARRAY['operator'::text, 'assistant'::text])`),
+	check("chat_messages_status_check", sql`status = ANY (ARRAY['pending'::text, 'streaming'::text, 'completed'::text, 'failed'::text, 'aborted'::text])`),
 ]);
 
 export const agentRoleSecrets = pgTable("agent_role_secrets", {

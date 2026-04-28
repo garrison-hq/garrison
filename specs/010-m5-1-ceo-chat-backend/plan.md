@@ -486,9 +486,16 @@ Both server actions enforce: better-auth session present (else throw `AuthError(
 -- +goose StatementBegin
 
 -- chat_sessions: one row per CEO conversation.
+-- Note: started_by_user_id is semantically a reference to dashboard-owned
+-- users.id but is NOT a Postgres FK, mirroring the M4 retro discipline
+-- of avoiding supervisor → dashboard cross-domain FKs (which would make
+-- supervisor migrations depend on dashboard Drizzle migrations having
+-- already run). Integrity is preserved at the application layer:
+-- dashboard server actions take the value from an authenticated
+-- better-auth session.
 CREATE TABLE chat_sessions (
     id                    UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
-    started_by_user_id    UUID         NOT NULL REFERENCES users(id),
+    started_by_user_id    UUID         NOT NULL,
     started_at            TIMESTAMPTZ  NOT NULL DEFAULT now(),
     ended_at              TIMESTAMPTZ  NULL,
     status                TEXT         NOT NULL DEFAULT 'active'
