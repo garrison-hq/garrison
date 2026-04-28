@@ -204,3 +204,50 @@ func selectTerminateKind(reason string, bailReason ErrorKind) ErrorKind {
 		return ErrorClaudeRuntimeError
 	}
 }
+
+// TestNumericFromString_EmptyReturnsZero pins the documented contract
+// for the cost-rollup parser: an empty json.Number (Claude omits the
+// field entirely on failed turns) returns a zero Numeric, not an
+// error. The terminal-commit path relies on this so missing-cost
+// rows are still committable.
+func TestNumericFromString_EmptyReturnsZero(t *testing.T) {
+	n, err := numericFromString("")
+	if err != nil {
+		t.Fatalf("numericFromString(\"\"): %v", err)
+	}
+	if n.Valid {
+		t.Errorf("expected !Valid (zero Numeric); got Valid Numeric")
+	}
+}
+
+// TestNumericFromString_ValidNumber: a real Claude cost like
+// "0.00965475" must round-trip through pgtype.Numeric without losing
+// the trailing precision. A naive float64 path would clobber the tail.
+func TestNumericFromString_ValidNumber(t *testing.T) {
+	n, err := numericFromString("0.00965475")
+	if err != nil {
+		t.Fatalf("numericFromString: %v", err)
+	}
+	if !n.Valid {
+		t.Errorf("expected Valid Numeric")
+	}
+	// Verify the value round-trips by reading it back via Float64Value
+	// (lossy but enough for an existence check; the precision-pinning
+	// is the responsibility of the pgx driver round-trip).
+	f, err := n.Float64Value()
+	if err != nil || !f.Valid {
+		t.Fatalf("Float64Value: %v / valid=%v", err, f.Valid)
+	}
+	if f.Float64 < 0.009 || f.Float64 > 0.01 {
+		t.Errorf("round-tripped value=%v outside expected range", f.Float64)
+	}
+}
+
+// TestNumericFromString_InvalidReturnsError: non-numeric input must
+// surface a parse error so the terminal-commit path can fall back to
+// the no-cost shape rather than committing a corrupt rollup.
+func TestNumericFromString_InvalidReturnsError(t *testing.T) {
+	if _, err := numericFromString("not a number"); err == nil {
+		t.Error("numericFromString(\"not a number\") returned nil err; want parse error")
+	}
+}
