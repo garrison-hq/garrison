@@ -46,11 +46,13 @@ interface WorkSessionEndedPayload {
 }
 
 function frame(eventName: string, data: unknown, id?: string): string {
-  const lines = [];
-  if (id) lines.push(`id: ${id}`);
-  lines.push(`event: ${eventName}`);
-  lines.push(`data: ${JSON.stringify(data)}`);
-  lines.push('', '');
+  const lines = [
+    ...(id ? [`id: ${id}`] : []),
+    `event: ${eventName}`,
+    `data: ${JSON.stringify(data)}`,
+    '',
+    '',
+  ];
   return lines.join('\n');
 }
 

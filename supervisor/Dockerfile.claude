@@ -15,8 +15,8 @@ FROM node:22-slim AS install
 
 ARG CLAUDE_CODE_VERSION=2.1.86
 
-RUN npm install -g --no-fund --no-audit --no-progress \
-        @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
+RUN npm install -g --no-fund --no-audit --no-progress --ignore-scripts \
+        "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
  && claude --version | grep "${CLAUDE_CODE_VERSION}" >/dev/null \
  && echo "verified claude-code ${CLAUDE_CODE_VERSION}"
 
@@ -28,5 +28,12 @@ COPY --from=install /usr/local/bin/claude /usr/local/bin/claude
 
 # Sanity check at image-build time.
 RUN claude --version
+
+# Drop root: node:22-slim ships a non-root `node` user (uid 1000). The
+# chat container is ephemeral, has no writable mounts, and only ever
+# runs `claude` against MCP-exposed read-only tools — running as the
+# pre-existing `node` user is the minimum-privilege baseline.
+USER node
+WORKDIR /home/node
 
 ENTRYPOINT ["/usr/local/bin/claude"]

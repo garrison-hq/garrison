@@ -92,13 +92,38 @@ func (w *Worker) HandleMessage(ctx context.Context, operatorMessageID pgtype.UUI
 	}
 
 	// Step 5 — assemble transcript from prior rows + current operator content.
-	prior, err := q.GetSessionTranscript(ctx, opRow.SessionID)
+	transcript, err := w.buildTranscript(ctx, opRow, asstRow.ID)
 	if err != nil {
-		writeAssistantError(ctx, w.Deps, asstRow.ID, ErrorClaudeRuntimeError)
-		return fmt.Errorf("worker: load transcript: %w", err)
+		return err
 	}
-	// Drop the current operator's row from the prior set — it'll be
-	// appended via AssembleTranscript's currentOperatorContent arg.
+
+	// Step 6 — spawn the turn.
+	if err := w.Deps.SpawnTurn(ctx, opRow.SessionID, asstRow.ID, transcript, w.Mempalace, w.SupervisorBin, w.AgentRoDSN); err != nil {
+		// SpawnTurn already terminal-wrote the assistant row on its
+		// failure paths; just log + return so the listener moves on.
+		w.Deps.Logger.Warn("chat: SpawnTurn failed",
+			"session_id", uuidString(opRow.SessionID),
+			"message_id", uuidString(asstRow.ID),
+			"err", err)
+	}
+	return nil
+}
+
+// buildTranscript loads the prior transcript for the operator's session,
+// removes the operator row itself (it's appended via the
+// AssembleTranscript currentOperatorContent arg), and returns the
+// assembled transcript. On any failure it terminal-writes the assistant
+// row with ErrorClaudeRuntimeError so the dashboard surfaces a kind.
+func (w *Worker) buildTranscript(
+	ctx context.Context,
+	opRow store.GetSessionTranscriptRow,
+	assistantRowID pgtype.UUID,
+) ([]byte, error) {
+	prior, err := w.Deps.Queries.GetSessionTranscript(ctx, opRow.SessionID)
+	if err != nil {
+		writeAssistantError(ctx, w.Deps, assistantRowID, ErrorClaudeRuntimeError)
+		return nil, fmt.Errorf("worker: load transcript: %w", err)
+	}
 	currentText := ""
 	if opRow.Content != nil {
 		currentText = *opRow.Content
@@ -112,20 +137,10 @@ func (w *Worker) HandleMessage(ctx context.Context, operatorMessageID pgtype.UUI
 	}
 	transcript, err := AssembleTranscript(priorWithoutCurrent, currentText)
 	if err != nil {
-		writeAssistantError(ctx, w.Deps, asstRow.ID, ErrorClaudeRuntimeError)
-		return fmt.Errorf("worker: assemble transcript: %w", err)
+		writeAssistantError(ctx, w.Deps, assistantRowID, ErrorClaudeRuntimeError)
+		return nil, fmt.Errorf("worker: assemble transcript: %w", err)
 	}
-
-	// Step 6 — spawn the turn.
-	if err := w.Deps.SpawnTurn(ctx, opRow.SessionID, asstRow.ID, transcript, w.Mempalace, w.SupervisorBin, w.AgentRoDSN); err != nil {
-		// SpawnTurn already terminal-wrote the assistant row on its
-		// failure paths; just log + return so the listener moves on.
-		w.Deps.Logger.Warn("chat: SpawnTurn failed",
-			"session_id", uuidString(opRow.SessionID),
-			"message_id", uuidString(asstRow.ID),
-			"err", err)
-	}
-	return nil
+	return transcript, nil
 }
 
 // findOperatorMessage scans the session's transcript for the row id.
