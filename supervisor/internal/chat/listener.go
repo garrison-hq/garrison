@@ -12,20 +12,48 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// RunListener LISTENs on chat.message.sent, dispatches each notify to a
-// per-message worker goroutine, and returns when ctx cancels (or on
-// non-recoverable connection failure). The listener owns a dedicated
-// pgx.Conn (LISTEN is connection-scoped); on connection drop it
-// returns the error to the caller's errgroup — the supervisor restart
-// is the recovery primitive.
+// RunListener LISTENs on chat.message.sent and dispatches each notify
+// to a per-message worker goroutine. Reconnects on transient pgx errors
+// with exponential backoff (100ms → 30s cap), matching the hygiene/events
+// listener pattern — a Postgres backend drop must not cascade-kill the
+// supervisor.
 //
-// Per-message dispatch joins a child errgroup so SIGTERM cascades:
-// in-flight workers complete (subject to TerminalWriteGrace) before
-// RunListener returns.
+// Per-message dispatch joins a child errgroup scoped to the lifetime of
+// each LISTEN cycle, so SIGTERM cascades cleanly: in-flight workers
+// complete (subject to TerminalWriteGrace) before RunListener returns.
 func RunListener(ctx context.Context, deps Deps, worker *Worker) error {
 	if deps.Pool == nil {
 		return errors.New("chat: RunListener: nil pool")
 	}
+	backoff := 100 * time.Millisecond
+	const maxBackoff = 30 * time.Second
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil
+		}
+		err := runChatListenCycle(ctx, deps, worker)
+		if ctx.Err() != nil {
+			return nil
+		}
+		deps.Logger.Warn("chat: listener lost connection; reconnecting",
+			"err", err, "backoff", backoff)
+		if sleepCtx(ctx, backoff) != nil {
+			return nil
+		}
+		if backoff < maxBackoff {
+			backoff *= 2
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+		}
+	}
+}
+
+// runChatListenCycle acquires a conn, issues LISTEN, and dispatches
+// notifications until the conn dies or ctx cancels. Returns nil on
+// ctx-cancel and a wrapped error on any other failure (so the caller
+// can reconnect).
+func runChatListenCycle(ctx context.Context, deps Deps, worker *Worker) error {
 	conn, err := deps.Pool.Acquire(ctx)
 	if err != nil {
 		return fmt.Errorf("chat: listener acquire: %w", err)
@@ -52,6 +80,22 @@ func RunListener(ctx context.Context, deps Deps, worker *Worker) error {
 		g.Go(func() error {
 			return dispatchNotify(gctx, deps, worker, payload)
 		})
+	}
+}
+
+// sleepCtx sleeps for d or until ctx is cancelled. Returns ctx.Err() on
+// cancel and nil otherwise.
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return nil
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
 	}
 }
 
