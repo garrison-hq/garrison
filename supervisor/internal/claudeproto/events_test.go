@@ -15,6 +15,7 @@ type captureRouter struct {
 	user        *UserEvent
 	rateLimit   *RateLimitEvent
 	result      *ResultEvent
+	streamEvent *StreamEvent
 	taskStarted *TaskStartedEvent
 	unknown     *UnknownEvent
 }
@@ -39,6 +40,10 @@ func (r *captureRouter) OnRateLimit(_ context.Context, e RateLimitEvent) {
 func (r *captureRouter) OnResult(_ context.Context, e ResultEvent) {
 	r.calls = append(r.calls, "result")
 	r.result = &e
+}
+func (r *captureRouter) OnStreamEvent(_ context.Context, e StreamEvent) {
+	r.calls = append(r.calls, "stream_event")
+	r.streamEvent = &e
 }
 func (r *captureRouter) OnTaskStarted(_ context.Context, e TaskStartedEvent) {
 	r.calls = append(r.calls, "task_started")
@@ -364,5 +369,85 @@ func TestAssistantEventToolUses(t *testing.T) {
 	// InputRaw preserved as json.RawMessage for downstream processing.
 	if len(a.ToolUses[0].InputRaw) == 0 {
 		t.Errorf("ToolUses[0].InputRaw is empty")
+	}
+}
+
+// TestRouter_OnStreamEvent_TextDelta feeds a captured content_block_delta
+// stream_event line and asserts OnStreamEvent fires with the expected
+// inner type, delta type, and text payload populated. Pre-M5.1 the line
+// would have routed to OnUnknown.
+func TestRouter_OnStreamEvent_TextDelta(t *testing.T) {
+	raw := []byte(`{"type":"stream_event","session_id":"sid-1","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Purple."}},"uuid":"u-1"}`)
+	r := &captureRouter{initAction: RouterActionContinue}
+	act, err := Route(context.Background(), raw, r)
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if act != RouterActionContinue {
+		t.Errorf("act = %v, want Continue", act)
+	}
+	if r.streamEvent == nil {
+		t.Fatal("OnStreamEvent did not fire")
+	}
+	e := *r.streamEvent
+	if e.SessionID != "sid-1" {
+		t.Errorf("SessionID=%q", e.SessionID)
+	}
+	if e.InnerType != "content_block_delta" {
+		t.Errorf("InnerType=%q", e.InnerType)
+	}
+	if e.Inner.DeltaType != "text_delta" {
+		t.Errorf("DeltaType=%q", e.Inner.DeltaType)
+	}
+	if e.Inner.DeltaText != "Purple." {
+		t.Errorf("DeltaText=%q", e.Inner.DeltaText)
+	}
+}
+
+// TestRouter_OnStreamEvent_MessageStartCacheTokens covers the SC-002
+// cache-token signal: cache_creation_input_tokens + cache_read_input_
+// tokens populate from event.message.usage.
+func TestRouter_OnStreamEvent_MessageStartCacheTokens(t *testing.T) {
+	raw := []byte(`{"type":"stream_event","session_id":"sid-2","event":{"type":"message_start","message":{"id":"msg_x","model":"claude-sonnet-4-6","role":"assistant","content":[],"usage":{"input_tokens":3,"cache_creation_input_tokens":774,"cache_read_input_tokens":14249,"output_tokens":1}}},"uuid":"u-2"}`)
+	r := &captureRouter{initAction: RouterActionContinue}
+	if _, err := Route(context.Background(), raw, r); err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if r.streamEvent == nil {
+		t.Fatal("OnStreamEvent did not fire")
+	}
+	e := *r.streamEvent
+	if e.InnerType != "message_start" {
+		t.Errorf("InnerType=%q", e.InnerType)
+	}
+	if e.Inner.InputTokens != 3 {
+		t.Errorf("InputTokens=%d", e.Inner.InputTokens)
+	}
+	if e.Inner.OutputTokens != 1 {
+		t.Errorf("OutputTokens=%d", e.Inner.OutputTokens)
+	}
+	if e.Inner.CacheReadInput != 14249 {
+		t.Errorf("CacheReadInput=%d", e.Inner.CacheReadInput)
+	}
+	if e.Inner.CacheCreationInput != 774 {
+		t.Errorf("CacheCreationInput=%d", e.Inner.CacheCreationInput)
+	}
+}
+
+// TestRouter_OnStreamEvent_MalformedReturnsBail covers the parse-error
+// path: a malformed stream_event line returns (RouterActionBail, error)
+// rather than routing through to OnStreamEvent.
+func TestRouter_OnStreamEvent_MalformedReturnsBail(t *testing.T) {
+	raw := []byte(`{"type":"stream_event","event":{not valid json}}`)
+	r := &captureRouter{initAction: RouterActionContinue}
+	act, err := Route(context.Background(), raw, r)
+	if err == nil {
+		t.Fatal("Route: want error from malformed JSON, got nil")
+	}
+	if act != RouterActionBail {
+		t.Errorf("act = %v, want Bail", act)
+	}
+	if r.streamEvent != nil {
+		t.Errorf("OnStreamEvent should NOT fire on malformed lines")
 	}
 }

@@ -528,9 +528,104 @@ Surface the gap by checking the supervisor's logs for the
 
 ---
 
+## M5.1 — chat backend (CEO chat, read-only)
+
+The supervisor gains a per-message Claude Code subprocess runtime
+authenticated via the operator's `CLAUDE_CODE_OAUTH_TOKEN` (billed
+against the operator's claude.ai account, not Anthropic API credits).
+Read-only: no mutation MCP tools mount; chat-driven mutations are
+M5.3+ behind a separate threat-model amendment.
+
+### One-time setup at deploy
+
+1. **Build the chat container images** before `compose up -d`:
+   ```sh
+   cd supervisor
+   make chat-image            # → garrison-claude:m5
+   make mockclaude-chat-image # → garrison-mockclaude:m5 (for CI / dev only)
+   ```
+   `garrison-claude:m5` ships the pinned `@anthropic-ai/claude-code@2.1.86`
+   on `node:22-slim`. The supervisor's docker-compose.yml does NOT
+   build these images — production deploy invokes the make targets.
+
+2. **Verify the docker-proxy `CREATE` flag is in place**:
+   ```sh
+   docker exec garrison-docker-proxy env | grep CREATE
+   # Expected: CREATE=1
+   ```
+   Without the `CREATE=1` flag the supervisor cannot spawn chat
+   containers (the proxy refuses `POST /containers/create`).
+
+3. **Seed `CLAUDE_CODE_OAUTH_TOKEN` into Infisical** via the M4 vault
+   create flow at the M5.1 path convention:
+   ```
+   /<customer_id>/operator/CLAUDE_CODE_OAUTH_TOKEN
+   ```
+   Use the dashboard's `/vault/new` surface — same UX as any other
+   secret. The `<customer_id>` segment is your supervisor's
+   `cfg.CustomerID` value (single-tenant, one per Garrison install).
+   The token format is `sk-ant-oat01...` (108 chars) — extract from
+   `~/.claude/` after `claude` runs once on a workstation, or
+   acquire via Anthropic's OAuth-token issuance flow.
+
+### Environment variables
+
+All seven are optional with sensible defaults; override in Coolify
+(or the equivalent prod env-var surface) only when needed:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `GARRISON_CHAT_CONTAINER_IMAGE` | `garrison-claude:m5` | Image the supervisor spawns per chat message; CI overrides to `garrison-mockclaude:m5` |
+| `GARRISON_CHAT_TURN_TIMEOUT` | `5m` | Per-turn wall-clock cap; SIGTERM the docker subprocess on overrun |
+| `GARRISON_CHAT_SESSION_IDLE_TIMEOUT` | `30m` | Sessions idle for this long get marked `ended`; subsequent operator messages rejected with `error_kind='session_ended'` |
+| `GARRISON_CHAT_SESSION_COST_CAP_USD` | `1.00` | Soft per-session cost cap; reactive check (refuses next turn when running total ≥ cap) |
+| `GARRISON_CHAT_OAUTH_VAULT_PATH` | `/operator/CLAUDE_CODE_OAUTH_TOKEN` | Vault path SUFFIX (the `/<customer_id>/` prefix is composed by the supervisor) |
+| `GARRISON_CHAT_DOCKER_NETWORK` | `garrison-net` | Compose network the chat container joins; needs DNS reachability to postgres + mempalace |
+| `GARRISON_CHAT_DEFAULT_MODEL` | `claude-sonnet-4-6` | `--model` flag passed to claude |
+
+### Token rotation
+
+OAuth tokens expire. To rotate:
+
+1. Acquire a fresh token (e.g. `claude` re-auth on a workstation +
+   extract from `~/.claude/`).
+2. Use the dashboard's `/vault/edit/<path>/CLAUDE_CODE_OAUTH_TOKEN`
+   to replace the value. The M4 server action writes the audit
+   row + bumps `secret_metadata.last_rotated_at`.
+3. **No supervisor restart needed.** The chat path fetches the
+   token per-message, so the next chat-message spawn picks up the
+   new value automatically. (FR-005 contract.)
+
+### Monitoring
+
+- **Per-turn duration**: `chat_messages.raw_event_envelope ->> 'result' ->> 'duration_ms'` (read from the JSONB envelope of the stored result event).
+- **Per-session running cost**: `chat_sessions.total_cost_usd`. Compare against `GARRISON_CHAT_SESSION_COST_CAP_USD`.
+- **Audit trail**: `vault_access_log WHERE metadata ->> 'actor' = 'supervisor_chat'` shows every token reveal; `event_outbox WHERE channel LIKE 'work.chat.%'` shows session lifecycle events.
+- **In-flight count**: `SELECT count(*) FROM chat_messages WHERE status IN ('pending', 'streaming')` — typically 0 or 1 single-operator.
+
+### Restart sweep + idle sweep
+
+Both run automatically on supervisor boot / on a 60s ticker:
+
+- **Restart sweep** (FR-083, runs once at boot before LISTEN starts): marks any `pending`/`streaming` chat_messages older than 60s as `aborted` with `error_kind='supervisor_restart'`; rolls their parent sessions to `aborted`. Catches mid-turn supervisor crashes.
+- **Idle sweep** (FR-081, 60s ticker): marks active sessions whose newest message is older than `GARRISON_CHAT_SESSION_IDLE_TIMEOUT` as `ended`; emits `pg_notify('work.chat.session_ended', ...)` for the dashboard's activity feed.
+
+No operator action required for either — they self-manage on the same compose stack.
+
+### Failure modes the operator will see
+
+- `error_kind='token_not_found'`: Infisical doesn't have a value at the M5.1 path. Operator action: re-seed via `/vault/new`.
+- `error_kind='token_expired'`: token rejected by Anthropic. Operator action: rotate via `/vault/edit`.
+- `error_kind='vault_unavailable'`: Infisical is down. Operator action: restart the Infisical service / check health.
+- `error_kind='session_cost_cap_reached'`: running cost >= cap. Operator action: start a new session or raise the cap.
+- `error_kind='session_ended'`: session timed out. Operator action: start a new session.
+- `error_kind='turn_timeout'`: turn exceeded `GARRISON_CHAT_TURN_TIMEOUT`. Operator action: investigate (rare — usually means claude is hung; the next turn will spawn fresh).
+
 ## Changelog
 
+- **2026-04-28**: M5.1 chat backend deployment section added (per-message ephemeral chat containers, OAuth token vault seeding, 7 GARRISON_CHAT_* env vars, restart + idle sweeps).
 - **2026-04-27**: M4 dashboard mutations deployment section added (4 migrations, dashboard ML activation, supervisor restart for the cache invalidator).
 - **2026-04-26**: M3 dashboard deployment section added.
 - **2026-04-24**: M2.3 Infisical deployment section added.
 - **2026-04-22**: Initial version. M2.1's `garrison_agent_ro` password discipline codified. M2.2 and M2.3 sections sketched based on planned milestone designs.
+---

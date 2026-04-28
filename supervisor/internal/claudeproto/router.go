@@ -34,6 +34,7 @@ type Router interface {
 	OnUser(ctx context.Context, e UserEvent)
 	OnRateLimit(ctx context.Context, e RateLimitEvent)
 	OnResult(ctx context.Context, e ResultEvent)
+	OnStreamEvent(ctx context.Context, e StreamEvent)
 	OnTaskStarted(ctx context.Context, e TaskStartedEvent)
 	OnUnknown(ctx context.Context, e UnknownEvent)
 }
@@ -70,6 +71,8 @@ func Route(ctx context.Context, raw []byte, r Router) (RouterAction, error) {
 		return routeRateLimit(ctx, raw, r)
 	case "result":
 		return routeResult(ctx, raw, r)
+	case "stream_event":
+		return routeStreamEvent(ctx, raw, r)
 	default:
 		r.OnUnknown(ctx, UnknownEvent{Type: env.Type, Subtype: env.Subtype, Raw: raw})
 		return RouterActionContinue, nil
@@ -119,6 +122,94 @@ func routeRateLimit(ctx context.Context, raw []byte, r Router) (RouterAction, er
 	}
 	e.Raw = raw
 	r.OnRateLimit(ctx, e)
+	return RouterActionContinue, nil
+}
+
+// streamEventWire mirrors the JSON shape of one Claude stream_event
+// line. The inner `event.type` discriminates shape (delta, message,
+// message_delta, etc.); fields not carried by a given shape stay
+// zero-value after decode.
+type streamEventWire struct {
+	SessionID string               `json:"session_id"`
+	Event     streamEventInnerWire `json:"event"`
+}
+
+type streamEventInnerWire struct {
+	Type       string                    `json:"type"`
+	Index      int                       `json:"index"`
+	Delta      streamEventDeltaWire      `json:"delta"`
+	Message    streamEventMessageWire    `json:"message"`
+	DeltaUsage streamEventDeltaUsageWire `json:"-"` // not used; reserved
+	StopReason string                    `json:"stop_reason"`
+}
+
+type streamEventDeltaWire struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+type streamEventMessageWire struct {
+	Usage streamEventUsageWire `json:"usage"`
+}
+
+type streamEventUsageWire struct {
+	InputTokens              int `json:"input_tokens"`
+	OutputTokens             int `json:"output_tokens"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+}
+
+type streamEventDeltaUsageWire struct {
+	InputTokens  int `json:"input_tokens"`
+	OutputTokens int `json:"output_tokens"`
+}
+
+// messageDeltaUsageWire is decoded as a second pass for stream_event
+// lines whose `event.type == "message_delta"` — those carry usage at
+// event.usage rather than event.message.usage.
+type messageDeltaUsageWire struct {
+	Event messageDeltaEventWire `json:"event"`
+}
+
+type messageDeltaEventWire struct {
+	Usage streamEventDeltaUsageWire `json:"usage"`
+}
+
+func routeStreamEvent(ctx context.Context, raw []byte, r Router) (RouterAction, error) {
+	var wire streamEventWire
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		return RouterActionBail, fmt.Errorf("claudeproto: decode stream_event: %w", err)
+	}
+
+	var msgDeltaWire messageDeltaUsageWire
+	_ = json.Unmarshal(raw, &msgDeltaWire)
+
+	e := StreamEvent{
+		SessionID: wire.SessionID,
+		InnerType: wire.Event.Type,
+		Raw:       raw,
+		Inner: StreamInner{
+			Index:              wire.Event.Index,
+			DeltaType:          wire.Event.Delta.Type,
+			DeltaText:          wire.Event.Delta.Text,
+			StopReason:         wire.Event.StopReason,
+			InputTokens:        wire.Event.Message.Usage.InputTokens,
+			OutputTokens:       wire.Event.Message.Usage.OutputTokens,
+			CacheReadInput:     wire.Event.Message.Usage.CacheReadInputTokens,
+			CacheCreationInput: wire.Event.Message.Usage.CacheCreationInputTokens,
+		},
+	}
+
+	// message_delta's usage lives at event.usage rather than
+	// event.message.usage; merge in if not already populated.
+	if e.Inner.OutputTokens == 0 && msgDeltaWire.Event.Usage.OutputTokens > 0 {
+		e.Inner.OutputTokens = msgDeltaWire.Event.Usage.OutputTokens
+	}
+	if e.Inner.InputTokens == 0 && msgDeltaWire.Event.Usage.InputTokens > 0 {
+		e.Inner.InputTokens = msgDeltaWire.Event.Usage.InputTokens
+	}
+
+	r.OnStreamEvent(ctx, e)
 	return RouterActionContinue, nil
 }
 

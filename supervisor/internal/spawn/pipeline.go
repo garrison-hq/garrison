@@ -98,16 +98,44 @@ type FinalizeState struct {
 	CapExhausted bool // 3rd failed attempt reached; SIGTERM queued by counter
 }
 
-// pipelineRouter implements claudeproto.Router and streams observations
-// into a captured Result. It performs no I/O of its own beyond slog lines;
-// the bail side effect (killProcessGroup) is delegated to the caller via
-// the onBail callback that Run owns.
+// Policy abstracts pipeline.Run's lifecycle hooks so the finalize-shaped
+// (existing M2.2.1+) and chat-shaped (M5.1+) flows can share the scanner
+// loop without forking it. Embeds claudeproto.Router; OnTerminate is the
+// new hook Run calls on parse error / read error / bail.
 //
-// M2.2 extension: pipelineRouter maintains an in-flight map of
-// tool_use_id → tool_name for mempalace_* tool calls so the subsequent
-// tool_result event can be logged as a follow-up pair. Observational only
-// (FR-218a); no dispatch consequence.
-type pipelineRouter struct {
+// Result returns whatever the policy considers the canonical "scan
+// summary" — for FinalizePolicy it's the accumulated Result struct
+// spawn.go's Adjudicate consumes; for ChatPolicy it's a zero Result
+// because chat has its own terminal-write path (chat_messages row
+// commit) and doesn't use Adjudicate.
+type Policy interface {
+	claudeproto.Router
+	// OnTerminate is invoked once when Run is about to return because of
+	// a parse error, scanner read error, or RouterActionBail from a
+	// previous event. reason is one of:
+	//   "parse_error" — claudeproto.Route returned a non-nil error
+	//   "bail"        — a router method returned RouterActionBail
+	// The policy decides what to do (FinalizePolicy invokes its onBail
+	// closure with a derived exit_reason; ChatPolicy terminal-writes
+	// the assistant chat_messages row).
+	OnTerminate(ctx context.Context, reason string)
+	// Result returns the accumulated scan summary the caller asked for.
+	// FinalizePolicy returns its tracked Result; ChatPolicy returns a
+	// zero Result.
+	Result() Result
+}
+
+// FinalizePolicy is the M2.2.1+ Router/Policy implementation: streams
+// observations into a captured Result, dispatches mempalace_* and
+// finalize_ticket tool_use/tool_result pairs, and (when configured)
+// invokes the WriteFinalize commit callback on the first ok=true
+// finalize tool_result.
+//
+// Renamed from FinalizePolicy in M5.1 to make space for ChatPolicy
+// alongside it; the struct and all methods are byte-for-byte the M2.2.1
+// implementation, just promoted from package-private to package-exported
+// so chat can reference the type assertion.
+type FinalizePolicy struct {
 	logger     *slog.Logger
 	instanceID pgtype.UUID
 	ticketID   pgtype.UUID
@@ -128,6 +156,14 @@ type pipelineRouter struct {
 	// OnUser can distinguish finalize tool_results from mempalace_* and
 	// other tool_results.
 	finalizeToolUse map[string]struct{}
+
+	// bailFn is the supervisor's killProcessGroup closure (or a
+	// counter-driven SIGTERM closure for finalize cap exhaustion).
+	// Stored at the policy level (not just finalizeHook) so OnTerminate
+	// can invoke it for non-finalize roles too. Pre-M5.1 the same
+	// closure was passed as a separate Run() parameter; the Policy
+	// refactor consolidates lifecycle state into the policy struct.
+	bailFn func(reason string)
 }
 
 // finalizeHook is the internal wiring for T006/T007. It bundles the
@@ -185,7 +221,7 @@ func isMempalaceToolName(name string) bool {
 	return len(name) >= len(bare) && name[:len(bare)] == bare
 }
 
-func (p *pipelineRouter) OnInit(_ context.Context, e claudeproto.InitEvent) claudeproto.RouterAction {
+func (p *FinalizePolicy) OnInit(_ context.Context, e claudeproto.InitEvent) claudeproto.RouterAction {
 	healthy, offender, status := claudeproto.CheckMCPHealth(e.MCPServers)
 	if !healthy {
 		p.result.MCPBailed = true
@@ -209,7 +245,7 @@ func (p *pipelineRouter) OnInit(_ context.Context, e claudeproto.InitEvent) clau
 	return claudeproto.RouterActionContinue
 }
 
-func (p *pipelineRouter) OnAssistant(_ context.Context, e claudeproto.AssistantEvent) {
+func (p *FinalizePolicy) OnAssistant(_ context.Context, e claudeproto.AssistantEvent) {
 	p.result.AssistantSeen = true
 	p.logger.Info("claude assistant event",
 		"instance_id", uuidString(p.instanceID),
@@ -233,7 +269,7 @@ func (p *pipelineRouter) OnAssistant(_ context.Context, e claudeproto.AssistantE
 // recordMempalaceToolUse logs a pending mempalace_* tool_use and tracks
 // its tool_use_id so OnUser can pair the matching tool_result. Pure
 // observational path per FR-218a.
-func (p *pipelineRouter) recordMempalaceToolUse(tu claudeproto.ToolUseBlock) {
+func (p *FinalizePolicy) recordMempalaceToolUse(tu claudeproto.ToolUseBlock) {
 	if p.mempalaceToolUse == nil {
 		p.mempalaceToolUse = make(map[string]string, 4)
 	}
@@ -253,7 +289,7 @@ func (p *pipelineRouter) recordMempalaceToolUse(tu claudeproto.ToolUseBlock) {
 // tool_use without a tool_result is incomplete and should not consume an
 // attempt per plan §"Subsystem state machines > Finalize attempt state
 // machine".
-func (p *pipelineRouter) recordFinalizeToolUse(tu claudeproto.ToolUseBlock) {
+func (p *FinalizePolicy) recordFinalizeToolUse(tu claudeproto.ToolUseBlock) {
 	if p.finalizeToolUse == nil {
 		p.finalizeToolUse = make(map[string]struct{}, 4)
 	}
@@ -282,7 +318,7 @@ func (p *pipelineRouter) recordFinalizeToolUse(tu claudeproto.ToolUseBlock) {
 	}
 }
 
-func (p *pipelineRouter) OnUser(_ context.Context, e claudeproto.UserEvent) {
+func (p *FinalizePolicy) OnUser(_ context.Context, e claudeproto.UserEvent) {
 	for _, tr := range e.ToolResults {
 		// FR-218 follow-up: resolve outcome for any pending mempalace_*
 		// tool_use in the in-flight map. Observational; log then clear.
@@ -330,7 +366,7 @@ func (p *pipelineRouter) OnUser(_ context.Context, e claudeproto.UserEvent) {
 //   - any ok value post-commit: log-only (no counter tick, no bail)
 //
 // Unparseable envelopes are logged and treated as failed attempts.
-func (p *pipelineRouter) handleFinalizeToolResult(tr claudeproto.ToolResultSummary) {
+func (p *FinalizePolicy) handleFinalizeToolResult(tr claudeproto.ToolResultSummary) {
 	if p.finalize == nil || p.finalize.state == nil {
 		return
 	}
@@ -401,7 +437,7 @@ func (p *pipelineRouter) handleFinalizeToolResult(tr claudeproto.ToolResultSumma
 	}
 }
 
-func (p *pipelineRouter) OnRateLimit(_ context.Context, e claudeproto.RateLimitEvent) {
+func (p *FinalizePolicy) OnRateLimit(_ context.Context, e claudeproto.RateLimitEvent) {
 	p.logger.Warn("claude rate_limit_event",
 		"instance_id", uuidString(p.instanceID),
 		"session_id", e.SessionID,
@@ -414,7 +450,7 @@ func (p *pipelineRouter) OnRateLimit(_ context.Context, e claudeproto.RateLimitE
 		"surpassed_threshold", e.Info.SurpassedThreshold)
 }
 
-func (p *pipelineRouter) OnResult(_ context.Context, e claudeproto.ResultEvent) {
+func (p *FinalizePolicy) OnResult(_ context.Context, e claudeproto.ResultEvent) {
 	p.result.ResultSeen = true
 	p.result.IsError = e.IsError
 	p.result.TerminalReason = e.TerminalReason
@@ -431,12 +467,12 @@ func (p *pipelineRouter) OnResult(_ context.Context, e claudeproto.ResultEvent) 
 		"permission_denials", e.PermissionDenials)
 }
 
-func (p *pipelineRouter) OnTaskStarted(_ context.Context, _ claudeproto.TaskStartedEvent) {
+func (p *FinalizePolicy) OnTaskStarted(_ context.Context, _ claudeproto.TaskStartedEvent) {
 	p.logger.Debug("claude task_started",
 		"instance_id", uuidString(p.instanceID))
 }
 
-func (p *pipelineRouter) OnUnknown(_ context.Context, e claudeproto.UnknownEvent) {
+func (p *FinalizePolicy) OnUnknown(_ context.Context, e claudeproto.UnknownEvent) {
 	p.logger.Warn("claude unknown event",
 		"instance_id", uuidString(p.instanceID),
 		"type", e.Type,
@@ -444,29 +480,99 @@ func (p *pipelineRouter) OnUnknown(_ context.Context, e claudeproto.UnknownEvent
 		"raw", string(e.Raw))
 }
 
-// Run consumes Claude's stream-json stdout line by line, dispatches each
-// event through claudeproto.Route, and accumulates a Result until EOF or
-// a bail. When Route returns RouterActionBail or a parse error, Run calls
-// onBail(reason) — the caller installs the killProcessGroup closure there
-// — then finishes draining its current buffer and returns. Run does not
-// close stdout; the caller owns the Pipe lifecycle.
+// OnStreamEvent is a no-op for finalize-shaped flows. Pre-M5.1
+// stream_event lines (produced when --include-partial-messages is
+// passed) routed to OnUnknown; the M2.x ticket-spawn path doesn't
+// pass that flag and so never sees them. M5.1 chat invocations DO
+// pass the flag — ChatPolicy.OnStreamEvent (internal/chat/policy.go)
+// is the consumer that aggregates text_delta events into per-batch
+// pg_notify deltas. FinalizePolicy ignores the events explicitly so
+// that if a future ticket-spawn path ever passes the flag, the
+// behaviour is "stream_event observed, no side effect" rather than
+// "logged at warn via OnUnknown."
+func (p *FinalizePolicy) OnStreamEvent(_ context.Context, _ claudeproto.StreamEvent) {
+	// observational only; no side effects for finalize flows
+}
+
+// OnTerminate is the Policy hook Run calls when the scanner stops
+// because of a parse error or RouterActionBail. The reason argument is
+// either "parse_error" or "bail"; FinalizePolicy translates that into
+// the legacy spawn.go onBail-closure call with the appropriate
+// exit_reason string (parse_error → ExitParseError, bail → either the
+// MCP-formatted reason or the generic "bail" depending on what state
+// OnInit recorded).
 //
-// ctx is not used for cancelling the read (cmd.Wait handles that once the
-// process exits); it is threaded through to Route for future extensions.
+// Existing M2.x callers wired Run to set result.ParseError directly;
+// after the M5.1 Policy refactor, Run delegates that side effect to the
+// policy via this method so chat-shaped policies can do their own
+// terminal write instead.
+func (p *FinalizePolicy) OnTerminate(_ context.Context, reason string) {
+	switch reason {
+	case "parse_error":
+		p.result.ParseError = true
+		if p.bailFn != nil {
+			p.bailFn(ExitParseError)
+		}
+	case "bail":
+		if p.bailFn == nil {
+			return
+		}
+		// MCPBailed was set by OnInit; format the reason here so the
+		// outer onBail closure sees the same exit_reason the M2.1
+		// dispatchStreamLine used to format inline.
+		if p.result.MCPBailed {
+			p.bailFn(FormatMCPFailure(p.result.MCPOffenderName, p.result.MCPOffenderStatus))
+			return
+		}
+		p.bailFn("bail")
+	}
+}
+
+// Result exposes the accumulated Result for spawn.go's Adjudicate
+// caller. Returns by value so the caller can't accidentally mutate
+// the policy's internal pointer.
+func (p *FinalizePolicy) Result() Result {
+	if p.result == nil {
+		return Result{}
+	}
+	return *p.result
+}
+
+// Build-time interface conformance assertion: FinalizePolicy satisfies
+// the Policy interface (and therefore claudeproto.Router). M5.1's
+// ChatPolicy adds a second implementer; both share Run.
+var _ Policy = (*FinalizePolicy)(nil)
+
+// Run consumes Claude's stream-json stdout line by line, dispatches each
+// event to the supplied Policy via claudeproto.Route, and returns
+// policy.Result() at EOF (or on the first parse error). When Route
+// returns RouterActionBail or a parse error, Run calls
+// policy.OnTerminate(ctx, reason) — the policy owns translating that
+// into a side effect (FinalizePolicy invokes the killProcessGroup
+// closure it stored on construction; ChatPolicy commits an aborted
+// chat_messages row). Run does not close stdout; the caller owns the
+// Pipe lifecycle.
+//
+// M5.1 Policy refactor: pre-M5.1 the (instanceID, ticketID, finalize,
+// onBail) arguments lived on Run's signature; they're now consolidated
+// into the FinalizePolicy struct so a second policy implementation
+// (ChatPolicy in internal/chat/) can carry its own lifecycle state
+// without polluting Run's signature.
+//
+// ctx is not used for cancelling the read (cmd.Wait handles that once
+// the process exits); it is threaded through to Route + OnTerminate.
 func Run(
 	ctx context.Context,
 	stdout io.Reader,
-	instanceID pgtype.UUID,
-	ticketID pgtype.UUID,
+	policy Policy,
 	logger *slog.Logger,
-	onBail func(reason string),
-	finalize FinalizeDeps,
 ) (Result, error) {
 	if logger == nil {
 		return Result{}, errors.New("pipeline: logger is required")
 	}
-	result := Result{}
-	r := newPipelineRouter(logger, instanceID, ticketID, &result, finalize, onBail)
+	if policy == nil {
+		return Result{}, errors.New("pipeline: policy is required")
+	}
 
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64<<10), stdoutBufferMax)
@@ -482,8 +588,8 @@ func Run(
 		buf := make([]byte, len(line))
 		copy(buf, line)
 
-		if err := dispatchStreamLine(ctx, buf, r, &result, instanceID, logger, onBail); err != nil {
-			return result, err
+		if err := dispatchStreamLine(ctx, buf, policy, logger); err != nil {
+			return policy.Result(), err
 		}
 		// On bail we keep draining so we collect any follow-on events the
 		// subprocess may emit before it exits — but stop on the next
@@ -491,29 +597,34 @@ func Run(
 		// the process dies.
 	}
 	if err := scanner.Err(); err != nil && !errors.Is(err, io.EOF) {
-		return result, fmt.Errorf("pipeline: scan: %w", err)
+		return policy.Result(), fmt.Errorf("pipeline: scan: %w", err)
 	}
-	return result, nil
+	return policy.Result(), nil
 }
 
-// newPipelineRouter constructs the *pipelineRouter the scanner loop
-// dispatches into, including wiring the finalize observer when the role
-// expects finalize. finalize.State must be non-nil so spawn.go's
-// Adjudicate call can read the populated state after Run returns.
-// OnBail defaults to the outer onBail so the counter-driven
-// cap-exhaustion path reuses the same SIGTERM infra as MCP-bail.
-func newPipelineRouter(
+// NewFinalizePolicy constructs the FinalizePolicy the scanner loop
+// dispatches into for ticket-execution flows. finalize.State must be
+// non-nil so spawn.go's Adjudicate call can read the populated fields
+// after Run returns. onBail is the supervisor's killProcessGroup
+// closure (or counter-driven SIGTERM for cap exhaustion); the
+// finalize-cap-exhaustion path also reuses it via finalizeHook.onBail.
+//
+// Renamed from newPipelineRouter in M5.1 + signature surfaces the
+// *Result pointer publicly so callers can construct the result-tracking
+// state alongside the policy.
+func NewFinalizePolicy(
 	logger *slog.Logger,
 	instanceID, ticketID pgtype.UUID,
 	result *Result,
 	finalize FinalizeDeps,
 	onBail func(reason string),
-) *pipelineRouter {
-	r := &pipelineRouter{
+) *FinalizePolicy {
+	r := &FinalizePolicy{
 		logger:     logger,
 		instanceID: instanceID,
 		ticketID:   ticketID,
 		result:     result,
+		bailFn:     onBail,
 	}
 	if finalize.Expected && finalize.State != nil {
 		r.finalize = &finalizeHook{
@@ -526,37 +637,26 @@ func newPipelineRouter(
 	return r
 }
 
-// dispatchStreamLine routes one stream-json line through claudeproto and
-// invokes onBail with the appropriate reason on parse error or bail.
-// Returns a non-nil error only on parse failure; bail signals fall
-// through so the scanner keeps draining.
+// dispatchStreamLine routes one stream-json line through claudeproto
+// and invokes policy.OnTerminate with the appropriate reason on parse
+// error or bail. Returns a non-nil error only on parse failure; bail
+// signals fall through so the scanner keeps draining.
 func dispatchStreamLine(
 	ctx context.Context,
 	buf []byte,
-	r *pipelineRouter,
-	result *Result,
-	instanceID pgtype.UUID,
+	policy Policy,
 	logger *slog.Logger,
-	onBail func(reason string),
 ) error {
-	action, err := claudeproto.Route(ctx, buf, r)
+	action, err := claudeproto.Route(ctx, buf, policy)
 	if err != nil {
-		result.ParseError = true
 		logger.Error("claude stream parse error; bailing",
-			"instance_id", uuidString(instanceID),
 			"err", err,
 			"line", string(buf))
-		if onBail != nil {
-			onBail("parse_error")
-		}
+		policy.OnTerminate(ctx, "parse_error")
 		return fmt.Errorf("pipeline: %w", err)
 	}
-	if action == claudeproto.RouterActionBail && onBail != nil {
-		reason := "bail"
-		if result.MCPBailed {
-			reason = FormatMCPFailure(result.MCPOffenderName, result.MCPOffenderStatus)
-		}
-		onBail(reason)
+	if action == claudeproto.RouterActionBail {
+		policy.OnTerminate(ctx, "bail")
 	}
 	return nil
 }

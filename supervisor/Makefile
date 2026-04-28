@@ -71,3 +71,14 @@ vet-vaultlog: copy-migrations
 
 clean:
 	rm -rf bin/ migrations/ cmd/supervisor/migrations/
+
+# M5.1 — chat container image. Built out-of-band; the supervisor's
+# docker-compose.yml does NOT build either image — operators (or CI)
+# invoke these targets before `compose up -d`.
+chat-image:
+	docker build -t garrison-claude:m5 -f Dockerfile.claude .
+
+mockclaude-chat-image:
+	docker build -t garrison-mockclaude:m5 -f Dockerfile.mockclaude.chat .
+
+.PHONY: chat-image mockclaude-chat-image

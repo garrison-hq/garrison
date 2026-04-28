@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"os"
 	"time"
+
+	"github.com/garrison-hq/garrison/supervisor/internal/dockerexec"
 )
 
 // Status is the value written to agent_instances.wake_up_status. Permitted
@@ -34,7 +36,7 @@ type WakeupConfig struct {
 	PalacePath         string
 	Timeout            time.Duration // default 2s (NFR-202)
 	Logger             *slog.Logger
-	Exec               DockerExec // injection seam; nil → RealDockerExec
+	Exec               dockerexec.DockerExec // injection seam; nil → dockerexec.RealDockerExec
 }
 
 // Wakeup runs `docker exec <container> mempalace --palace <path> wake-up
@@ -79,7 +81,7 @@ func Wakeup(ctx context.Context, cfg WakeupConfig, wing string) (stdout string, 
 	}
 	exe := cfg.Exec
 	if exe == nil {
-		exe = RealDockerExec{DockerBin: cfg.DockerBin}
+		exe = dockerexec.RealDockerExec{DockerBin: cfg.DockerBin}
 	}
 	logger := cfg.Logger
 	if logger == nil {

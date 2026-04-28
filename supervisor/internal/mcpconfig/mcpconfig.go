@@ -46,6 +46,66 @@ var bannedMCPNamePatterns = []string{"vault", "secret", "infisical"}
 // Infisical at all (spec D4.5 ordering / T013 assertion). Returns
 // ErrVaultMCPBanned wrapping the offending server name, nil if clean.
 // A nil/empty/"{}" input is always clean.
+// BuildChatConfig returns the MCP config JSON for an M5.1 chat-message
+// spawn — exactly two server entries (postgres read-only + mempalace),
+// plus a name-based mutation-server reject (T010 / FR-022 + operator's
+// Q-E decision). The bytes are ready to write to
+// ${MCPConfigDir}/chat-${chat_message_id}.json and bind-mount into the
+// chat container as /etc/garrison/mcp.json (read-only).
+func BuildChatConfig(p ChatConfigParams) ([]byte, error) {
+	if p.SupervisorBin == "" {
+		return nil, errors.New("mcpconfig: BuildChatConfig: SupervisorBin is empty")
+	}
+	if p.AgentRoDSN == "" {
+		return nil, errors.New("mcpconfig: BuildChatConfig: AgentRoDSN is empty")
+	}
+	if !p.Mempalace.enabled() {
+		return nil, errors.New("mcpconfig: BuildChatConfig: mempalace must be enabled for chat")
+	}
+
+	mempalaceCmd, mempalaceArgs, mempalaceEnv := mempalace.MCPServerSpec(mempalace.SpecConfig{
+		DockerBin:          p.Mempalace.DockerBin,
+		MempalaceContainer: p.Mempalace.MempalaceContainer,
+		PalacePath:         p.Mempalace.PalacePath,
+		DockerHost:         p.Mempalace.DockerHost,
+	})
+
+	servers := map[string]mcpServerSpec{
+		"postgres": {
+			Command: p.SupervisorBin,
+			Args:    []string{"mcp-postgres"},
+			Env:     map[string]string{"GARRISON_PGMCP_DSN": p.AgentRoDSN},
+		},
+		"mempalace": {
+			Command: mempalaceCmd,
+			Args:    mempalaceArgs,
+			Env:     mempalaceEnv,
+		},
+	}
+
+	// Name-based reject for would-be mutation servers (FR-022, M5.1
+	// Q-E). The set will broaden to a tool-surface check at M5.3 when
+	// garrison-mutate actually exists.
+	for _, banned := range []string{
+		"garrison-mutate", "mutate",
+		"tickets-write", "agents-write", "vault-write",
+	} {
+		if _, present := servers[banned]; present {
+			return nil, fmt.Errorf("mcpconfig: BuildChatConfig: forbidden server %q", banned)
+		}
+	}
+
+	cfg := mcpConfig{MCPServers: servers}
+	return json.Marshal(cfg)
+}
+
+// ChatConfigParams wires BuildChatConfig.
+type ChatConfigParams struct {
+	SupervisorBin string
+	AgentRoDSN    string
+	Mempalace     MempalaceParams
+}
+
 func CheckExtraServers(extraServersJSON []byte) error {
 	if len(extraServersJSON) == 0 || string(extraServersJSON) == "{}" {
 		return nil

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -28,6 +29,15 @@ func (f *fakeClientExec) Run(ctx context.Context, args []string, stdin io.Reader
 		f.stdins = append(f.stdins, "")
 	}
 	return f.stdout, f.stderr, f.err
+}
+
+func (f *fakeClientExec) RunStream(
+	ctx context.Context,
+	args []string,
+	writeStdin func(stdin io.WriteCloser) error,
+	scanStdout func(stdout io.Reader) error,
+) (*exec.Cmd, error) {
+	return nil, errors.New("fakeClientExec: RunStream not implemented")
 }
 
 // TestAddDrawerIssuesCorrectJSONRPC — M2.2.1 T003: AddDrawer's stdin

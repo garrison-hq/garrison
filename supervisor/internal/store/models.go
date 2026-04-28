@@ -49,6 +49,32 @@ type AgentRoleSecret struct {
 	UpdatedAt  pgtype.Timestamptz
 }
 
+type ChatMessage struct {
+	ID               pgtype.UUID
+	SessionID        pgtype.UUID
+	TurnIndex        int32
+	Role             string
+	Status           string
+	Content          *string
+	TokensInput      *int32
+	TokensOutput     *int32
+	CostUsd          pgtype.Numeric
+	ErrorKind        *string
+	RawEventEnvelope []byte
+	CreatedAt        pgtype.Timestamptz
+	TerminatedAt     pgtype.Timestamptz
+}
+
+type ChatSession struct {
+	ID                 pgtype.UUID
+	StartedByUserID    pgtype.UUID
+	StartedAt          pgtype.Timestamptz
+	EndedAt            pgtype.Timestamptz
+	Status             string
+	TotalCostUsd       pgtype.Numeric
+	ClaudeSessionLabel *string
+}
+
 type Company struct {
 	ID        pgtype.UUID
 	Name      string

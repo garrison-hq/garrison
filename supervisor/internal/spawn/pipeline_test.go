@@ -19,6 +19,18 @@ func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
+// runWithFinalize is a test helper that constructs a FinalizePolicy
+// (the renamed FinalizePolicy) and calls Run with it. Pre-M5.1 tests
+// passed (instanceID, ticketID, finalize, onBail) directly to Run; the
+// Policy refactor moved that state onto the policy struct, so tests
+// either go through this helper or construct the policy explicitly.
+// The instanceID/ticketID arguments are intentionally zero-value here
+// because pipeline_test.go's fixtures don't use them.
+func runWithFinalize(stream io.Reader, onBail func(string), finalize FinalizeDeps) (Result, error) {
+	policy := NewFinalizePolicy(discardLogger(), pgtype.UUID{}, pgtype.UUID{}, &Result{}, finalize, onBail)
+	return Run(context.Background(), stream, policy, discardLogger())
+}
+
 // -------- Adjudicate decision table -------------------------------------
 
 func TestAdjudicateSuccess(t *testing.T) {
@@ -199,7 +211,7 @@ func TestPipelineRunRoutesAllEvents(t *testing.T) {
 		fixtureResult,
 	}, "\n") + "\n"
 
-	r, err := Run(context.Background(), bytes.NewBufferString(stream), pgtype.UUID{}, pgtype.UUID{}, discardLogger(), nil, FinalizeDeps{})
+	r, err := runWithFinalize(bytes.NewBufferString(stream), nil, FinalizeDeps{})
 	if err != nil {
 		t.Fatalf("Run: unexpected error %v", err)
 	}
@@ -229,7 +241,7 @@ func TestPipelineRunRoutesAllEvents(t *testing.T) {
 func TestPipelineRunMCPBailInvokesCallback(t *testing.T) {
 	stream := fixtureInitBadMCP + "\n"
 	var bailReason string
-	r, err := Run(context.Background(), bytes.NewBufferString(stream), pgtype.UUID{}, pgtype.UUID{}, discardLogger(),
+	r, err := runWithFinalize(bytes.NewBufferString(stream),
 		func(reason string) { bailReason = reason }, FinalizeDeps{})
 	if err != nil {
 		t.Fatalf("Run: unexpected error %v", err)
@@ -249,7 +261,7 @@ func TestPipelineRunMCPBailInvokesCallback(t *testing.T) {
 func TestPipelineRunParseErrorBails(t *testing.T) {
 	stream := fixtureInit + "\n" + fixtureMalformed + "\n"
 	var bailReason string
-	r, err := Run(context.Background(), bytes.NewBufferString(stream), pgtype.UUID{}, pgtype.UUID{}, discardLogger(),
+	r, err := runWithFinalize(bytes.NewBufferString(stream),
 		func(reason string) { bailReason = reason }, FinalizeDeps{})
 	if err == nil {
 		t.Fatal("Run: want parse error, got nil")
@@ -264,7 +276,7 @@ func TestPipelineRunParseErrorBails(t *testing.T) {
 
 func TestPipelineRunTreatsUnknownEventAsContinue(t *testing.T) {
 	stream := fixtureInit + "\n" + fixtureUnknown + "\n" + fixtureResult + "\n"
-	r, err := Run(context.Background(), bytes.NewBufferString(stream), pgtype.UUID{}, pgtype.UUID{}, discardLogger(), nil, FinalizeDeps{})
+	r, err := runWithFinalize(bytes.NewBufferString(stream), nil, FinalizeDeps{})
 	if err != nil {
 		t.Fatalf("Run: unexpected error %v", err)
 	}
@@ -278,7 +290,7 @@ func TestPipelineRunTreatsUnknownEventAsContinue(t *testing.T) {
 
 func TestPipelineRunSkipsBlankLines(t *testing.T) {
 	stream := "\n\n" + fixtureInit + "\n\n" + fixtureResult + "\n\n"
-	r, err := Run(context.Background(), bytes.NewBufferString(stream), pgtype.UUID{}, pgtype.UUID{}, discardLogger(), nil, FinalizeDeps{})
+	r, err := runWithFinalize(bytes.NewBufferString(stream), nil, FinalizeDeps{})
 	if err != nil {
 		t.Fatalf("Run: unexpected error %v", err)
 	}
@@ -306,16 +318,97 @@ func (e *erroringReader) Read(p []byte) (int, error) {
 func TestPipelineRunSurfacesReadError(t *testing.T) {
 	want := errors.New("synthetic io failure")
 	reader := &erroringReader{remaining: []byte(fixtureInit + "\n"), err: want}
-	_, err := Run(context.Background(), reader, pgtype.UUID{}, pgtype.UUID{}, discardLogger(), nil, FinalizeDeps{})
+	_, err := runWithFinalize(reader, nil, FinalizeDeps{})
 	if err == nil {
 		t.Fatal("Run: want error from reader, got nil")
 	}
 }
 
 func TestPipelineRunRequiresLogger(t *testing.T) {
-	_, err := Run(context.Background(), bytes.NewBufferString(""), pgtype.UUID{}, pgtype.UUID{}, nil, nil, FinalizeDeps{})
+	policy := NewFinalizePolicy(discardLogger(), pgtype.UUID{}, pgtype.UUID{}, &Result{}, FinalizeDeps{}, nil)
+	_, err := Run(context.Background(), bytes.NewBufferString(""), policy, nil)
 	if err == nil {
 		t.Error("Run(nil logger): want error, got nil")
+	}
+}
+
+func TestPipelineRunRequiresPolicy(t *testing.T) {
+	_, err := Run(context.Background(), bytes.NewBufferString(""), nil, discardLogger())
+	if err == nil {
+		t.Error("Run(nil policy): want error, got nil")
+	}
+}
+
+// TestPolicy_FinalizeUnchanged exercises the canonical happy-path stream
+// (init → assistant → user → rate_limit → result) against the post-
+// refactor Run signature using NewFinalizePolicy. Every observable
+// Result field must match what the pre-M5.1 Run signature would have
+// produced — the Policy refactor is "just packaging," not a behaviour
+// change. If this test starts failing, the refactor introduced a
+// regression in the M2.2.1 finalize path.
+func TestPolicy_FinalizeUnchanged(t *testing.T) {
+	stream := strings.Join([]string{
+		fixtureInit,
+		fixtureAssistant,
+		fixtureUser,
+		fixtureRateLimit,
+		fixtureResult,
+	}, "\n") + "\n"
+
+	r, err := runWithFinalize(bytes.NewBufferString(stream), nil, FinalizeDeps{})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !r.ResultSeen || !r.AssistantSeen || r.MCPBailed || r.ParseError {
+		t.Errorf("flags off: %+v", r)
+	}
+	if r.TerminalReason != "success" || r.TotalCostUSD != "0.003" || r.SessionID != "sess-1" {
+		t.Errorf("fields off: %+v", r)
+	}
+}
+
+// TestFinalizePolicy_OnStreamEvent_NoOp verifies that calling
+// FinalizePolicy.OnStreamEvent has no observable side effects: no
+// Result mutation, no logger calls (test uses a recording handler
+// asserting zero records), no panic. Adding the no-op was T004's
+// way of letting M5.1's Router-interface extension land without
+// changing finalize behaviour.
+func TestFinalizePolicy_OnStreamEvent_NoOp(t *testing.T) {
+	rec := &recordingHandler{}
+	logger := slog.New(rec)
+	result := &Result{}
+	policy := NewFinalizePolicy(logger, pgtype.UUID{}, pgtype.UUID{}, result, FinalizeDeps{}, nil)
+
+	before := *result
+	policy.OnStreamEvent(context.Background(), claudeproto.StreamEvent{
+		InnerType: "content_block_delta",
+		Inner:     claudeproto.StreamInner{DeltaType: "text_delta", DeltaText: "hi"},
+	})
+	if *result != before {
+		t.Errorf("OnStreamEvent mutated Result: before=%+v after=%+v", before, *result)
+	}
+	if len(rec.records) != 0 {
+		t.Errorf("OnStreamEvent emitted log records: %v", rec.records)
+	}
+}
+
+// TestPolicy_RunCallsOnTerminateOnParseError verifies the new
+// OnTerminate hook fires with reason="parse_error" when the scanner
+// hits a malformed NDJSON line (and that FinalizePolicy translates
+// that into the legacy onBail closure call with ExitParseError).
+func TestPolicy_RunCallsOnTerminateOnParseError(t *testing.T) {
+	stream := fixtureInit + "\n" + fixtureMalformed + "\n"
+	var bailReason string
+	_, err := runWithFinalize(
+		bytes.NewBufferString(stream),
+		func(reason string) { bailReason = reason },
+		FinalizeDeps{},
+	)
+	if err == nil {
+		t.Fatal("Run: want parse error, got nil")
+	}
+	if bailReason != ExitParseError {
+		t.Errorf("OnTerminate→bailFn reason = %q; want %q", bailReason, ExitParseError)
 	}
 }
 
@@ -388,7 +481,8 @@ func TestPipelineLogsMempalaceToolUsePairs(t *testing.T) {
 	rec := &recordingHandler{}
 	logger := slog.New(rec)
 
-	_, err := Run(context.Background(), strings.NewReader(stream), pgtype.UUID{}, pgtype.UUID{}, logger, nil, FinalizeDeps{})
+	policy := NewFinalizePolicy(logger, pgtype.UUID{}, pgtype.UUID{}, &Result{}, FinalizeDeps{}, nil)
+	_, err := Run(context.Background(), strings.NewReader(stream), policy, logger)
 	if err != nil {
 		t.Fatalf("Run err: %v", err)
 	}
@@ -567,13 +661,13 @@ func TestAdjudicateFinalizeNotExpectedPreservesM22(t *testing.T) {
 
 // -------- M2.2.1 finalize observer ---------------------------------------
 
-// finalizeRouter builds a pipelineRouter wired with a fresh FinalizeState,
+// finalizeRouter builds a FinalizePolicy wired with a fresh FinalizeState,
 // a buffer-backed logger, optional commit/bail hooks.
-func finalizeRouter(onCommit func(json.RawMessage) error, onBail func(string)) (*pipelineRouter, *FinalizeState, *bytes.Buffer) {
+func finalizeRouter(onCommit func(json.RawMessage) error, onBail func(string)) (*FinalizePolicy, *FinalizeState, *bytes.Buffer) {
 	state := &FinalizeState{Expected: true}
 	logBuf := &bytes.Buffer{}
 	logger := slog.New(slog.NewJSONHandler(logBuf, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	r := &pipelineRouter{
+	r := &FinalizePolicy{
 		logger: logger,
 		result: &Result{},
 		finalize: &finalizeHook{

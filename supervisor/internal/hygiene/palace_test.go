@@ -35,6 +35,15 @@ func (f *fakePalaceExec) Run(ctx context.Context, args []string, stdin io.Reader
 	return f.stdout, f.stderr, f.err
 }
 
+func (f *fakePalaceExec) RunStream(
+	ctx context.Context,
+	args []string,
+	writeStdin func(stdin io.WriteCloser) error,
+	scanStdout func(stdout io.Reader) error,
+) (*exec.Cmd, error) {
+	return nil, errors.New("fakePalaceExec: RunStream not implemented")
+}
+
 // mcpResponseLine is a convenience for fixture construction.
 const (
 	initRespLine   = `{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{}}}` + "\n"

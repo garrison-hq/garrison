@@ -20,6 +20,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/garrison-hq/garrison/supervisor/internal/dockerexec"
 )
 
 // Client is the shared MemPalace access handle. Fields mirror the M2.2
@@ -33,7 +35,7 @@ type Client struct {
 	PalacePath         string
 	DockerHost         string
 	Timeout            time.Duration // default 10s on Query; callers set explicitly on Add*
-	Exec               DockerExec
+	Exec               dockerexec.DockerExec
 }
 
 // TimeWindow is the [Start, End] range the hygiene checker evaluates

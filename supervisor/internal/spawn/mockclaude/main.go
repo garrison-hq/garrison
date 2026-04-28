@@ -31,6 +31,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -67,6 +68,17 @@ func main() {
 		fmt.Fprintf(os.Stderr, "mockclaude: received %s; exiting\n", s)
 		os.Exit(143)
 	}()
+
+	// M5.1: chat mode is detected from raw os.Args BEFORE flag.Parse
+	// because the chat docker-run argv passes `-p` without a value
+	// (real claude accepts that shape in stream-json input mode; Go's
+	// flag.Parse would consume the next arg as -p's value, eating
+	// --input-format and breaking the chat-mode check). Scanning argv
+	// directly for the input-format pair sidesteps the issue.
+	if hasChatModeArgv(os.Args[1:]) {
+		runChatMode()
+		return
+	}
 
 	fs := flag.NewFlagSet("mockclaude", flag.ContinueOnError)
 	// Silence flag's default complaint-on-unknown — we intentionally
@@ -381,4 +393,189 @@ func roleScoped(taskDesc, role, envVar string) string {
 		return ""
 	}
 	return os.Getenv(envVar)
+}
+
+// runChatMode is the M5.1 chat-mode entrypoint. Reads NDJSON from
+// stdin to count prior turns + extract the last user message, then
+// emits a canned NDJSON stream matching the spike §8.1 wire shape:
+// system/init → message_start (with cache_read populated on turn ≥ 2)
+// → content_block_delta×N → assistant → result.
+func runChatMode() {
+	turnCount, lastUser := readChatTranscript(os.Stdin)
+	response := pickChatResponse(lastUser)
+
+	// The init event tools+mcp_servers should reflect what the chat
+	// container saw on --strict-mcp-config + --tools "" + --mcp-config.
+	// Hard-coded for the mock — production validates via init handler
+	// that mcp_servers status="connected".
+	initLine := `{"type":"system","subtype":"init","cwd":"/","session_id":"mock-chat-session","model":"claude-sonnet-4-6","tools":[],"mcp_servers":[{"name":"postgres","status":"connected"},{"name":"mempalace","status":"connected"}],"apiKeySource":"none","claude_code_version":"2.1.86"}`
+
+	// cache_creation on turn 1 = N input tokens; cache_read = 0.
+	// On turn ≥ 2, cache_read = some non-zero value (proves the
+	// supervisor replayed the prefix on stdin per SC-002).
+	cacheRead := 0
+	cacheCreate := 1500
+	if turnCount >= 1 {
+		// turnCount is the number of user/assistant PAIRS observed;
+		// the current user turn isn't counted as a pair until the
+		// assistant replies. So turnCount >= 1 means we saw at least
+		// one prior pair → cache hit territory.
+		cacheRead = 12000
+		cacheCreate = 200
+	}
+	msgStart := fmt.Sprintf(
+		`{"type":"stream_event","session_id":"mock-chat-session","event":{"type":"message_start","message":{"id":"msg-mock","model":"claude-sonnet-4-6","role":"assistant","content":[],"usage":{"input_tokens":3,"cache_creation_input_tokens":%d,"cache_read_input_tokens":%d,"output_tokens":1}}}}`,
+		cacheCreate, cacheRead,
+	)
+
+	// Split the response into 2-3 deltas so the SSE bridge sees
+	// multiple content_block_delta events.
+	deltas := splitIntoDeltas(response)
+	deltaLines := make([]string, 0, len(deltas))
+	for _, d := range deltas {
+		dl, err := json.Marshal(d)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "mockclaude: marshal delta: %v\n", err)
+			os.Exit(1)
+		}
+		deltaLines = append(deltaLines,
+			fmt.Sprintf(`{"type":"stream_event","session_id":"mock-chat-session","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":%s}}}`, dl),
+		)
+	}
+
+	asstContent, _ := json.Marshal(response)
+	asstLine := fmt.Sprintf(
+		`{"type":"assistant","message":{"model":"claude-sonnet-4-6","content":[{"type":"text","text":%s}]}}`,
+		asstContent,
+	)
+	resultLine := `{"type":"result","subtype":"success","is_error":false,"duration_ms":150,"total_cost_usd":0.0042,"stop_reason":"end_turn","session_id":"mock-chat-session"}`
+
+	for _, ln := range append(append(append([]string{initLine, msgStart}, deltaLines...), asstLine), resultLine) {
+		fmt.Println(ln)
+	}
+}
+
+// readChatTranscript scans NDJSON from stdin, counting prior turns
+// and capturing the last user message content. The supervisor pipes
+// the assembled transcript via stdin (per the chat.AssembleTranscript
+// contract); claude reads to EOF when stdin closes.
+//
+// Returns:
+//
+//	turnCount: number of complete user/assistant PAIRS observed
+//	           before the final user turn (so 0 = first user turn,
+//	           1 = there was at least one prior assistant response)
+//	lastUser:  content string of the trailing user message
+func readChatTranscript(r io.Reader) (turnCount int, lastUser string) {
+	type wire struct {
+		Type    string `json:"type"`
+		Message struct {
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
+		} `json:"message"`
+	}
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 64<<10), 1<<20)
+	users, asst := 0, 0
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		var w wire
+		if err := json.Unmarshal(line, &w); err != nil {
+			continue
+		}
+		switch w.Type {
+		case "user":
+			users++
+			lastUser = extractUserContent(w.Message.Content)
+		case "assistant":
+			asst++
+		}
+	}
+	// turnCount = full pairs = min(users-1, asst). The final user is
+	// the one being responded to; all prior users had a paired
+	// assistant.
+	if users == 0 {
+		return 0, ""
+	}
+	pairs := users - 1
+	if asst < pairs {
+		pairs = asst
+	}
+	if pairs < 0 {
+		pairs = 0
+	}
+	return pairs, lastUser
+}
+
+func extractUserContent(raw json.RawMessage) string {
+	// Two shapes accepted: bare string OR array of {type,text} blocks.
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(raw, &blocks); err == nil {
+		for _, b := range blocks {
+			if b.Type == "text" {
+				return b.Text
+			}
+		}
+	}
+	return ""
+}
+
+// pickChatResponse selects a canned response based on substrings in
+// the last user message + (transitively, via stdin scan) the prior
+// transcript. Fixtures match the spike §8.1 multi-turn assertion.
+func pickChatResponse(lastUser string) string {
+	lower := strings.ToLower(lastUser)
+	switch {
+	case strings.Contains(lower, "favorite color"):
+		return "Purple."
+	case strings.Contains(lower, "ping"):
+		return "pong"
+	case strings.Contains(lower, "hello"):
+		return "Hi there."
+	default:
+		return "(canned response)"
+	}
+}
+
+// splitIntoDeltas chops the response into 1-3 chunks so the chat
+// container emits multiple content_block_delta events (matching the
+// real-claude streaming pattern). One chunk for short responses;
+// two for medium; three for long.
+func splitIntoDeltas(s string) []string {
+	if len(s) <= 4 {
+		return []string{s}
+	}
+	if len(s) <= 12 {
+		mid := len(s) / 2
+		return []string{s[:mid], s[mid:]}
+	}
+	a, b := len(s)/3, 2*len(s)/3
+	return []string{s[:a], s[a:b], s[b:]}
+}
+
+// hasChatModeArgv scans raw argv for the supervisor's M5.1 chat-mode
+// signal: an --input-format=stream-json or --input-format stream-json
+// pair. Done before flag.Parse because the chat path's claude argv
+// passes `-p` without a value (Go's flag parser would otherwise
+// consume the following flag as -p's value).
+func hasChatModeArgv(args []string) bool {
+	for i, a := range args {
+		if a == "--input-format=stream-json" {
+			return true
+		}
+		if a == "--input-format" && i+1 < len(args) && args[i+1] == "stream-json" {
+			return true
+		}
+	}
+	return false
 }

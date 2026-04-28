@@ -30,6 +30,18 @@ func (f *fakeExec) Run(ctx context.Context, args []string, stdin io.Reader) ([]b
 	return f.stdout, f.stderr, f.err
 }
 
+// RunStream is unused by the mempalace one-shot call sites; the fake
+// is satisfied as DockerExec only via this stub. Tests that exercise
+// stream-shaped exec live under internal/dockerexec or internal/chat.
+func (f *fakeExec) RunStream(
+	ctx context.Context,
+	args []string,
+	writeStdin func(stdin io.WriteCloser) error,
+	scanStdout func(stdout io.Reader) error,
+) (*exec.Cmd, error) {
+	return nil, errors.New("fakeExec: RunStream not implemented")
+}
+
 func TestBootstrapRunsInit(t *testing.T) {
 	fake := &fakeExec{stdout: []byte("Config saved: /palace/mempalace.yaml\n")}
 	cfg := BootstrapConfig{
