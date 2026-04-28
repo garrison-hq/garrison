@@ -622,7 +622,7 @@ GARRISON_CHAT_DOCKER_NETWORK:         garrison-net   # joins the existing compos
 GARRISON_CHAT_DEFAULT_MODEL:          claude-sonnet-4-6
 ```
 
-`GARRISON_CHAT_OAUTH_VAULT_PATH` is the path *suffix* — the supervisor prepends `/<customer_id>` (existing M2.3 vault-path convention).
+`GARRISON_CHAT_OAUTH_VAULT_PATH` is the path **suffix** (e.g. `/operator/CLAUDE_CODE_OAUTH_TOKEN`). At fetch time, the supervisor composes the full `vault.GrantRow.SecretPath` as `"/" + cfg.CustomerID.String() + suffix` to match the existing M2.3 path convention (`splitSecretPath` at `supervisor/internal/vault/client.go:226` expects `/<customer_id>/folder/key` shape). `vault.GrantRow.CustomerID` is also populated as a separate field — used by the audit row writer (`internal/vault/audit.go:WriteAuditRow`) and downstream `vault_access_log.customer_id` column write, **not** for path composition (the path prefix is the M2.3 fetch-side convention; the separate UUID field is for relational integrity on the audit side).
 
 ### Subsystem boot order in `cmd/supervisor/main.go`
 
