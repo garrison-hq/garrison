@@ -1,0 +1,32 @@
+# Dockerfile.claude — produces garrison-claude:m5
+#
+# Two-stage build:
+#   stage 1: install + verify @anthropic-ai/claude-code at the pinned
+#            version
+#   stage 2: minimal node:22-slim runtime with the npm-globaled package
+#            symlinked at /usr/local/bin/claude
+#
+# Build: make chat-image
+# Tag:   garrison-claude:m5
+# Used:  M5.1 chat runtime (per-message ephemeral container spawned by
+#        the supervisor via the docker-proxy)
+
+FROM node:22-slim AS install
+
+ARG CLAUDE_CODE_VERSION=2.1.86
+
+RUN npm install -g --no-fund --no-audit --no-progress \
+        @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
+ && claude --version | grep "${CLAUDE_CODE_VERSION}" >/dev/null \
+ && echo "verified claude-code ${CLAUDE_CODE_VERSION}"
+
+FROM node:22-slim
+
+# Copy the globally-installed package and its bin symlink across.
+COPY --from=install /usr/local/lib/node_modules/@anthropic-ai/claude-code /usr/local/lib/node_modules/@anthropic-ai/claude-code
+COPY --from=install /usr/local/bin/claude /usr/local/bin/claude
+
+# Sanity check at image-build time.
+RUN claude --version
+
+ENTRYPOINT ["/usr/local/bin/claude"]

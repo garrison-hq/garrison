@@ -1,0 +1,28 @@
+# Dockerfile.mockclaude.chat — produces garrison-mockclaude:m5
+#
+# Two-stage build:
+#   stage 1: build the mockclaude Go binary statically
+#   stage 2: minimal node:22-slim runtime (matches garrison-claude:m5
+#            filesystem layout) with the binary symlinked at
+#            /usr/local/bin/claude
+#
+# Build: make mockclaude-chat-image
+# Tag:   garrison-mockclaude:m5
+# Used:  CI / integration tests where a real CLAUDE_CODE_OAUTH_TOKEN
+#        isn't available; the mock emits canned NDJSON responses that
+#        match the spike §8.1 wire shape.
+
+FROM golang:1.23-alpine AS build
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -o /out/mockclaude ./internal/spawn/mockclaude
+
+FROM node:22-slim
+
+COPY --from=build /out/mockclaude /usr/local/bin/claude
+RUN chmod +x /usr/local/bin/claude
+
+ENTRYPOINT ["/usr/local/bin/claude"]
