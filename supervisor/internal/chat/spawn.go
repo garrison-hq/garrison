@@ -212,11 +212,18 @@ func composeFullVaultPath(customerID pgtype.UUID, suffix string) string {
 }
 
 // classifyVaultError maps vault.* sentinels to chat.ErrorKind.
+// PermissionDenied is treated as TokenExpired because the operator-
+// facing remediation is identical: rotate the OAuth token via the M4
+// vault-edit surface. RateLimited maps to VaultUnavailable so the
+// chat surface tells the operator to retry rather than rotate.
 func classifyVaultError(err error) ErrorKind {
 	switch {
 	case errors.Is(err, vault.ErrVaultSecretNotFound):
 		return ErrorTokenNotFound
 	case errors.Is(err, vault.ErrVaultAuthExpired):
+		return ErrorTokenExpired
+	case errors.Is(err, vault.ErrVaultPermissionDenied):
+		// Same operator action as auth-expired: rotate the token.
 		return ErrorTokenExpired
 	default:
 		return ErrorVaultUnavailable

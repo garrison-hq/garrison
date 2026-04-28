@@ -9,7 +9,6 @@ package chat
 
 import (
 	"context"
-	"errors"
 	"io"
 	"log/slog"
 	"testing"
@@ -21,13 +20,6 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
-
-// failingVault returns the supplied error for any Fetch call.
-type failingVault struct{ err error }
-
-func (f *failingVault) Fetch(ctx context.Context, req []vault.GrantRow) (map[string]vault.SecretValue, error) {
-	return nil, f.err
-}
 
 // findAssistantRow does a direct chat_messages SELECT (the sqlc
 // GetSessionTranscript skips non-completed assistant rows). Returns
@@ -163,22 +155,32 @@ func TestM5_1_Vault_TokenAbsent(t *testing.T) {
 	}
 }
 
-// TestM5_1_Vault_TokenExpired keeps the failingVault mock pending an
-// invasive harness extension to revoke an ML's client_secret mid-test.
-// Filing a follow-up rather than papering over with a synthetic fake.
+// TestM5_1_Vault_TokenExpired uses a short-lived Machine Identity
+// (1-second access token TTL, 1-use client secret) so re-auth fails
+// after the first fetch — exercises the actual ErrVaultAuthExpired
+// sentinel chain through real Infisical. Per the M4 retro discipline
+// ("skipped tests hide grants regressions too").
 //
-// TODO: extend vault.InfisicalTestHarness with a RevokeIdentity helper
-// (DELETE /api/v3/auth/universal-auth/identity/<id>/client-secrets/<csid>)
-// and switch this test to that path. M4 retro discipline applies.
+// The CreateShortLivedMachineIdentity helper from M2.3's vault.testutil
+// (already in place) gives us a real-Infisical path to the expired
+// state without needing to revoke ML credentials externally.
 func TestM5_1_Vault_TokenExpired(t *testing.T) {
 	pool := testdb.Start(t)
 	q := store.New(pool)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	deps := minimalEdgeDeps(t, pool, q,
-		&failingVault{err: vault.ErrVaultAuthExpired},
-		&fakeDockerExec{})
+	vaultClient, customerID, _ := chatVaultStackShortLived(t)
+
+	// Wait > 1 second for the access token TTL to expire. The first
+	// Fetch attempt then triggers re-auth, which fails because the
+	// client secret was numUsesLimit=1 and was already consumed by
+	// vault.NewClient's initial authentication.
+	time.Sleep(2 * time.Second)
+
+	exec := &fakeDockerExec{}
+	deps := minimalEdgeDeps(t, pool, q, vaultClient, exec)
+	deps.CustomerID = customerID
 
 	sess, _ := q.CreateChatSession(ctx, newUUID(t))
 	op, _ := q.InsertOperatorMessage(ctx, store.InsertOperatorMessageParams{
@@ -187,6 +189,9 @@ func TestM5_1_Vault_TokenExpired(t *testing.T) {
 	w := NewWorker(deps, "/bin/true", "postgres://test/test", MempalaceWiring{})
 	_ = w.HandleMessageInSession(ctx, sess.ID, op.ID)
 
+	if exec.calls != 0 {
+		t.Errorf("docker called despite vault auth-expired")
+	}
 	st, ek, _ := findAssistantRow(t, ctx, pool, sess.ID)
 	if st != "failed" || ek != ErrorTokenExpired {
 		t.Errorf("assistant row: status=%q error_kind=%q; want failed/%s",
@@ -194,24 +199,30 @@ func TestM5_1_Vault_TokenExpired(t *testing.T) {
 	}
 }
 
-// TestM5_1_Vault_Unavailable similarly keeps the synthetic-error
-// mock; simulating "Infisical is down" on a healthy testcontainer
-// would require stopping the container mid-test, which is feasible
-// (testcontainers.StopContainer) but adds 60s+ of harness gymnastics.
-//
-// TODO: extend chatVaultStack with a StopInfisicalForTest hook that
-// stops the container, runs the assertion, and restarts it before
-// teardown — and switch this test to that path. M4 retro discipline
-// applies.
+// TestM5_1_Vault_Unavailable terminates the Infisical container
+// mid-test via vault.InfisicalTestHarness.StopInfisical and then
+// drives a chat message through the worker. Real connection-refused
+// from infrastructure-side; vault.Client.Fetch surfaces the SDK's
+// transport error which classifyVaultError maps to
+// ErrorVaultUnavailable. Per the M4 retro discipline.
 func TestM5_1_Vault_Unavailable(t *testing.T) {
 	pool := testdb.Start(t)
 	q := store.New(pool)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
-	deps := minimalEdgeDeps(t, pool, q,
-		&failingVault{err: errors.New("connection refused")},
-		&fakeDockerExec{})
+	vaultClient, customerID, harness := chatVaultStackWithHarness(t, true)
+
+	// Stop Infisical mid-test. Subsequent Fetch calls will fail with
+	// connection-refused / transport error, which the chat path's
+	// classifyVaultError maps to ErrorVaultUnavailable.
+	if err := harness.StopInfisical(ctx); err != nil {
+		t.Fatalf("StopInfisical: %v", err)
+	}
+
+	exec := &fakeDockerExec{}
+	deps := minimalEdgeDeps(t, pool, q, vaultClient, exec)
+	deps.CustomerID = customerID
 
 	sess, _ := q.CreateChatSession(ctx, newUUID(t))
 	op, _ := q.InsertOperatorMessage(ctx, store.InsertOperatorMessageParams{
@@ -220,6 +231,9 @@ func TestM5_1_Vault_Unavailable(t *testing.T) {
 	w := NewWorker(deps, "/bin/true", "postgres://test/test", MempalaceWiring{})
 	_ = w.HandleMessageInSession(ctx, sess.ID, op.ID)
 
+	if exec.calls != 0 {
+		t.Errorf("docker called despite vault unavailable")
+	}
 	st, ek, _ := findAssistantRow(t, ctx, pool, sess.ID)
 	if st != "failed" || ek != ErrorVaultUnavailable {
 		t.Errorf("assistant row: status=%q error_kind=%q; want failed/%s",
