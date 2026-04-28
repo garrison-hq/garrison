@@ -6,8 +6,10 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/garrison-hq/garrison/supervisor/internal/claudeproto"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 // newPolicyForTest constructs a ChatPolicy with no DB pool — sufficient
@@ -249,5 +251,173 @@ func TestNumericFromString_ValidNumber(t *testing.T) {
 func TestNumericFromString_InvalidReturnsError(t *testing.T) {
 	if _, err := numericFromString("not a number"); err == nil {
 		t.Error("numericFromString(\"not a number\") returned nil err; want parse error")
+	}
+}
+
+// TestOnInitBailsOnFailedMCPServer pins the FR-108 fail-closed check:
+// a single mcp_server with status="failed" causes OnInit to return
+// RouterActionBail and stash a structured bailReason that
+// commitAssistantTerminal / OnTerminate can surface to the dashboard.
+// This is the no-DB path — the bail returns before
+// TransitionMessageToStreaming runs.
+func TestOnInitBailsOnFailedMCPServer(t *testing.T) {
+	p := newPolicyForTest()
+	action := p.OnInit(context.Background(), claudeproto.InitEvent{
+		MCPServers: []claudeproto.MCPServer{
+			{Name: "postgres", Status: "connected"},
+			{Name: "mempalace", Status: "failed"},
+		},
+		Raw: []byte(`{"type":"system","subtype":"init"}`),
+	})
+	if action != claudeproto.RouterActionBail {
+		t.Fatalf("OnInit action=%v; want RouterActionBail", action)
+	}
+	if p.bailReason == "" {
+		t.Errorf("bailReason is empty; want a structured mcp_*_failed kind")
+	}
+	if !strings.Contains(p.bailReason, "mempalace") {
+		t.Errorf("bailReason=%q; want mention of the failed mempalace server", p.bailReason)
+	}
+}
+
+// TestOnInitBailsOnNeedsAuthMCPServer covers the second non-connected
+// status the spike's enum lists. A "needs-auth" server is just as
+// fatal as "failed" — the chat container can't start the MCP and
+// shouldn't proceed.
+func TestOnInitBailsOnNeedsAuthMCPServer(t *testing.T) {
+	p := newPolicyForTest()
+	action := p.OnInit(context.Background(), claudeproto.InitEvent{
+		MCPServers: []claudeproto.MCPServer{
+			{Name: "postgres", Status: "needs-auth"},
+		},
+	})
+	if action != claudeproto.RouterActionBail {
+		t.Fatalf("OnInit action=%v; want RouterActionBail on needs-auth", action)
+	}
+	if !strings.Contains(p.bailReason, "postgres") {
+		t.Errorf("bailReason=%q; want mention of the needs-auth postgres server", p.bailReason)
+	}
+}
+
+// TestOnStreamEvent_NonTextDeltaIsObservationalOnly: content_block_delta
+// events that are NOT text_delta (e.g. thinking deltas, tool_use input
+// deltas) must not accumulate into contentBuf or fire EmitDelta —
+// otherwise the persisted assistant content would include thinking
+// blocks the operator never saw.
+func TestOnStreamEvent_NonTextDeltaIsObservationalOnly(t *testing.T) {
+	p := newPolicyForTest()
+	p.OnStreamEvent(context.Background(), claudeproto.StreamEvent{
+		InnerType: "content_block_delta",
+		Inner:     claudeproto.StreamInner{DeltaType: "thinking_delta", DeltaText: "secret thinking"},
+		Raw:       []byte(`{"type":"stream_event"}`),
+	})
+	if p.contentBuf.Len() != 0 {
+		t.Errorf("contentBuf accumulated thinking-delta text; got %q", p.contentBuf.String())
+	}
+	if p.deltaSeq != 0 {
+		t.Errorf("deltaSeq advanced on non-text-delta; got %d", p.deltaSeq)
+	}
+	if got := len(p.rawEvents); got != 1 {
+		t.Errorf("rawEvents len=%d; want 1 (envelope still preserved)", got)
+	}
+}
+
+// TestOnStreamEvent_MessageStartCapturesUsage: message_start events
+// carry the input-token + cache breakdown that the terminal commit
+// rolls into chat_messages. Pin every field so a wire-format change
+// at the StreamInner shape is caught here.
+func TestOnStreamEvent_MessageStartCapturesUsage(t *testing.T) {
+	p := newPolicyForTest()
+	p.OnStreamEvent(context.Background(), claudeproto.StreamEvent{
+		InnerType: "message_start",
+		Inner: claudeproto.StreamInner{
+			InputTokens:        1234,
+			CacheReadInput:     5678,
+			CacheCreationInput: 91,
+		},
+		Raw: []byte(`{"type":"stream_event"}`),
+	})
+	if p.tokensInput != 1234 {
+		t.Errorf("tokensInput=%d; want 1234", p.tokensInput)
+	}
+	if p.cacheReadInput != 5678 {
+		t.Errorf("cacheReadInput=%d; want 5678", p.cacheReadInput)
+	}
+	if p.cacheCreationInput != 91 {
+		t.Errorf("cacheCreationInput=%d; want 91", p.cacheCreationInput)
+	}
+}
+
+// TestOnStreamEvent_MessageDeltaUpdatesOutputTokens: claude emits
+// the running output-token count via message_delta.usage. The policy
+// only updates when OutputTokens > 0 — guards against a zero-valued
+// trailing event clobbering an earlier non-zero reading.
+func TestOnStreamEvent_MessageDeltaUpdatesOutputTokens(t *testing.T) {
+	p := newPolicyForTest()
+	p.tokensOutput = 100 // simulate a prior message_delta
+	// Zero OutputTokens must NOT overwrite.
+	p.OnStreamEvent(context.Background(), claudeproto.StreamEvent{
+		InnerType: "message_delta",
+		Inner:     claudeproto.StreamInner{OutputTokens: 0},
+	})
+	if p.tokensOutput != 100 {
+		t.Errorf("tokensOutput got=%d; want 100 (zero must not clobber)", p.tokensOutput)
+	}
+	// Non-zero overwrites.
+	p.OnStreamEvent(context.Background(), claudeproto.StreamEvent{
+		InnerType: "message_delta",
+		Inner:     claudeproto.StreamInner{OutputTokens: 250},
+	})
+	if p.tokensOutput != 250 {
+		t.Errorf("tokensOutput got=%d; want 250", p.tokensOutput)
+	}
+}
+
+// TestOnStreamEvent_UnknownInnerTypeIsObservational: any inner type
+// outside the known content_block_delta / message_start / message_delta
+// triple is forward-compat — the policy still appends to rawEvents
+// (so the terminal commit preserves the byte stream) but mutates no
+// state.
+func TestOnStreamEvent_UnknownInnerTypeIsObservational(t *testing.T) {
+	p := newPolicyForTest()
+	p.OnStreamEvent(context.Background(), claudeproto.StreamEvent{
+		InnerType: "future_inner_type",
+		Raw:       []byte(`{"type":"stream_event"}`),
+	})
+	if p.contentBuf.Len() != 0 {
+		t.Errorf("contentBuf mutated on unknown inner type")
+	}
+	if got := len(p.rawEvents); got != 1 {
+		t.Errorf("rawEvents len=%d; want 1", got)
+	}
+}
+
+// TestNewChatPolicyWiresDepsThrough: NewChatPolicy is a thin
+// constructor — verify the SessionID / MessageID / GraceWrite
+// passthrough so a regression at the constructor boundary doesn't
+// silently zero out the message-correlation IDs (which the
+// commit path keys writes on).
+func TestNewChatPolicyWiresDepsThrough(t *testing.T) {
+	deps := Deps{
+		Logger: newPolicyForTest().Logger,
+		// Pool / Queries left nil — constructor copies them through.
+		TerminalWriteGrace: 7 * time.Second,
+	}
+	var sid, mid pgtype.UUID
+	if err := sid.Scan("11111111-1111-4111-8111-111111111111"); err != nil {
+		t.Fatalf("scan sid: %v", err)
+	}
+	if err := mid.Scan("22222222-2222-4222-8222-222222222222"); err != nil {
+		t.Fatalf("scan mid: %v", err)
+	}
+	p := NewChatPolicy(deps, sid, mid)
+	if p.SessionID != sid {
+		t.Errorf("SessionID not wired through")
+	}
+	if p.MessageID != mid {
+		t.Errorf("MessageID not wired through")
+	}
+	if p.GraceWrite != 7*time.Second {
+		t.Errorf("GraceWrite=%v; want 7s", p.GraceWrite)
 	}
 }
