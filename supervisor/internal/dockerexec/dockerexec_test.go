@@ -6,8 +6,10 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os/exec"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -157,5 +159,44 @@ func TestRealDockerExec_Run_RoundTripsStdinAndStdout(t *testing.T) {
 	}
 	if len(stderr) != 0 {
 		t.Fatalf("stderr: expected empty, got %q", stderr)
+	}
+}
+
+// TestKillProcessGroup_NilCmd guards the early-return so a malformed
+// caller (e.g. a goroutine that races RunStream's setup) doesn't
+// segfault on cmd.Process.Pid.
+func TestKillProcessGroup_NilCmd(t *testing.T) {
+	if err := killProcessGroup(nil, syscall.SIGTERM); err == nil {
+		t.Fatal("killProcessGroup(nil, _) returned nil err; want guard error")
+	}
+}
+
+// TestKillProcessGroup_NilProcess pins the second guard: a *exec.Cmd
+// can exist before Start() but its Process is nil. Sending a signal
+// to nil Process would panic; the helper should fail gracefully.
+func TestKillProcessGroup_NilProcess(t *testing.T) {
+	cmd := &exec.Cmd{} // not Started
+	if err := killProcessGroup(cmd, syscall.SIGTERM); err == nil {
+		t.Fatal("killProcessGroup(unstarted, _) returned nil err; want guard error")
+	}
+}
+
+// TestKillProcessGroup_ESRCHIsBenign exercises the ESRCH branch — when
+// the target process group has already exited, syscall.Kill returns
+// ESRCH and the helper treats it as success (the process we wanted
+// gone is gone). Spin a /bin/sh that exits immediately, wait for it,
+// then signal — kill(2) on a reaped pid returns ESRCH.
+func TestKillProcessGroup_ESRCHIsBenign(t *testing.T) {
+	cmd := exec.Command("/bin/sh", "-c", "exit 0")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("wait: %v", err)
+	}
+	// Process is now reaped; signalling its pgroup should yield ESRCH.
+	if err := killProcessGroup(cmd, syscall.SIGTERM); err != nil {
+		t.Errorf("killProcessGroup on already-exited pgroup = %v; want nil (ESRCH treated as benign)", err)
 	}
 }
