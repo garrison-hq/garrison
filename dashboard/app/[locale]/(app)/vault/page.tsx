@@ -49,6 +49,12 @@ export default async function VaultLandingPage() {
           <span className="text-text-3 text-[11px] font-mono font-tabular">
             {rows.length}
           </span>
+          <a
+            href="/vault/new"
+            className="ml-auto text-[12px] text-accent hover:underline"
+          >
+            + Create secret
+          </a>
         </header>
         {rows.length === 0 ? (
           <EmptyState description={t('emptySecrets')} />

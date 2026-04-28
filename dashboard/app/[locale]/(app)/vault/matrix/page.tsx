@@ -1,14 +1,35 @@
+import { sql } from 'drizzle-orm';
 import { getTranslations } from 'next-intl/server';
-import { fetchRoleSecretMatrix } from '@/lib/queries/vault';
+import {
+  fetchRoleSecretMatrix,
+  fetchAllGrants,
+  fetchSecretsList,
+} from '@/lib/queries/vault';
+import { appDb } from '@/lib/db/appClient';
 import { RoleSecretMatrix } from '@/components/features/vault/RoleSecretMatrix';
 import { VaultTabs } from '@/components/features/vault/VaultTabs';
+import { GrantEditor } from '@/components/features/vault-grant-edit/GrantEditor';
 import { EmptyState } from '@/components/ui/EmptyState';
 
 export const dynamic = 'force-dynamic';
 
 export default async function VaultMatrixPage() {
-  const matrix = await fetchRoleSecretMatrix();
-  const t = await getTranslations('vault');
+  const [matrix, grants, secrets, t] = await Promise.all([
+    fetchRoleSecretMatrix(),
+    fetchAllGrants(),
+    fetchSecretsList(),
+    getTranslations('vault'),
+  ]);
+
+  // Distinct role slugs come from agents — the operator may want
+  // to grant to a role that doesn't yet have any grants. Pull
+  // the active-agent role list so the dropdown covers all
+  // configured roles.
+  const roleRows = await appDb.execute<{ role_slug: string }>(sql`
+    SELECT DISTINCT role_slug FROM agents WHERE status = 'active' ORDER BY role_slug
+  `);
+  const roleSlugs = roleRows.map((r) => r.role_slug);
+  const secretPaths = secrets.map((s) => s.secretPath);
 
   return (
     <div className="px-6 py-5 space-y-5 max-w-[1600px] mx-auto">
@@ -39,6 +60,11 @@ export default async function VaultMatrixPage() {
           cells={matrix.cells}
         />
       )}
+      <GrantEditor
+        grants={grants}
+        roleSlugs={roleSlugs}
+        secretPaths={secretPaths}
+      />
     </div>
   );
 }

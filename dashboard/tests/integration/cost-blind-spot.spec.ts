@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect } from './_coverage';
 import postgres from 'postgres';
 import { bootHarness, truncateDashboardState } from './_harness';
 

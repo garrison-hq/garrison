@@ -7,6 +7,17 @@ SET hygiene_status = $2
 WHERE id = $1
   AND (hygiene_status IS NULL OR hygiene_status = 'pending');
 
+-- name: UpdateTicketTransitionPatternCategory :exec
+-- M4 / T015 / FR-115: when scanAndRedactPayload matches a
+-- secret-shape pattern, the matching pattern label is recorded
+-- on the transition row so the hygiene table can render the
+-- category alongside the failure-mode badge (FR-117). Only
+-- written for hygiene_status='suspected_secret_emitted' rows;
+-- the column is nullable for every other path.
+UPDATE ticket_transitions
+SET suspected_secret_pattern_category = $2
+WHERE id = $1;
+
 -- name: ListStuckHygieneTransitions :many
 -- Rows older than the delay interval whose hygiene is unresolved. Used by
 -- the periodic sweep goroutine (FR-216) to recover rows the LISTEN path

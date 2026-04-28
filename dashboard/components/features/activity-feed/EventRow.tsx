@@ -118,5 +118,13 @@ function EventDescription({ event }: Readonly<{ event: ActivityEvent }>) {
       </span>
     );
   }
-  return <span className="text-text-3">unknown channel: {event.channel}</span>;
+  if (event.kind === 'unknown') {
+    return <span className="text-text-3">unknown channel: {event.channel}</span>;
+  }
+  // M4 mutation event variants (ticket.edited / agent.edited /
+  // vault.*). Each has dedicated rendering wired in by T011 /
+  // T012 / T013. Until those tasks land, render a generic
+  // description that names the kind so the operator never sees
+  // a blank row.
+  return <span className="text-text-3">{event.kind}</span>;
 }

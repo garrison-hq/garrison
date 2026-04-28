@@ -21,6 +21,7 @@ type Agent struct {
 	Status       string
 	CreatedAt    pgtype.Timestamptz
 	McpConfig    []byte
+	UpdatedAt    pgtype.Timestamptz
 }
 
 type AgentInstance struct {
@@ -83,6 +84,7 @@ type SecretMetadatum struct {
 	AllowedRoleSlugs []string
 	CreatedAt        pgtype.Timestamptz
 	UpdatedAt        pgtype.Timestamptz
+	RotationProvider string
 }
 
 type Ticket struct {
@@ -97,14 +99,15 @@ type Ticket struct {
 }
 
 type TicketTransition struct {
-	ID                         pgtype.UUID
-	TicketID                   pgtype.UUID
-	FromColumn                 *string
-	ToColumn                   string
-	TriggeredByAgentInstanceID pgtype.UUID
-	TriggeredByUser            bool
-	At                         pgtype.Timestamptz
-	HygieneStatus              *string
+	ID                             pgtype.UUID
+	TicketID                       pgtype.UUID
+	FromColumn                     *string
+	ToColumn                       string
+	TriggeredByAgentInstanceID     pgtype.UUID
+	TriggeredByUser                bool
+	At                             pgtype.Timestamptz
+	HygieneStatus                  *string
+	SuspectedSecretPatternCategory *string
 }
 
 type VaultAccessLog struct {
@@ -116,4 +119,5 @@ type VaultAccessLog struct {
 	Outcome         string
 	Timestamp       pgtype.Timestamptz
 	CreatedAt       pgtype.Timestamptz
+	Metadata        []byte
 }

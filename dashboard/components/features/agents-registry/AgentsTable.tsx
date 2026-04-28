@@ -93,6 +93,7 @@ export async function AgentsTable({ rows }: Readonly<{ rows: AgentRow[] }>) {
                   <col />
                   <col style={{ width: 110 }} />
                   <col style={{ width: 140 }} />
+                  <col style={{ width: 60 }} />
                 </colgroup>
                 <thead>
                   <tr className="bg-surface-2 border-b border-border-1">
@@ -103,6 +104,7 @@ export async function AgentsTable({ rows }: Readonly<{ rows: AgentRow[] }>) {
                     <Th>{t('listensFor')}</Th>
                     <Th>{t('lastSpawn')}</Th>
                     <Th align="right">{t('spawns7d')}</Th>
+                    <Th align="right">{' '}</Th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border-1">
@@ -202,6 +204,14 @@ function AgentRowItem({
             {row.spawnsThisWeek}
           </span>
         </span>
+      </Td>
+      <Td className="text-right">
+        <a
+          href={`/agents/${row.departmentSlug}/${row.roleSlug}/edit`}
+          className="text-[12px] text-accent hover:underline"
+        >
+          Edit
+        </a>
       </Td>
     </tr>
   );

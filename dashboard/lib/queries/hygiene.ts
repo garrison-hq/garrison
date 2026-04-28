@@ -33,9 +33,25 @@ const SANDBOX_ESCAPE_STATUSES = ['sandbox_escape', 'artifact_claimed_vs_on_disk'
 export interface HygieneFilter {
   failureMode?: FailureMode;
   departmentSlug?: string;
+  /** M4 / FR-117: filter by suspected_secret_pattern_category.
+   *  Only meaningful when failureMode='suspected_secret_emitted'
+   *  (or unset). Pre-M4 rows have NULL category and surface as
+   *  'unknown' on read; passing 'unknown' filters those rows. */
+  patternCategory?: string;
   page?: number;
   pageSize?: number;
 }
+
+// PATTERN_CATEGORIES + PatternCategory live in
+// lib/hygiene/categories.ts so Client Components (e.g. the
+// PatternCategoryFilter chip strip) can import them without
+// pulling lib/db/appClient (server-only) through the bundle.
+// Re-exported here for server-side callers that already import
+// from lib/queries/hygiene.
+export {
+  PATTERN_CATEGORIES,
+  type PatternCategory,
+} from '@/lib/hygiene/categories';
 
 export interface HygieneRow {
   transitionId: string;
@@ -97,6 +113,17 @@ export async function fetchHygieneRows(
   const statusInClause = statusList
     ? sql`AND tt.hygiene_status IN ${sql.raw(buildQuotedInList(statusList))}`
     : sql``;
+
+  // Pattern-category filter clause hoisted out of the inline
+  // ternary chain (S3358). 'unknown' = pre-M4 NULL rows
+  // restricted to the suspected_secret_emitted bucket per FR-118;
+  // any other label filters by exact column match.
+  let patternCategoryClause = sql``;
+  if (filter.patternCategory === 'unknown') {
+    patternCategoryClause = sql`AND tt.hygiene_status = 'suspected_secret_emitted' AND tt.suspected_secret_pattern_category IS NULL`;
+  } else if (filter.patternCategory) {
+    patternCategoryClause = sql`AND tt.suspected_secret_pattern_category = ${filter.patternCategory}`;
+  }
   const rowsResult = await appDb.execute<{
     transition_id: string;
     ticket_id: string;
@@ -106,6 +133,7 @@ export async function fetchHygieneRows(
     to_column: string;
     at: Date;
     exit_reason: string | null;
+    suspected_secret_pattern_category: string | null;
   }>(sql`
     SELECT
       tt.id AS transition_id,
@@ -115,7 +143,8 @@ export async function fetchHygieneRows(
       tt.from_column,
       tt.to_column,
       tt.at,
-      ai.exit_reason
+      ai.exit_reason,
+      tt.suspected_secret_pattern_category
     FROM ticket_transitions tt
     JOIN tickets t ON t.id = tt.ticket_id
     JOIN departments d ON d.id = t.department_id
@@ -124,6 +153,7 @@ export async function fetchHygieneRows(
       AND tt.hygiene_status NOT IN ('clean', '')
       ${statusInClause}
       ${filter.departmentSlug ? sql`AND d.slug = ${filter.departmentSlug}` : sql``}
+      ${patternCategoryClause}
     ORDER BY tt.at DESC
     LIMIT ${pageSize} OFFSET ${offset}
   `);
@@ -150,8 +180,16 @@ export async function fetchHygieneRows(
       at: r.at,
       exitReason: r.exit_reason,
       failureMode: classify(r.hygiene_status) ?? 'finalize_path',
+      // M4 / T015 / FR-115 / FR-118: the supervisor scanner now
+      // records the matched pattern label on the transition row
+      // (see supervisor/internal/spawn/finalize.go T015 commit).
+      // Pre-M4 rows have NULL here; render as 'unknown' (FR-118).
+      // For non-secret-emitted rows the column is always NULL by
+      // construction.
       patternCategory:
-        classify(r.hygiene_status) === 'suspected_secret_emitted' ? 'secret-shape' : null,
+        classify(r.hygiene_status) === 'suspected_secret_emitted'
+          ? r.suspected_secret_pattern_category ?? 'unknown'
+          : null,
     })),
     total: Number(totalResult[0]?.total ?? 0),
   };

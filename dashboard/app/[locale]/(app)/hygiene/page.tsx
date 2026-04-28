@@ -6,6 +6,7 @@ import {
 } from '@/lib/queries/hygiene';
 import { HygieneTable } from '@/components/features/hygiene-table/HygieneTable';
 import { FailureModeFilter } from '@/components/features/hygiene-table/FailureModeFilter';
+import { PatternCategoryFilter } from '@/components/features/hygiene-table/PatternCategoryFilter';
 import { RefreshButton } from '@/components/features/org-overview/RefreshButton';
 import { SoftPoll } from '@/components/features/org-overview/SoftPoll';
 
@@ -38,9 +39,16 @@ export default async function HygienePage({
   const failureMode = parseMode(sp.mode);
   const dept = typeof sp.dept === 'string' ? sp.dept : undefined;
   const page = typeof sp.page === 'string' ? Number(sp.page) || 1 : 1;
+  const patternCategory = typeof sp.category === 'string' ? sp.category : undefined;
 
   const [hygiene, counts, t, navT, metaT] = await Promise.all([
-    fetchHygieneRows({ failureMode, departmentSlug: dept, page, pageSize: 25 }),
+    fetchHygieneRows({
+      failureMode,
+      departmentSlug: dept,
+      patternCategory,
+      page,
+      pageSize: 25,
+    }),
     fetchHygieneCounts(),
     getTranslations('hygiene'),
     getTranslations('nav'),
@@ -69,6 +77,7 @@ export default async function HygienePage({
       </header>
 
       <FailureModeFilter counts={counts.byMode} total={counts.total} />
+      <PatternCategoryFilter />
 
       <section className="bg-surface-1 border border-border-1 rounded overflow-hidden">
         <header className="px-4 py-2.5 border-b border-border-1 flex items-center gap-3">

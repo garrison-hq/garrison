@@ -12,6 +12,23 @@ const nextConfig: NextConfig = {
   // The Dockerfile copies .next/standalone + .next/static + public into the
   // runtime image; the resulting bundle launches via `node server.js`.
   output: 'standalone',
+  // Emit browser-side source maps in production builds. Required so
+  // monocart-coverage-reports can map V8 coverage (collected via
+  // Playwright's page.coverage API) back to the source files for Sonar
+  // ingestion. The cost is ~10% larger .next/static/ output and exposed
+  // source paths in browser DevTools — neither concerning for this
+  // operator-only deployment.
+  productionBrowserSourceMaps: true,
+  // Emit Server Component / route-handler / Server Action source
+  // maps in the standalone bundle. Required so c8 (post-test
+  // converter) can map NODE_V8_COVERAGE profiles back to source
+  // for Sonar ingestion. Without this, the server-side coverage
+  // report references compiled .next/server/chunks paths that
+  // Sonar can't match against repo files. Path A wiring per
+  // M4 retro post-ship.
+  experimental: {
+    serverSourceMaps: true,
+  },
   // Pin turbopack's root to the dashboard/ directory so its lockfile +
   // node_modules search doesn't drift up into the monorepo and confuse
   // tailwindcss / postcss resolution when sibling lockfiles exist at

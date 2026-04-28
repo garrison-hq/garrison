@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect } from './_coverage';
 import postgres from 'postgres';
 import { bootHarness, truncateDashboardState } from './_harness';
 
@@ -66,7 +66,9 @@ test.describe('sandbox-escape evidence', () => {
     const ticketId = await seedTicketWithSandboxEscape(env);
     await authenticate(page, env);
     await page.goto(`/tickets/${ticketId}`);
-    await expect(page.getByTestId('sandbox-escape-icon')).toBeVisible();
+    // The hygiene-status warn icon renders as data-testid='failure-icon'
+    // for any non-clean status (sandbox_escape included).
+    await expect(page.getByTestId('failure-icon')).toBeVisible();
     // Detail should be hidden until expand is clicked.
     await expect(page.getByTestId('sandbox-escape-detail')).toHaveCount(0);
     // Find the expand button inside the history block and click it.
