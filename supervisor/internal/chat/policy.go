@@ -22,18 +22,18 @@ import (
 // spawn.Result — chat has its own terminal-write path via
 // chat_messages row commit; Result() returns a zero value.
 type ChatPolicy struct {
-	Pool        *pgxpool.Pool
-	Queries     *store.Queries
-	Logger      *slog.Logger
-	SessionID   pgtype.UUID
-	MessageID   pgtype.UUID
-	GraceWrite  time.Duration
+	Pool       *pgxpool.Pool
+	Queries    *store.Queries
+	Logger     *slog.Logger
+	SessionID  pgtype.UUID
+	MessageID  pgtype.UUID
+	GraceWrite time.Duration
 
 	// runtime state populated as the stream is consumed
-	deltaSeq    int
-	contentBuf  strings.Builder
-	rawEvents   []json.RawMessage
-	bailReason  string // populated by OnInit on MCP-health bail
+	deltaSeq   int
+	contentBuf strings.Builder
+	rawEvents  []json.RawMessage
+	bailReason string // populated by OnInit on MCP-health bail
 
 	// rate-limit observation
 	rateLimitOverage bool
@@ -244,14 +244,14 @@ func (p *ChatPolicy) commitAssistantTerminal(ctx context.Context, e claudeproto.
 	tokensOut := int32(p.tokensOutput)
 
 	if err := q.CommitAssistantTerminal(ctx, store.CommitAssistantTerminalParams{
-		ID:                p.MessageID,
-		Status:            status,
-		Content:           &content,
-		TokensInput:       &tokensIn,
-		TokensOutput:      &tokensOut,
-		CostUsd:           costNumeric,
-		ErrorKind:         ek,
-		RawEventEnvelope:  envelopeBytes,
+		ID:               p.MessageID,
+		Status:           status,
+		Content:          &content,
+		TokensInput:      &tokensIn,
+		TokensOutput:     &tokensOut,
+		CostUsd:          costNumeric,
+		ErrorKind:        ek,
+		RawEventEnvelope: envelopeBytes,
 	}); err != nil {
 		return fmt.Errorf("commit: update message: %w", err)
 	}

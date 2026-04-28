@@ -12,19 +12,19 @@ import "fmt"
 // Categories (FR-002 / FR-003 / FR-031 / FR-061 / FR-081 / FR-083 /
 // FR-016 / spec edge cases):
 //
-//   Vault path
-//     ErrorTokenNotFound, ErrorTokenExpired, ErrorVaultUnavailable
-//   MCP-health path (constructed via BuildMCPErrorKind)
-//     "mcp_<server>_<status>" — e.g. mcp_postgres_failed
-//   Spawn / runtime
-//     ErrorContainerCrashed, ErrorDockerProxyUnreachable,
-//     ErrorRateLimitExhausted, ErrorClaudeRuntimeError,
-//     ErrorTurnTimeout
-//   Lifecycle / quota
-//     ErrorSessionCostCapReached, ErrorSessionEnded,
-//     ErrorSessionNotFound
-//   Shutdown / restart
-//     ErrorSupervisorShutdown, ErrorSupervisorRestart
+//	Vault path
+//	  ErrorTokenNotFound, ErrorTokenExpired, ErrorVaultUnavailable
+//	MCP-health path (constructed via BuildMCPErrorKind)
+//	  "mcp_<server>_<status>" — e.g. mcp_postgres_failed
+//	Spawn / runtime
+//	  ErrorContainerCrashed, ErrorDockerProxyUnreachable,
+//	  ErrorRateLimitExhausted, ErrorClaudeRuntimeError,
+//	  ErrorTurnTimeout
+//	Lifecycle / quota
+//	  ErrorSessionCostCapReached, ErrorSessionEnded,
+//	  ErrorSessionNotFound
+//	Shutdown / restart
+//	  ErrorSupervisorShutdown, ErrorSupervisorRestart
 type ErrorKind = string
 
 const (

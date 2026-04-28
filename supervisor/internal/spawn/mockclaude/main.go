@@ -461,10 +461,11 @@ func runChatMode() {
 // contract); claude reads to EOF when stdin closes.
 //
 // Returns:
-//   turnCount: number of complete user/assistant PAIRS observed
-//              before the final user turn (so 0 = first user turn,
-//              1 = there was at least one prior assistant response)
-//   lastUser:  content string of the trailing user message
+//
+//	turnCount: number of complete user/assistant PAIRS observed
+//	           before the final user turn (so 0 = first user turn,
+//	           1 = there was at least one prior assistant response)
+//	lastUser:  content string of the trailing user message
 func readChatTranscript(r io.Reader) (turnCount int, lastUser string) {
 	type wire struct {
 		Type    string `json:"type"`

@@ -35,15 +35,15 @@ func NewWorker(deps Deps, supervisorBin, agentRoDSN string, mempalace MempalaceW
 
 // HandleMessage processes one operator chat message identified by its
 // chat_messages row id. The flow:
-//   1. Look up the operator row + parent session.
-//   2. EnsureActiveSession (else terminal-write a synthetic assistant
-//      row with error_kind='session_ended').
-//   3. EnsureCostCapNotExceeded (else error_kind='session_cost_cap_reached').
-//   4. INSERT assistant row at status='pending' with
-//      turn_index = operator+1.
-//   5. Build the transcript via AssembleTranscript(prior, operator.content).
-//   6. SpawnTurn — vault fetch + docker run + parser + commit.
-//   7. Done. Mutex released by deferred Unlock.
+//  1. Look up the operator row + parent session.
+//  2. EnsureActiveSession (else terminal-write a synthetic assistant
+//     row with error_kind='session_ended').
+//  3. EnsureCostCapNotExceeded (else error_kind='session_cost_cap_reached').
+//  4. INSERT assistant row at status='pending' with
+//     turn_index = operator+1.
+//  5. Build the transcript via AssembleTranscript(prior, operator.content).
+//  6. SpawnTurn — vault fetch + docker run + parser + commit.
+//  7. Done. Mutex released by deferred Unlock.
 func (w *Worker) HandleMessage(ctx context.Context, operatorMessageID pgtype.UUID) error {
 	q := w.Deps.Queries
 

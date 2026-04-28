@@ -133,17 +133,17 @@ func routeStreamEvent(ctx context.Context, raw []byte, r Router) (RouterAction, 
 	var wire struct {
 		SessionID string `json:"session_id"`
 		Event     struct {
-			Type    string `json:"type"`
-			Index   int    `json:"index"`
-			Delta   struct {
+			Type  string `json:"type"`
+			Index int    `json:"index"`
+			Delta struct {
 				Type string `json:"type"`
 				Text string `json:"text"`
 			} `json:"delta"`
 			Message struct {
 				Usage struct {
-					InputTokens             int `json:"input_tokens"`
-					OutputTokens            int `json:"output_tokens"`
-					CacheReadInputTokens    int `json:"cache_read_input_tokens"`
+					InputTokens              int `json:"input_tokens"`
+					OutputTokens             int `json:"output_tokens"`
+					CacheReadInputTokens     int `json:"cache_read_input_tokens"`
 					CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
 				} `json:"usage"`
 			} `json:"message"`

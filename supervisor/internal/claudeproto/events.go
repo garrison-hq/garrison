@@ -160,22 +160,22 @@ type UnknownEvent struct {
 // `event` object whose `type` discriminates the inner shape:
 //
 //   - "message_start"        — turn begins; `event.message.usage` carries
-//                              cache-token counts (cache_creation_input_
-//                              tokens + cache_read_input_tokens) that
-//                              prove prompt-cache behavior across
-//                              multi-turn replay (M5.1 SC-002).
+//     cache-token counts (cache_creation_input_
+//     tokens + cache_read_input_tokens) that
+//     prove prompt-cache behavior across
+//     multi-turn replay (M5.1 SC-002).
 //   - "content_block_start"  — assistant content block begins; index
-//                              identifies which block of the message.
+//     identifies which block of the message.
 //   - "content_block_delta"  — the load-bearing event for chat. Inner
-//                              `delta.type` is typically "text_delta"
-//                              with `delta.text` carrying the appended
-//                              characters; the chat policy aggregates
-//                              these into the assistant message content
-//                              and emits per-batch pg_notify deltas
-//                              (FR-051).
+//     `delta.type` is typically "text_delta"
+//     with `delta.text` carrying the appended
+//     characters; the chat policy aggregates
+//     these into the assistant message content
+//     and emits per-batch pg_notify deltas
+//     (FR-051).
 //   - "content_block_stop"   — assistant content block done.
 //   - "message_delta"        — usage / stop_reason updates for the
-//                              in-flight message.
+//     in-flight message.
 //   - "message_stop"         — turn ends.
 //
 // Pre-M5.1 stream_event lines routed to OnUnknown (the M2.x ticket-spawn
@@ -216,8 +216,8 @@ type StreamInner struct {
 	// partially on message_delta). cache_read_input_tokens > 0 on
 	// turn ≥ 2 of a multi-turn chat is the SC-002 signal that the
 	// supervisor's transcript replay produced a cache hit.
-	InputTokens         int
-	OutputTokens        int
-	CacheReadInput      int
-	CacheCreationInput  int
+	InputTokens        int
+	OutputTokens       int
+	CacheReadInput     int
+	CacheCreationInput int
 }

@@ -18,8 +18,8 @@ import (
 //
 // FR-050 / FR-051 / FR-070 / FR-071 enumerate these.
 const (
-	ChannelChatMessageSent       = "chat.message.sent"
-	ChannelChatAssistantDelta    = "chat.assistant.delta"
+	ChannelChatMessageSent        = "chat.message.sent"
+	ChannelChatAssistantDelta     = "chat.assistant.delta"
 	ChannelWorkChatSessionStarted = "work.chat.session_started"
 	ChannelWorkChatMessageSent    = "work.chat.message_sent"
 	ChannelWorkChatSessionEnded   = "work.chat.session_ended"
@@ -65,8 +65,8 @@ func EmitDelta(ctx context.Context, pool *pgxpool.Pool, messageID pgtype.UUID, s
 // no operator content, no message text, no tokens.
 func EmitSessionStarted(ctx context.Context, tx pgx.Tx, sessionID, userID pgtype.UUID) error {
 	body := struct {
-		ChatSessionID    string `json:"chat_session_id"`
-		StartedByUserID  string `json:"started_by_user_id"`
+		ChatSessionID   string `json:"chat_session_id"`
+		StartedByUserID string `json:"started_by_user_id"`
 	}{
 		ChatSessionID:   uuidString(sessionID),
 		StartedByUserID: uuidString(userID),

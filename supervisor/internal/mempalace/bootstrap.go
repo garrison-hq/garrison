@@ -20,7 +20,7 @@ type BootstrapConfig struct {
 	MempalaceContainer string
 	PalacePath         string
 	Logger             *slog.Logger
-	InitTimeout        time.Duration // default 30s
+	InitTimeout        time.Duration         // default 30s
 	Exec               dockerexec.DockerExec // injection seam; nil → dockerexec.RealDockerExec{DockerBin}
 }
 

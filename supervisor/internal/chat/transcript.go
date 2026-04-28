@@ -11,11 +11,12 @@ import (
 // AssembleTranscript composes the NDJSON bytes the supervisor pipes
 // into the chat container's stdin. Each line is a single JSON object
 // in the wire shape claude expects under
-//   `--input-format stream-json --output-format stream-json`:
 //
-//   {"type":"user","message":{"role":"user","content":"..."}}
-//   {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"..."}]}}
-//   {"type":"user","message":{"role":"user","content":"<current turn>"}}
+//	`--input-format stream-json --output-format stream-json`:
+//
+//	{"type":"user","message":{"role":"user","content":"..."}}
+//	{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"..."}]}}
+//	{"type":"user","message":{"role":"user","content":"<current turn>"}}
 //
 // Operator rows always replay; assistant rows replay only when their
 // status is 'completed' (clarify Q4: failed / aborted turns are

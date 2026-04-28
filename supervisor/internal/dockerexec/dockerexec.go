@@ -3,17 +3,17 @@
 // configured in docker-compose.yml). Two call shapes share the package:
 //
 //   - Run    — one-shot exec: write stdin, capture full stdout/stderr
-//              buffers, return on subprocess exit. Used by mempalace
-//              for `docker exec garrison-mempalace python -m mempalace.mcp`
-//              one-shot invocations (bootstrap, wake-up, MCP server
-//              spawning of the per-invocation mempalace MCP).
+//     buffers, return on subprocess exit. Used by mempalace
+//     for `docker exec garrison-mempalace python -m mempalace.mcp`
+//     one-shot invocations (bootstrap, wake-up, MCP server
+//     spawning of the per-invocation mempalace MCP).
 //
 //   - RunStream — streaming exec: caller-supplied callbacks write to
-//                 the subprocess stdin and scan its stdout. Used by the
-//                 M5.1 chat runtime to pipe a multi-turn conversation
-//                 transcript via `docker run -i --rm garrison-claude:m5
-//                 -p --input-format stream-json` and stream NDJSON
-//                 stdout back through the spawn pipeline parser.
+//     the subprocess stdin and scan its stdout. Used by the
+//     M5.1 chat runtime to pipe a multi-turn conversation
+//     transcript via `docker run -i --rm garrison-claude:m5
+//     -p --input-format stream-json` and stream NDJSON
+//     stdout back through the spawn pipeline parser.
 //
 // The interface lets unit tests substitute a fake that records argv +
 // returns canned output without exec'ing real Docker.

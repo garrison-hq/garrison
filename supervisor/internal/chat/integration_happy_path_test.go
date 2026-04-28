@@ -60,9 +60,9 @@ func (f *fakeVault) Fetch(ctx context.Context, req []vault.GrantRow) (map[string
 // NDJSON to the scanStdout callback, returns a *exec.Cmd that exits
 // cleanly. Spike §8.1 trace shape used for fixtures.
 type fakeDockerExec struct {
-	mu         sync.Mutex
-	calls      int
-	stdinSeen  []byte
+	mu           sync.Mutex
+	calls        int
+	stdinSeen    []byte
 	cannedNDJSON string
 }
 
@@ -130,13 +130,13 @@ func TestM5_1_HappyPath_SingleTurn(t *testing.T) {
 	userID := newUUID(t)
 
 	deps := Deps{
-		Pool:        pool,
-		Queries:     q,
-		VaultClient: vaultClient,
-		DockerExec:  &fakeDockerExec{cannedNDJSON: cannedHappyPathNDJSON},
-		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
-		CustomerID:  customerID,
-		OAuthVaultPath: "/operator/CLAUDE_CODE_OAUTH_TOKEN",
+		Pool:               pool,
+		Queries:            q,
+		VaultClient:        vaultClient,
+		DockerExec:         &fakeDockerExec{cannedNDJSON: cannedHappyPathNDJSON},
+		Logger:             slog.New(slog.NewTextHandler(io.Discard, nil)),
+		CustomerID:         customerID,
+		OAuthVaultPath:     "/operator/CLAUDE_CODE_OAUTH_TOKEN",
 		ChatContainerImage: "garrison-mockclaude:m5",
 		MCPConfigDir:       t.TempDir(),
 		DockerNetwork:      "garrison-net",
