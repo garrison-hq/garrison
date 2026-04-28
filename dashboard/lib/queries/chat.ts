@@ -186,16 +186,12 @@ function extractStreamEvents(envelope: unknown): unknown[] {
 function isSuccessfulMempalaceToolEvent(ev: unknown): boolean {
   if (typeof ev !== 'object' || ev === null) return false;
   const e = ev as Record<string, unknown>;
-  // tool_result-shape events carry mcp_server + is_error + tool_name.
-  // tool_use-shape events carry server_name. Accept either shape;
-  // count it only when is_error is explicitly false (defensive default).
-  const server =
-    e['mcp_server'] ??
-    e['server_name'] ??
-    (typeof e['tool_use'] === 'object' && e['tool_use'] !== null
-      ? (e['tool_use'] as Record<string, unknown>)['server_name']
-      : undefined);
+  // Only tool_result events count — they carry the success/failure
+  // signal via is_error. tool_use events are dispatch-only and tell
+  // us nothing about whether the call succeeded.
+  if (e['type'] !== 'tool_result') return false;
+  const server = e['mcp_server'] ?? e['server_name'];
   if (server !== 'mempalace') return false;
-  if ('is_error' in e && e['is_error'] !== false) return false;
-  return true;
+  // is_error must be explicitly false. Missing or true → failure.
+  return e['is_error'] === false;
 }

@@ -232,14 +232,17 @@ describe('chat actions — deleteChatSession', () => {
     try {
       // Seed a vault_access_log row referencing the session via JSONB
       // metadata. The FK is JSON-deep, not a Postgres FK, so the
-      // session DELETE must not cascade to it (FR-236).
+      // session DELETE must not cascade to it (FR-236). Build the
+      // metadata via jsonb_build_object so the cast lands on
+      // server-side construction (avoids the parameter-type-inference
+      // pitfall postgres-js hits with bare string-to-jsonb casts).
       await sql`
-        INSERT INTO vault_access_log (id, role_slug, secret_path, customer_id, accessed_at, outcome, agent_instance_id, metadata)
+        INSERT INTO vault_access_log (secret_path, customer_id, outcome, agent_instance_id, metadata)
         VALUES (
-          gen_random_uuid(), 'operator', '/test/SECRET',
-          '00000000-0000-0000-0000-000000000001'::uuid, NOW(),
+          '/test/SECRET',
+          '00000000-0000-0000-0000-000000000001'::uuid,
           'success', NULL,
-          ${JSON.stringify({ chat_session_id: sessionId, actor_user_id: mockUserId })}::jsonb
+          jsonb_build_object('chat_session_id', ${sessionId}::text, 'actor_user_id', ${mockUserId}::text)
         )
       `;
     } finally {

@@ -119,6 +119,13 @@ export type ActivityEvent =
       secretPath: string;
     }
   | {
+      kind: 'chat.session_deleted';
+      eventId: string;
+      at: string;
+      chatSessionId: string;
+      actorUserId: string;
+    }
+  | {
       kind: 'unknown';
       eventId: string;
       at: string;

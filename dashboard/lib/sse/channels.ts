@@ -36,6 +36,7 @@ export const KNOWN_CHANNELS = [
   'work.ticket.created',
   'work.ticket.edited',
   'work.agent.edited',
+  'work.chat.session_deleted',
 ] as const;
 export type KnownChannel = (typeof KNOWN_CHANNELS)[number];
 
@@ -117,6 +118,16 @@ export function parseChannel(row: OutboxRow): ActivityEvent {
       at,
       roleSlug: pickString(payload.role_slug, payload.roleSlug),
       diff: pickRecord(payload.diff),
+    };
+  }
+
+  if (row.channel === 'work.chat.session_deleted') {
+    return {
+      kind: 'chat.session_deleted',
+      eventId: row.id,
+      at,
+      chatSessionId: pickString(payload.chat_session_id, payload.chatSessionId),
+      actorUserId: pickString(payload.actor_user_id, payload.actorUserId),
     };
   }
 

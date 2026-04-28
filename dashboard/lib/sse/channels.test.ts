@@ -14,6 +14,7 @@ describe('lib/sse/channels', () => {
       'work.ticket.created',
       'work.ticket.edited',
       'work.agent.edited',
+      'work.chat.session_deleted',
     ]);
   });
 
@@ -143,10 +144,62 @@ describe('lib/sse/channels', () => {
     expect(isKnownChannel('work.ticket.created')).toBe(true);
     expect(isKnownChannel('work.ticket.edited')).toBe(true);
     expect(isKnownChannel('work.agent.edited')).toBe(true);
+    expect(isKnownChannel('work.chat.session_deleted')).toBe(true);
     expect(isKnownChannel('work.ticket.transitioned.engineering.todo.in_dev')).toBe(true);
     expect(isKnownChannel('work.ticket.transitioned.qa-engineer.in_dev.qa_review')).toBe(true);
     expect(isKnownChannel('work.vault.secret_created')).toBe(true);
     expect(isKnownChannel('work.vault.value_revealed')).toBe(true);
     expect(isKnownChannel('something.else')).toBe(false);
+  });
+
+  // ────────────────────────────────────────────────────────────
+  // M5.2 — work.chat.session_deleted literal channel
+  // ────────────────────────────────────────────────────────────
+
+  it('TestSessionDeletedChannelKnown', () => {
+    expect((KNOWN_CHANNELS as readonly string[]).includes('work.chat.session_deleted')).toBe(true);
+    expect(isKnownChannel('work.chat.session_deleted')).toBe(true);
+  });
+
+  it('TestSessionDeletedParsesPayload', () => {
+    const event = parseChannel({
+      id: 'evt-chat-1',
+      channel: 'work.chat.session_deleted',
+      payload: {
+        chat_session_id: '11111111-1111-1111-1111-111111111111',
+        actor_user_id: '22222222-2222-2222-2222-222222222222',
+      },
+      createdAt: new Date('2026-04-29T13:00:00Z'),
+    });
+    expect(event.kind).toBe('chat.session_deleted');
+    if (event.kind !== 'chat.session_deleted') return;
+    expect(event.chatSessionId).toBe('11111111-1111-1111-1111-111111111111');
+    expect(event.actorUserId).toBe('22222222-2222-2222-2222-222222222222');
+    expect(event.eventId).toBe('evt-chat-1');
+  });
+
+  it('TestSessionDeletedRejectsExtraneousFields', () => {
+    // Rule 6 backstop — even if the supervisor (or a future bug)
+    // somehow sends content/message_id alongside the IDs, parseChannel
+    // must NOT surface them on the variant. The discriminated union
+    // shape limits what downstream code can read.
+    const event = parseChannel({
+      id: 'evt-chat-2',
+      channel: 'work.chat.session_deleted',
+      payload: {
+        chat_session_id: '33333333-3333-3333-3333-333333333333',
+        actor_user_id: '44444444-4444-4444-4444-444444444444',
+        content: 'do not leak this',
+        message_id: '55555555-5555-5555-5555-555555555555',
+      },
+      createdAt: new Date('2026-04-29T13:01:00Z'),
+    });
+    expect(event.kind).toBe('chat.session_deleted');
+    const keys = Object.keys(event);
+    expect(keys).toContain('chatSessionId');
+    expect(keys).toContain('actorUserId');
+    expect(keys).not.toContain('content');
+    expect(keys).not.toContain('message_id');
+    expect(keys).not.toContain('messageId');
   });
 });

@@ -248,7 +248,7 @@ export async function endChatSession(
     }
     await tx.execute(sql`SELECT pg_notify(
       'work.chat.session_ended',
-      json_build_object('chat_session_id', ${sessionId}, 'status', 'ended')::text
+      json_build_object('chat_session_id', ${sessionId}::text, 'status', 'ended')::text
     )`);
     return updated[0];
   });
@@ -289,7 +289,7 @@ export async function deleteChatSession(sessionId: string): Promise<void> {
     await tx.delete(chatSessions).where(eq(chatSessions.id, sessionId));
     await tx.execute(sql`SELECT pg_notify(
       'work.chat.session_deleted',
-      json_build_object('chat_session_id', ${sessionId}, 'actor_user_id', ${userId})::text
+      json_build_object('chat_session_id', ${sessionId}::text, 'actor_user_id', ${userId}::text)::text
     )`);
   });
 }
