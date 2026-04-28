@@ -82,6 +82,12 @@ type Deps struct {
 	// Default: 30 minutes.
 	SessionIdleTimeout time.Duration
 
+	// IdleSweepTick is the cadence at which RunIdleSweep checks for
+	// timed-out sessions. Production: 60s. Tests can override to a
+	// smaller interval for a faster CI signal. Zero falls back to
+	// the production default.
+	IdleSweepTick time.Duration
+
 	// SessionCostCapUSD is the soft per-session cap. Reactive check
 	// (clarify Q5): if chat_sessions.total_cost_usd >= cap at spawn
 	// time, the supervisor refuses the next turn with error_kind=

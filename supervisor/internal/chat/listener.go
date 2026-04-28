@@ -117,17 +117,21 @@ func RunRestartSweep(ctx context.Context, deps Deps) error {
 	return nil
 }
 
-// RunIdleSweep ticks every 60s and marks active sessions whose newest
-// chat_messages.created_at is older than SessionIdleTimeout as 'ended'.
-// Joins the supervisor's main errgroup; respects ctx cancellation.
-// FR-081.
+// RunIdleSweep ticks every IdleSweepTick interval (default 60s) and
+// marks active sessions whose newest chat_messages.created_at is older
+// than SessionIdleTimeout as 'ended'. Joins the supervisor's main
+// errgroup; respects ctx cancellation. FR-081.
 func RunIdleSweep(ctx context.Context, deps Deps) error {
 	if deps.SessionIdleTimeout <= 0 {
 		deps.Logger.Info("chat: idle sweep disabled (SessionIdleTimeout <= 0)")
 		<-ctx.Done()
 		return nil
 	}
-	t := time.NewTicker(60 * time.Second)
+	tick := deps.IdleSweepTick
+	if tick <= 0 {
+		tick = 60 * time.Second
+	}
+	t := time.NewTicker(tick)
 	defer t.Stop()
 	for {
 		select {
