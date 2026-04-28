@@ -277,6 +277,18 @@ func runDaemon() int {
 		return healthServer.Serve(gctx)
 	})
 
+	// M4 — agents.changed cache invalidator (T014 / FR-100).
+	// The dashboard's editAgent server action emits
+	// pg_notify('agents.changed', role_slug) on every successful
+	// agents-row write; the listener drives Cache.Reset so the
+	// next spawn picks up the new config. The listener owns its
+	// own dedicated pgx.Conn (LISTEN is connection-scoped) and
+	// cleanly exits on root-context cancellation per AGENTS.md
+	// §Concurrency rule 1.
+	if err := agents.StartChangeListener(gctx, pool, agentsCache); err != nil {
+		logger.Warn("agents.changed listener failed to start; agent edits will not propagate to the supervisor cache until restart", "err", err)
+	}
+
 	// M2.2 — hygiene listener + sweep. Both goroutines join the errgroup
 	// so a SIGTERM cascades to them via root-ctx cancellation; each one
 	// finishes its in-flight UPDATE through context.WithoutCancel +

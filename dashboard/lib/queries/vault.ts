@@ -29,6 +29,8 @@ export interface SecretMetadataRow {
   lastRotatedAt: Date | null;
   /** Status string derived from lastRotatedAt + rotationCadence. */
   rotationStatus: 'fresh' | 'aging' | 'overdue' | 'never';
+  /** M4 / FR-072: drives rotation UI dispatch. */
+  rotationProvider: 'infisical_native' | 'manual_paste' | 'not_rotatable';
   allowedRoleSlugs: string[];
 }
 
@@ -74,6 +76,51 @@ function classifyRotation(
   return 'fresh';
 }
 
+// M4 / T007 — single-secret fetch for the secret edit form.
+// Returns the editable fields + updated_at version token used by
+// the optimistic-lock check in editSecret per FR-084.
+export interface SecretEditSnapshot {
+  secretPath: string;
+  customerId: string;
+  provenance: string;
+  rotationCadence: string;
+  rotationProvider: 'infisical_native' | 'manual_paste' | 'not_rotatable';
+  updatedAt: string;
+}
+
+export async function fetchSecretForEdit(
+  secretPath: string,
+): Promise<SecretEditSnapshot | null> {
+  const rows = await vaultRoDb.execute<{
+    secret_path: string;
+    customer_id: string;
+    provenance: string;
+    rotation_cadence: string;
+    rotation_provider: string;
+    updated_at: string;
+  }>(sql`
+    SELECT secret_path, customer_id, provenance,
+           rotation_cadence::text AS rotation_cadence,
+           rotation_provider, updated_at
+      FROM secret_metadata
+     WHERE secret_path = ${secretPath}
+     LIMIT 1
+  `);
+  if (rows.length === 0) return null;
+  const r = rows[0];
+  return {
+    secretPath: r.secret_path,
+    customerId: r.customer_id,
+    provenance: r.provenance,
+    rotationCadence: r.rotation_cadence,
+    rotationProvider:
+      r.rotation_provider === 'infisical_native' || r.rotation_provider === 'not_rotatable'
+        ? r.rotation_provider
+        : 'manual_paste',
+    updatedAt: r.updated_at,
+  };
+}
+
 export async function fetchSecretsList(): Promise<SecretMetadataRow[]> {
   const rows = await vaultRoDb.execute<{
     secret_path: string;
@@ -81,10 +128,11 @@ export async function fetchSecretsList(): Promise<SecretMetadataRow[]> {
     provenance: string;
     rotation_cadence: string;
     last_rotated_at: Date | null;
+    rotation_provider: string;
     allowed_role_slugs: string[];
   }>(sql`
     SELECT secret_path, customer_id, provenance, rotation_cadence::text AS rotation_cadence,
-           last_rotated_at, allowed_role_slugs
+           last_rotated_at, rotation_provider, allowed_role_slugs
       FROM secret_metadata
      ORDER BY secret_path ASC
   `);
@@ -95,6 +143,10 @@ export async function fetchSecretsList(): Promise<SecretMetadataRow[]> {
     rotationCadence: r.rotation_cadence,
     lastRotatedAt: r.last_rotated_at,
     rotationStatus: classifyRotation(r.last_rotated_at, r.rotation_cadence),
+    rotationProvider:
+      r.rotation_provider === 'infisical_native' || r.rotation_provider === 'not_rotatable'
+        ? r.rotation_provider
+        : 'manual_paste',
     allowedRoleSlugs: r.allowed_role_slugs ?? [],
   }));
 }
@@ -139,6 +191,36 @@ export async function fetchAuditLog(filter: VaultAuditFilter = {}): Promise<{
     })),
     hasMore,
   };
+}
+
+// M4 / T008 — full grants list for the matrix view's grant
+// editor. Returns each agent_role_secrets row with the four
+// fields the addGrant/removeGrant server actions need:
+// role_slug, env_var_name, secret_path, granted_at.
+export interface GrantRow {
+  roleSlug: string;
+  envVarName: string;
+  secretPath: string;
+  grantedAt: Date;
+}
+
+export async function fetchAllGrants(): Promise<GrantRow[]> {
+  const rows = await vaultRoDb.execute<{
+    role_slug: string;
+    env_var_name: string;
+    secret_path: string;
+    granted_at: Date;
+  }>(sql`
+    SELECT role_slug, env_var_name, secret_path, granted_at
+      FROM agent_role_secrets
+     ORDER BY role_slug ASC, env_var_name ASC
+  `);
+  return rows.map((r) => ({
+    roleSlug: r.role_slug,
+    envVarName: r.env_var_name,
+    secretPath: r.secret_path,
+    grantedAt: r.granted_at,
+  }));
 }
 
 export async function fetchRoleSecretMatrix(): Promise<{

@@ -7,16 +7,26 @@ import { getTranslations } from 'next-intl/server';
 // the operator-supplied design notes — replaces the previous
 // underlined-anchor row.
 
-type VaultTab = 'secrets' | 'audit' | 'matrix';
+type VaultTab = 'secrets' | 'audit' | 'matrix' | 'rotation';
 
-const TABS: { id: VaultTab; href: string; key: 'secretsTab' | 'auditTab' | 'matrixTab' }[] = [
-  { id: 'secrets', href: '/vault', key: 'secretsTab' },
-  { id: 'audit', href: '/vault/audit', key: 'auditTab' },
-  { id: 'matrix', href: '/vault/matrix', key: 'matrixTab' },
+const TABS: { id: VaultTab; href: string; label: string }[] = [
+  { id: 'secrets', href: '/vault', label: 'secrets' },
+  { id: 'audit', href: '/vault/audit', label: 'audit' },
+  { id: 'matrix', href: '/vault/matrix', label: 'matrix' },
+  { id: 'rotation', href: '/vault/rotation', label: 'rotation' },
 ];
 
 export async function VaultTabs({ active }: Readonly<{ active: VaultTab }>) {
   const t = await getTranslations('vault');
+  // M3 catalog covers secretsTab/auditTab/matrixTab; M4 adds
+  // rotation as a fourth tab. Until messages/en.json gains the
+  // rotationTab key the tab uses an inline literal label.
+  const labelFor = (tab: typeof TABS[number]): string => {
+    if (tab.id === 'rotation') return 'rotation';
+    if (tab.id === 'secrets') return t('secretsTab');
+    if (tab.id === 'audit') return t('auditTab');
+    return t('matrixTab');
+  };
   return (
     <nav
       aria-label={t('sectionsLabel')}
@@ -35,7 +45,7 @@ export async function VaultTabs({ active }: Readonly<{ active: VaultTab }>) {
             }`}
             aria-current={selected ? 'page' : undefined}
           >
-            {t(tab.key)}
+            {labelFor(tab)}
           </Link>
         );
       })}

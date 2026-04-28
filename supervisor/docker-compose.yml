@@ -164,6 +164,16 @@ services:
       BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?BETTER_AUTH_SECRET required}
       BETTER_AUTH_URL: ${BETTER_AUTH_URL:-http://localhost:3000}
       PORT: "3000"
+      # M4 — Infisical credentials for the dashboard ML.
+      # Optional: the dashboard boots without these and surfaces a
+      # "configure vault" prompt; vault server actions throw
+      # VaultError(Unavailable) at call time per
+      # lib/vault/infisicalClient.ts.
+      INFISICAL_DASHBOARD_ML_CLIENT_ID: ${INFISICAL_DASHBOARD_ML_CLIENT_ID:-}
+      INFISICAL_DASHBOARD_ML_CLIENT_SECRET: ${INFISICAL_DASHBOARD_ML_CLIENT_SECRET:-}
+      INFISICAL_DASHBOARD_PROJECT_ID: ${INFISICAL_DASHBOARD_PROJECT_ID:-}
+      INFISICAL_DASHBOARD_ENVIRONMENT: ${INFISICAL_DASHBOARD_ENVIRONMENT:-prod}
+      INFISICAL_SITE_URL: ${INFISICAL_SITE_URL:-http://garrison-infisical:8080}
     ports:
       - "3000:3000"
     restart: unless-stopped

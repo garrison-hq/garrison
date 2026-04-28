@@ -9,6 +9,9 @@ sql:
       - ../migrations/20260423000004_m2_2_mempalace.sql
       - ../migrations/20260425000008_m2_3_vault.sql
       - ../migrations/20260425000009_m2_3_agents_mcp_config.sql
+      - ../migrations/20260427000010_m4_supervisor_schema_extensions.sql
+      - ../migrations/20260427000011_m4_vault_access_log_optional_agent.sql
+      - ../migrations/20260427000013_m4_agents_updated_at.sql
     gen:
       go:
         package: store

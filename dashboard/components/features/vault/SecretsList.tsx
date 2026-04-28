@@ -3,6 +3,7 @@ import { Chip } from '@/components/ui/Chip';
 import { Tbl, Th, Td } from '@/components/ui/Tbl';
 import { relativeTime, formatIsoFull } from '@/lib/format/relativeTime';
 import type { SecretMetadataRow } from '@/lib/queries/vault';
+import { SecretRowActions } from '@/components/features/vault-secret-form/SecretRowActions';
 
 function rotationTone(
   status: SecretMetadataRow['rotationStatus'],
@@ -31,6 +32,7 @@ export async function SecretsList({
           <Th>{t('roles')}</Th>
           <Th>{t('lastRotated')}</Th>
           <Th>{t('status')}</Th>
+          <Th></Th>
         </tr>
       </thead>
       <tbody>
@@ -70,6 +72,9 @@ export async function SecretsList({
               <Chip tone={rotationTone(r.rotationStatus)}>
                 {r.rotationStatus}
               </Chip>
+            </Td>
+            <Td>
+              <SecretRowActions secretPath={r.secretPath} />
             </Td>
           </tr>
         ))}

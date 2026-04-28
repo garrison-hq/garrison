@@ -397,8 +397,140 @@ pattern.
 
 ---
 
+## M4 — operator dashboard mutations
+
+The M4 milestone ships operator-driven mutation surfaces (vault
+writes, ticket mutations, agent settings editor) on top of the M3
+dashboard. New schema migrations, a parked-since-M2.3 Machine
+Identity activation, dashboard-side Infisical SDK wiring, and a
+small supervisor-side LISTEN goroutine for cache invalidation.
+
+**1. Goose migration ordering**
+
+Run `goose up` BEFORE `bun run drizzle:pull` regenerates the
+supervisor schema TypeScript bindings. The M4 goose migrations
+are:
+
+- `20260427000010_m4_supervisor_schema_extensions.sql` —
+  `ticket_transitions.suspected_secret_pattern_category` +
+  `secret_metadata.rotation_provider` + `vault_access_log.metadata`
+- `20260427000011_m4_vault_access_log_optional_agent.sql` —
+  relax `vault_access_log.agent_instance_id` to nullable so
+  operator-driven vault mutations (no agent_instance_id) can
+  audit
+- `20260427000012_m4_dashboard_app_vault_write_grants.sql` —
+  grant INSERT/UPDATE/DELETE on the three vault tables to
+  `garrison_dashboard_app` so the dashboard's server actions
+  can write
+- `20260427000013_m4_agents_updated_at.sql` —
+  `agents.updated_at` column + auto-bump trigger; the agent
+  settings editor uses it as the optimistic-lock version token
+  per FR-101
+
+```sh
+# from the supervisor directory
+goose -dir ../migrations postgres "${SUPERVISOR_DSN}" up
+```
+
+After this, regenerate the dashboard schema bindings:
+
+```sh
+cd dashboard
+bun run drizzle:pull
+```
+
+**2. `garrison-dashboard` Machine Identity provisioning**
+
+The dashboard authenticates to Infisical as a Machine Identity
+distinct from the supervisor's `garrison-supervisor` ML. M2.3
+created the dashboard ML and "parked" it (no credentials issued).
+M4 activates it.
+
+In Infisical UI (`https://app.infisical.com` or self-hosted):
+
+1. **Identities → Machine Identities**: confirm `garrison-dashboard`
+   exists. If missing, create it.
+2. **Add to project**: assign read+write permissions on the
+   secrets path tree the dashboard will manage. Typical scope:
+   the entire project on a single environment (`prod`); narrower
+   scopes are fine for stricter deployments.
+3. **Issue Universal Auth credentials**: client ID + client secret.
+   Persist both in your secret manager (1Password, etc.) under
+   the operator's vault. Never commit either.
+
+**3. Dashboard runtime env vars**
+
+Set the four required + one optional env var on the dashboard
+container (Coolify env, restricted file, or `.env` per your
+deployment):
+
+```sh
+# Required
+INFISICAL_DASHBOARD_ML_CLIENT_ID=<from step 2>
+INFISICAL_DASHBOARD_ML_CLIENT_SECRET=<from step 2>
+INFISICAL_DASHBOARD_PROJECT_ID=<the Infisical project id>
+
+# Optional (defaults shown)
+INFISICAL_DASHBOARD_ENVIRONMENT=prod
+INFISICAL_SITE_URL=http://garrison-infisical:8080
+```
+
+If any of the three required vars are missing, the dashboard
+boots normally but vault server actions throw
+`VaultError(Unavailable)` at call time. The UI's
+`isVaultConfigured()` predicate detects this and surfaces a
+"configure vault" prompt instead of action buttons. Non-vault
+surfaces (org overview, hygiene, agents registry) work without
+Infisical credentials.
+
+**4. Dashboard image digest pinning**
+
+Continues the M3 pattern. After build:
+
+```sh
+docker images --digests garrison-dashboard:dev
+# record the @sha256:... digest in deployment notes
+```
+
+Pin in `compose` or your orchestration via the digest, not the
+floating tag.
+
+**5. `secret_metadata.rotation_provider` reclassification**
+
+Migration `20260427000013_m4_agents_updated_at.sql` and the
+prior `20260427000010_m4_supervisor_schema_extensions.sql`
+default `rotation_provider` to `manual_paste` for every existing
+secret_metadata row. After M4 ships, the operator should
+reclassify any secrets that Infisical can natively rotate
+(Postgres credentials, AWS IAM, etc.) to `infisical_native` via
+the M4 vault edit UI. Until reclassified, those secrets show
+the paste-new-value rotation flow even where Infisical native
+rotation would apply. No data is at risk; it's a UX nuance.
+
+**6. Supervisor restart for the agents.changed listener**
+
+T014 adds a LISTEN goroutine on the supervisor for the
+`agents.changed` channel; it starts at process boot. After
+deploying the M4 supervisor binary, restart the supervisor
+once so the goroutine starts. Subsequent agents-row writes from
+the dashboard propagate via `pg_notify` without restart.
+
+```sh
+# rolling restart on the same compose stack
+docker compose restart supervisor
+```
+
+If the supervisor is started without the M4 binary, agent edits
+won't propagate to the supervisor's startup-once cache —
+operators see "next spawn" still using the prior config.
+Surface the gap by checking the supervisor's logs for the
+"agents.changed listener failed to start" warning at boot.
+
+---
+
 ## Changelog
 
+- **2026-04-27**: M4 dashboard mutations deployment section added (4 migrations, dashboard ML activation, supervisor restart for the cache invalidator).
 - **2026-04-26**: M3 dashboard deployment section added.
 - **2026-04-24**: M2.3 Infisical deployment section added.
 - **2026-04-22**: Initial version. M2.1's `garrison_agent_ro` password discipline codified. M2.2 and M2.3 sections sketched based on planned milestone designs.

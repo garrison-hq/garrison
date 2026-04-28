@@ -164,13 +164,106 @@ jobs:
           DASHBOARD_RO_DSN: postgres://placeholder@localhost:5432/x
           BETTER_AUTH_SECRET: ci_placeholder_long_enough_xxxxxxxxxxxxxxxxx
 
+  dashboard-test-integration:
+    name: dashboard (Playwright integration)
+    runs-on: ubuntu-latest
+    # The Playwright suite boots three testcontainers (Postgres,
+    # Redis, Infisical v0.159.22) plus the dashboard standalone
+    # bundle, so it is the slowest dashboard job. Hard cap to
+    # surface a hung container faster than the workflow default.
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: dashboard
+    steps:
+      - uses: actions/checkout@v4
+      # Node 22 (LTS Jod) for Playwright's CLI loader. Playwright
+      # ≥1.50 requires Node ≥18.19; we standardise on the same
+      # Node major Bun's runtime targets (Bun runs the test code,
+      # Node just hosts the Playwright loader).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      # SHA-pinned per githubactions:S7637; resolves to v2 today.
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: latest
+      # The harness shells out to the goose CLI and uses the
+      # supervisor's go.mod to pin the version.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: supervisor/go.mod
+          cache-dependency-path: supervisor/go.sum
+      - name: Install goose CLI
+        run: go install github.com/pressly/goose/v3/cmd/goose@v3.21.1
+      - run: bun install --frozen-lockfile
+      # Pre-pull Docker images so the per-test boot doesn't
+      # contend with the registry. ~700 MB total; pulled in
+      # parallel.
+      - name: Pre-pull testcontainer images
+        run: |
+          docker pull postgres:17 &
+          docker pull postgres:15-alpine &
+          docker pull redis:7-alpine &
+          docker pull infisical/infisical:v0.159.22 &
+          wait
+      # `--with-deps` installs the Linux packages Chromium needs
+      # (libnss, libgbm, fonts, …). Cheaper than running
+      # `bunx playwright install-deps` separately.
+      - name: Install Playwright Chromium
+        run: bunx playwright install --with-deps chromium
+      # CI runs only the chromium-1280 project; the 1024 and 768
+      # viewports gate responsive specs locally during the M3
+      # polish round but don't add coverage that the primary
+      # viewport doesn't already pin. Re-run all three locally
+      # before a release.
+      - name: Run Playwright integration suite
+        run: bunx playwright test --project=chromium-1280
+      # Path A — server-side V8 coverage. The Playwright harness
+      # spawns the dashboard with NODE_V8_COVERAGE; this step
+      # converts those profiles to lcov via v8-to-istanbul.
+      # Runs after Playwright exits so the dashboard has flushed
+      # its profiles via the SIGTERM handler. See
+      # tests/integration/_server-coverage.ts.
+      - name: Convert server-side V8 profiles to lcov
+        run: bun run tests/integration/_server-coverage.ts
+        if: always()
+      # Browser-side V8 coverage (Path B) from monocart-coverage
+      # -reports → consumed by the SonarCloud job below.
+      - name: Upload integration coverage (browser)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dashboard-integration-coverage
+          path: dashboard/coverage/integration/lcov.info
+          if-no-files-found: warn
+      - name: Upload integration coverage (server)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dashboard-integration-server-coverage
+          path: dashboard/coverage/integration-server-report/lcov.info
+          if-no-files-found: warn
+      - name: Upload Playwright trace + report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-traces
+          path: |
+            dashboard/test-results/
+            dashboard/playwright-report/
+          if-no-files-found: ignore
+          retention-days: 7
+
   sonarcloud:
     name: SonarCloud scan
     runs-on: ubuntu-latest
     # Needs all test suites that produce coverage. If any fails,
     # Sonar doesn't run — better than posting a stale coverage
-    # number.
-    needs: [test-unit, test-integration, dashboard-test-unit]
+    # number. dashboard-test-integration is included so the
+    # browser-side V8 coverage (Path B, M4 retro) is read alongside
+    # the supervisor + vitest lcov.
+    needs: [test-unit, test-integration, dashboard-test-unit, dashboard-test-integration]
     steps:
       # fetch-depth 0 gives Sonar full git history so blame-based
       # new-code detection and authorship work correctly.
@@ -195,6 +288,22 @@ jobs:
         with:
           name: dashboard-coverage
           path: dashboard/coverage
+      # Browser-side V8 coverage (Path B — Playwright + monocart)
+      # AND server-side V8 coverage (Path A — NODE_V8_COVERAGE +
+      # v8-to-istanbul). Sonar reads sonar.javascript.lcov
+      # .reportPaths as a comma-list → all three lcov files
+      # contribute to the metric (unit + integration browser +
+      # integration server).
+      - name: Download dashboard integration coverage (browser)
+        uses: actions/download-artifact@v4
+        with:
+          name: dashboard-integration-coverage
+          path: dashboard/coverage/integration
+      - name: Download dashboard integration coverage (server)
+        uses: actions/download-artifact@v4
+        with:
+          name: dashboard-integration-server-coverage
+          path: dashboard/coverage/integration-server-report
       # Pinned to the full commit SHA of v5.0.0 per SonarQube's own
       # githubactions:S7637 rule. The tag-form (`@v5.0.0`) would let a
       # compromised publisher silently retag to a malicious commit.

@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect } from './_coverage';
 import postgres from 'postgres';
 import { bootHarness, truncateDashboardState } from './_harness';
 
@@ -59,8 +59,20 @@ test.describe('theme parity', () => {
   test('every primary surface renders in dark theme with token-resolved colours', async ({ page }) => {
     const env = await bootHarness();
     await authenticate(page, env);
+    // Explicitly pick dark — the theme defaults to 'system' which
+    // doesn't set data-theme; under headless Chromium 'system' often
+    // resolves to light, so without this click data-theme is null.
+    await page.goto('/');
+    await page.getByTestId('theme-dark').click();
+    await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark', { timeout: 5_000 });
     for (const path of SURFACES) {
       await page.goto(path);
+      // Per-surface wait — the theme-dark click writes a cookie
+      // that the server consumes on subsequent page renders, but
+      // there's a small race between the click's async write and
+      // the next navigation. Wait for the server's data-theme to
+      // resolve before asserting it.
+      await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark', { timeout: 5_000 });
       const dataTheme = await page.locator('html').getAttribute('data-theme');
       expect(dataTheme).toBe('dark');
       // Resolve the foreground/background tokens; assert they
@@ -88,6 +100,12 @@ test.describe('theme parity', () => {
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'light', { timeout: 5_000 });
     for (const path of SURFACES) {
       await page.goto(path);
+      // Per-surface wait — the theme-light click writes a cookie
+      // that the server consumes on subsequent page renders, but
+      // there's a small race between the click's async write and
+      // the next navigation. Wait for the server's data-theme to
+      // resolve before asserting it.
+      await expect(page.locator('html')).toHaveAttribute('data-theme', 'light', { timeout: 5_000 });
       const dataTheme = await page.locator('html').getAttribute('data-theme');
       expect(dataTheme).toBe('light');
       const colors = await page.evaluate(() => {
