@@ -15,7 +15,53 @@ describe('lib/sse/channels', () => {
       'work.ticket.edited',
       'work.agent.edited',
       'work.chat.session_deleted',
+      // M5.3 chat-driven mutation channels (FR-460 + FR-481).
+      'work.chat.ticket.created',
+      'work.chat.ticket.edited',
+      'work.chat.ticket.transitioned',
+      'work.chat.agent.paused',
+      'work.chat.agent.resumed',
+      'work.chat.agent.spawned',
+      'work.chat.agent.config_edited',
+      'work.chat.hiring.proposed',
+      // M5.3 closes the M5.2 retro carryover (FR-462).
+      'work.chat.session_started',
+      'work.chat.message_sent',
+      'work.chat.session_ended',
     ]);
+  });
+
+  it('M5.3 chat-mutation channel parses to the expected kind', () => {
+    const event = parseChannel({
+      id: 'evt-1',
+      channel: 'work.chat.ticket.created',
+      payload: {
+        chat_session_id: 'sess-1',
+        chat_message_id: 'msg-1',
+        affected_resource_id: 'ticket-abc',
+        affected_resource_type: 'ticket',
+      },
+      createdAt: new Date('2026-04-30T00:00:00Z'),
+    });
+    expect(event.kind).toBe('chat.ticket.created');
+    expect(event).toMatchObject({
+      chatSessionId: 'sess-1',
+      chatMessageId: 'msg-1',
+      affectedResourceId: 'ticket-abc',
+      affectedResourceType: 'ticket',
+    });
+  });
+
+  it('M5.3 chat lifecycle channels parse cleanly', () => {
+    for (const ch of ['work.chat.session_started', 'work.chat.message_sent', 'work.chat.session_ended']) {
+      const event = parseChannel({
+        id: 'evt-' + ch,
+        channel: ch,
+        payload: { chat_session_id: 's-1', chat_message_id: 'm-1' },
+        createdAt: new Date('2026-04-30T00:00:00Z'),
+      });
+      expect(event.kind).toBe(ch.replace('work.', ''));
+    }
   });
 
   it('parseChannel("work.ticket.created", payload) yields a TicketCreated event', () => {

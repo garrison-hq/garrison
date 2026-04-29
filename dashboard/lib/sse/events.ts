@@ -125,9 +125,44 @@ export type ActivityEvent =
       chatSessionId: string;
       actorUserId: string;
     }
+  // M5.3 chat-driven mutation events (FR-461 + FR-463 — IDs only,
+  // never raw chat content text). All eight share the same payload
+  // shape with `extras` for verb-specific extras (from_column /
+  // to_column for transition_ticket, agent_role_slug for agent verbs,
+  // etc.).
+  | ChatMutationEvent
+  // M5.3 closes the M5.2 retro carryover for chat lifecycle channels.
+  | { kind: 'chat.session_started'; eventId: string; at: string; chatSessionId: string }
+  | { kind: 'chat.message_sent'; eventId: string; at: string; chatSessionId: string; chatMessageId: string }
+  | { kind: 'chat.session_ended'; eventId: string; at: string; chatSessionId: string }
   | {
       kind: 'unknown';
       eventId: string;
       at: string;
       channel: string;
     };
+
+// Shared shape for all eight M5.3 chat-mutation events. The kind
+// discriminator names the verb's <entity>.<action>; `extras` is a
+// flat string map with verb-specific fields (Rule 6 backstop: no
+// chat content, only IDs / enum-values / role-slugs / column-slugs).
+export type ChatMutationKind =
+  | 'chat.ticket.created'
+  | 'chat.ticket.edited'
+  | 'chat.ticket.transitioned'
+  | 'chat.agent.paused'
+  | 'chat.agent.resumed'
+  | 'chat.agent.spawned'
+  | 'chat.agent.config_edited'
+  | 'chat.hiring.proposed';
+
+export interface ChatMutationEvent {
+  kind: ChatMutationKind;
+  eventId: string;
+  at: string;
+  chatSessionId: string;
+  chatMessageId: string;
+  affectedResourceId: string;
+  affectedResourceType: string;
+  extras: Record<string, unknown>;
+}
