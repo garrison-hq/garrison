@@ -58,12 +58,50 @@ export interface ChatTerminalEvent {
   costUsd: string | null;
 }
 
+// M5.3 tool-call observability shapes (FR-450 / FR-451). The hook
+// surfaces tool_use + tool_result events as ToolCallEntry rows keyed
+// by messageId so the renderer can interleave chips with text deltas
+// in arrival order.
+export interface ToolUseEvent {
+  messageId: string;
+  toolUseId: string;
+  toolName: string;
+  /** Raw tool args from claude's content_block.input. Renderer reads
+   *  selectively — read tools render lower-emphasis chip with summary;
+   *  mutation tools render verb name + arg highlights. */
+  args: unknown;
+}
+
+export interface ToolResultEvent {
+  messageId: string;
+  toolUseId: string;
+  isError: boolean;
+  /** Synthetic envelope from supervisor — {detail, is_error} for
+   *  read-tool results; the chip surface decodes garrison-mutate's
+   *  Result shape (success/affected_resource_id/error_kind/message)
+   *  from the tool_result block on terminal commit via the row-state-read
+   *  reconnect path per M5.2 FR-261. */
+  result: unknown;
+}
+
+export interface ToolCallEntry {
+  toolUseId: string;
+  toolName: string;
+  args: unknown;
+  /** undefined while the tool_use is in flight; populated when the
+   *  matching tool_result frame arrives. The chip surface transitions
+   *  from pre-call to post-call (or failure) state per FR-441 / FR-444. */
+  result?: { isError: boolean; payload: unknown };
+}
+
 export interface UseChatStreamResult {
   state: ChatStreamState;
   /** in-flight messageId → accumulated buffer (string). */
   partialDeltas: Map<string, string>;
   /** messageId → terminal payload. */
   terminals: Map<string, ChatTerminalEvent>;
+  /** M5.3: messageId → ordered ToolCallEntry list (FR-451). */
+  toolCalls: Map<string, ToolCallEntry[]>;
   /** True after `session_ended` event arrives. */
   sessionEnded: boolean;
   /** Last EventSource error string; null when live. */
@@ -98,6 +136,9 @@ export interface ChatStreamStore extends UseChatStreamResult {
    *  reset (so the visible text reflects only the current claude
    *  message_start window). */
   blocks: Map<string, number>;
+  /** Internal: dedupe key set keyed on `${messageId}:${toolUseId}` so
+   *  reconnect-replay doesn't double-render M5.3 chips (FR-447). */
+  seenToolUseIds: Set<string>;
 }
 
 export function emptyStore(): ChatStreamStore {
@@ -105,10 +146,12 @@ export function emptyStore(): ChatStreamStore {
     state: 'dormant',
     partialDeltas: new Map(),
     terminals: new Map(),
+    toolCalls: new Map(),
     sessionEnded: false,
     lastError: null,
     seenSeqs: new Set(),
     blocks: new Map(),
+    seenToolUseIds: new Set(),
   };
 }
 
@@ -209,6 +252,79 @@ export const ChatStreamMachine = {
     store.state = 'idle-grace';
     return store;
   },
+  // M5.3 tool-call observability transitions (FR-451 / FR-447).
+  toolUse(store: ChatStreamStore, raw: string): ChatStreamStore {
+    interface ToolUsePayload {
+      message_id: string;
+      tool_use_id: string;
+      tool_name: string;
+      args?: unknown;
+    }
+    let payload: ToolUsePayload;
+    try {
+      payload = JSON.parse(raw) as ToolUsePayload;
+    } catch {
+      return store;
+    }
+    if (!payload.message_id || !payload.tool_use_id) return store;
+    const key = `${payload.message_id}:${payload.tool_use_id}`;
+    if (store.seenToolUseIds.has(key)) return store; // reconnect dedupe
+    store.seenToolUseIds.add(key);
+
+    const existing = store.toolCalls.get(payload.message_id) ?? [];
+    const next = new Map(store.toolCalls);
+    next.set(payload.message_id, [
+      ...existing,
+      {
+        toolUseId: payload.tool_use_id,
+        toolName: payload.tool_name,
+        args: payload.args ?? null,
+      },
+    ]);
+    store.toolCalls = next;
+    return store;
+  },
+  toolResult(store: ChatStreamStore, raw: string): ChatStreamStore {
+    interface ToolResultPayload {
+      message_id: string;
+      tool_use_id: string;
+      is_error?: boolean;
+      result?: unknown;
+    }
+    let payload: ToolResultPayload;
+    try {
+      payload = JSON.parse(raw) as ToolResultPayload;
+    } catch {
+      return store;
+    }
+    if (!payload.message_id || !payload.tool_use_id) return store;
+    const list = store.toolCalls.get(payload.message_id);
+    if (!list) return store;
+    const updated = list.map((entry) =>
+      entry.toolUseId === payload.tool_use_id
+        ? { ...entry, result: { isError: !!payload.is_error, payload: payload.result ?? null } }
+        : entry,
+    );
+    const next = new Map(store.toolCalls);
+    next.set(payload.message_id, updated);
+    store.toolCalls = next;
+    return store;
+  },
+  assistantError(store: ChatStreamStore, raw: string): ChatStreamStore {
+    interface AssistantErrorPayload {
+      message_id: string;
+      error_kind: string;
+      message?: string;
+    }
+    let payload: AssistantErrorPayload;
+    try {
+      payload = JSON.parse(raw) as AssistantErrorPayload;
+    } catch {
+      return store;
+    }
+    store.lastError = payload.error_kind;
+    return store;
+  },
 };
 
 // Cache keyed by sessionId so re-mounts within idle-grace inherit
@@ -303,6 +419,20 @@ export function useChatStream(sessionId: string): UseChatStreamResult {
       notify();
     }
 
+    // M5.3 tool-call observability listeners (FR-450).
+    function onToolUse(ev: MessageEvent) {
+      ChatStreamMachine.toolUse(store, ev.data as string);
+      notify();
+    }
+    function onToolResult(ev: MessageEvent) {
+      ChatStreamMachine.toolResult(store, ev.data as string);
+      notify();
+    }
+    function onAssistantError(ev: MessageEvent) {
+      ChatStreamMachine.assistantError(store, ev.data as string);
+      notify();
+    }
+
     function clearBackoffTimer() {
       if (backoffTimerRef.current) {
         clearTimeout(backoffTimerRef.current);
@@ -356,6 +486,9 @@ export function useChatStream(sessionId: string): UseChatStreamResult {
       es.addEventListener('delta', onDelta as unknown as EventListener);
       es.addEventListener('terminal', onTerminal as unknown as EventListener);
       es.addEventListener('session_ended', onSessionEnded as unknown as EventListener);
+      es.addEventListener('tool_use', onToolUse as unknown as EventListener);
+      es.addEventListener('tool_result', onToolResult as unknown as EventListener);
+      es.addEventListener('assistant_error', onAssistantError as unknown as EventListener);
     }
 
     connect();
@@ -373,6 +506,7 @@ export function useChatStream(sessionId: string): UseChatStreamResult {
     state: store.state,
     partialDeltas: store.partialDeltas,
     terminals: store.terminals,
+    toolCalls: store.toolCalls,
     sessionEnded: store.sessionEnded,
     lastError: store.lastError,
   };
