@@ -123,7 +123,8 @@ describe('chat actions — endChatSession', () => {
     const ownerId = '22222222-2222-2222-2222-222222222222';
     const sessionId = await seedSession({ userId: ownerId, status: 'active' });
     mockUserId = '33333333-3333-3333-3333-333333333333';
-    const { endChatSession, ChatError, ChatErrorKind } = await import('./chat');
+    const { endChatSession } = await import('./chat');
+    const { ChatError, ChatErrorKind } = await import('./chat.errors');
 
     await expect(endChatSession(sessionId)).rejects.toThrow(ChatError);
     try {
@@ -147,7 +148,8 @@ describe('chat actions — endChatSession', () => {
 
   it('TestEndChatSessionRejectsAborted', async () => {
     const sessionId = await seedSession({ userId: mockUserId, status: 'aborted' });
-    const { endChatSession, ChatErrorKind } = await import('./chat');
+    const { endChatSession } = await import('./chat');
+    const { ChatErrorKind } = await import('./chat.errors');
 
     try {
       await endChatSession(sessionId);
@@ -305,7 +307,8 @@ describe('chat actions — requireSessionOwner ownership gate', () => {
     const ownerId = '99999999-9999-9999-9999-999999999999';
     const sessionId = await seedSession({ userId: ownerId });
     mockUserId = '88888888-8888-8888-8888-888888888888';
-    const { archiveChatSession, ChatErrorKind } = await import('./chat');
+    const { archiveChatSession } = await import('./chat');
+    const { ChatErrorKind } = await import('./chat.errors');
 
     try {
       await archiveChatSession(sessionId);

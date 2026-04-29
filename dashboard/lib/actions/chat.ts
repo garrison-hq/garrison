@@ -23,23 +23,14 @@ import { appDb } from '@/lib/db/appClient';
 import { chatSessions, chatMessages } from '@/drizzle/schema.supervisor';
 import { getSession } from '@/lib/auth/session';
 import { AuthError, AuthErrorKind } from '@/lib/auth/errors';
+import {
+  ChatError,
+  ChatErrorKind,
+  type ChatSessionRow,
+  type RecentThreadRow,
+} from './chat.errors';
 
 const MAX_CONTENT_BYTES = 100 * 1024;
-
-export class ChatError extends Error {
-  constructor(public readonly kind: ChatErrorKind, message?: string) {
-    super(message ?? kind);
-    this.name = 'ChatError';
-  }
-}
-export const ChatErrorKind = {
-  EmptyContent: 'empty_content',
-  ContentTooLarge: 'content_too_large',
-  SessionEnded: 'session_ended',
-  SessionNotFound: 'session_not_found',
-  TurnIndexCollision: 'turn_index_collision',
-} as const;
-export type ChatErrorKind = (typeof ChatErrorKind)[keyof typeof ChatErrorKind];
 
 function validateContent(content: string): void {
   if (!content || content.length === 0) {
@@ -174,8 +165,6 @@ export async function sendChatMessage(
 // (enumeration-resistance, slate item 11).
 // ────────────────────────────────────────────────────────────────────
 
-type ChatSessionRow = typeof chatSessions.$inferSelect;
-
 // requireSessionOwner is the single ownership-gate helper reused by all
 // four mutating actions. Both "session does not exist" and "session
 // exists but is not owned by current user" collapse to SessionNotFound
@@ -304,13 +293,8 @@ export async function deleteChatSession(sessionId: string): Promise<void> {
 // via ROW_NUMBER() OVER (PARTITION BY started_by_user_id ORDER BY
 // started_at ASC) per plan §1.11. Numbering is recomputed on every
 // read — acceptable because per-operator session counts are bounded.
-export interface RecentThreadRow {
-  id: string;
-  startedAt: string;
-  threadNumber: number;
-  status: string;
-  isArchived: boolean;
-}
+// RecentThreadRow lives in ./chat.errors so the 'use server' directive
+// here only governs async function exports.
 
 export async function getRecentThreadsForCurrentUser(
   limit = 10,

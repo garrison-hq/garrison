@@ -19,9 +19,8 @@ export const dynamic = 'force-dynamic';
 
 export default async function ChatSessionPage({
   params,
-}: Readonly<{ params: Promise<{ sessionId?: string[] }> }>) {
-  const { sessionId: sessionIdParts } = await params;
-  const sessionId = Array.isArray(sessionIdParts) ? sessionIdParts[0] : undefined;
+}: Readonly<{ params: Promise<{ sessionId: string }> }>) {
+  const { sessionId } = await params;
 
   if (!sessionId) {
     return (
