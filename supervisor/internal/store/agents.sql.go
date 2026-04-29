@@ -11,6 +11,52 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const countAgentsByRoleSlug = `-- name: CountAgentsByRoleSlug :one
+SELECT count(*)::int8 AS count FROM agents WHERE role_slug = $1
+`
+
+// M5.3 ambiguity check: returns the number of agents matching the
+// given role_slug. Verbs reject calls where count > 1 to force the
+// operator to disambiguate.
+func (q *Queries) CountAgentsByRoleSlug(ctx context.Context, roleSlug string) (int64, error) {
+	row := q.db.QueryRow(ctx, countAgentsByRoleSlug, roleSlug)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const findAgentByRoleSlug = `-- name: FindAgentByRoleSlug :one
+SELECT id, department_id, role_slug, status FROM agents
+WHERE role_slug = $1
+ORDER BY department_id
+LIMIT 1
+`
+
+type FindAgentByRoleSlugRow struct {
+	ID           pgtype.UUID
+	DepartmentID pgtype.UUID
+	RoleSlug     string
+	Status       string
+}
+
+// M5.3: chat verbs accept role_slug as a single string. The agents
+// schema has UNIQUE (department_id, role_slug); within active rows,
+// a slug may appear in multiple departments. Returns the single
+// match deterministically ordered by department_id; verbs use
+// CountAgentsByRoleSlug first to reject multi-department slugs as
+// ambiguous.
+func (q *Queries) FindAgentByRoleSlug(ctx context.Context, roleSlug string) (FindAgentByRoleSlugRow, error) {
+	row := q.db.QueryRow(ctx, findAgentByRoleSlug, roleSlug)
+	var i FindAgentByRoleSlugRow
+	err := row.Scan(
+		&i.ID,
+		&i.DepartmentID,
+		&i.RoleSlug,
+		&i.Status,
+	)
+	return i, err
+}
+
 const getAgentByDepartmentAndRole = `-- name: GetAgentByDepartmentAndRole :one
 SELECT id, department_id, role_slug, agent_md, model, skills, mcp_tools, listens_for, palace_wing, status, created_at, mcp_config, updated_at FROM agents
 WHERE department_id = $1 AND role_slug = $2 AND status = 'active'
@@ -107,6 +153,34 @@ func (q *Queries) ListActiveAgents(ctx context.Context) ([]Agent, error) {
 	return items, nil
 }
 
+const updateAgentConfigFields = `-- name: UpdateAgentConfigFields :exec
+UPDATE agents
+   SET model = $1,
+       agent_md = $2,
+       palace_wing = $3
+ WHERE id = $4
+`
+
+type UpdateAgentConfigFieldsParams struct {
+	Model      string
+	AgentMd    string
+	PalaceWing *string
+	ID         pgtype.UUID
+}
+
+// M5.3 garrison-mutate.edit_agent_config. Partial-update of operator-
+// editable agent fields. Verb resolves COALESCE on the Go side after
+// the leak-scan pass.
+func (q *Queries) UpdateAgentConfigFields(ctx context.Context, arg UpdateAgentConfigFieldsParams) error {
+	_, err := q.db.Exec(ctx, updateAgentConfigFields,
+		arg.Model,
+		arg.AgentMd,
+		arg.PalaceWing,
+		arg.ID,
+	)
+	return err
+}
+
 const updateAgentMD = `-- name: UpdateAgentMD :exec
 UPDATE agents
 SET agent_md = $2
@@ -120,5 +194,23 @@ type UpdateAgentMDParams struct {
 
 func (q *Queries) UpdateAgentMD(ctx context.Context, arg UpdateAgentMDParams) error {
 	_, err := q.db.Exec(ctx, updateAgentMD, arg.ID, arg.AgentMd)
+	return err
+}
+
+const updateAgentStatus = `-- name: UpdateAgentStatus :exec
+UPDATE agents SET status = $1 WHERE id = $2
+`
+
+type UpdateAgentStatusParams struct {
+	Status string
+	ID     pgtype.UUID
+}
+
+// M5.3 garrison-mutate.pause_agent / resume_agent. Sets the agent's
+// status; pause sets 'paused', resume sets 'active'. Existing M2.x
+// spawn loop already filters on status='active', so paused agents
+// naturally stop receiving new spawns.
+func (q *Queries) UpdateAgentStatus(ctx context.Context, arg UpdateAgentStatusParams) error {
+	_, err := q.db.Exec(ctx, updateAgentStatus, arg.Status, arg.ID)
 	return err
 }
