@@ -94,6 +94,11 @@ export async function Sidebar() {
         <NavLink href="/activity" label={t('activity')} icon={<ActivityIcon />} />
         <NavLink href="/chat" label="CEO chat" icon={<ChatIcon />} />
         <ThreadHistorySubnav threads={recentThreads.map((r) => ({ id: r.id, threadNumber: r.threadNumber }))} />
+        {/* M5.3 stopgap (FR-494 default lean): Hiring proposals
+            sublink under CEO chat — chat originates these proposals,
+            so the operator's mental model groups them with chat.
+            M7 may promote this to a top-level "Hiring" entry. */}
+        <NavSubLink href="/hiring/proposals" label="Hiring proposals" />
         <NavLink
           href="/hygiene"
           label={t('hygiene')}
