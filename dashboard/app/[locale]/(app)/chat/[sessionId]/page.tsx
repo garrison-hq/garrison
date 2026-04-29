@@ -90,33 +90,32 @@ export default async function ChatSessionPage({
   );
 }
 
+// Pulls the model name (e.g. "claude-sonnet-4-6") out of the
+// supervisor-stored stream envelope. The envelope is a top-level
+// JSON array of stream events; assistant events carry the model
+// under ev.message.model. Falls back to a legacy {events:[…]} shape
+// for fixtures that pre-date the array commit.
 function extractModelFromEnvelope(envelope: unknown): string | null {
-  if (!isRecord(envelope)) return null;
-  if (typeof envelope['model'] === 'string') return envelope['model'];
-  if (!Array.isArray(envelope['events'])) return null;
-  for (const ev of envelope['events']) {
-    const found = extractModelFromEvent(ev);
-    if (found !== null) return found;
+  const events = collectEvents(envelope);
+  for (const ev of events) {
+    if (!isRecord(ev)) continue;
+    if (ev['type'] !== 'assistant') continue;
+    const message = ev['message'];
+    if (!isRecord(message)) continue;
+    const model = message['model'];
+    if (typeof model === 'string' && model.length > 0) return model;
   }
   return null;
 }
 
-function extractModelFromEvent(ev: unknown): string | null {
-  if (!isRecord(ev)) return null;
-  const fromMessageStart = extractModelFromMessageStart(ev['message_start']);
-  if (fromMessageStart !== null) return fromMessageStart;
-  if (typeof ev['model'] === 'string') return ev['model'];
-  return null;
-}
-
-function extractModelFromMessageStart(messageStart: unknown): string | null {
-  if (!isRecord(messageStart)) return null;
-  const message = messageStart['message'];
-  if (!isRecord(message)) return null;
-  const model = message['model'];
-  return typeof model === 'string' ? model : null;
+function collectEvents(envelope: unknown): unknown[] {
+  if (Array.isArray(envelope)) return envelope;
+  if (isRecord(envelope) && Array.isArray(envelope['events'])) {
+    return envelope['events'];
+  }
+  return [];
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null;
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

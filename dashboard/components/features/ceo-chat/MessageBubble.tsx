@@ -72,12 +72,26 @@ export function MessageBubble({
         )}
         {errorBlock ? <div className="mb-1">{errorBlock}</div> : null}
         <div data-testid="chat-message-body">
-          {content ?? ''}
-          {inFlight ? (
-            <span className="garrison-cursor inline-block ml-0.5 text-text-3" aria-hidden>
-              ▍
+          {inFlight && !content ? (
+            <span
+              className="inline-flex items-center gap-1 py-1"
+              aria-label="CEO is responding"
+              data-testid="chat-typing-indicator"
+            >
+              <span className="garrison-typing-dot inline-block w-1.5 h-1.5 rounded-full bg-text-3" aria-hidden />
+              <span className="garrison-typing-dot inline-block w-1.5 h-1.5 rounded-full bg-text-3" aria-hidden />
+              <span className="garrison-typing-dot inline-block w-1.5 h-1.5 rounded-full bg-text-3" aria-hidden />
             </span>
-          ) : null}
+          ) : (
+            <>
+              {content ?? ''}
+              {inFlight ? (
+                <span className="garrison-cursor inline-block ml-0.5 text-text-3" aria-hidden>
+                  ▍
+                </span>
+              ) : null}
+            </>
+          )}
         </div>
         {isOperator || costUsd === undefined ? null : (
           <footer className="mt-1 text-text-3 text-[10px] font-mono font-tabular text-right" data-testid="chat-message-cost">
