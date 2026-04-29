@@ -16,7 +16,7 @@ import (
 // (ops-checklist references them); changing either requires updating
 // docs/ops-checklist.md and this test together.
 func TestDockerRunArgs_DefaultsAreApplied(t *testing.T) {
-	args := dockerRunArgs(Deps{ChatContainerImage: "garrison-claude:m5"}, "/tmp/mcp.json", "CLAUDE_CODE_OAUTH_TOKEN=tok")
+	args := dockerRunArgs(Deps{ChatContainerImage: "garrison-claude:m5"}, "/tmp/mcp.json", "CLAUDE_CODE_OAUTH_TOKEN=tok", "", "")
 	joined := strings.Join(args, " ")
 	if !strings.Contains(joined, "--model claude-sonnet-4-6") {
 		t.Errorf("expected default model claude-sonnet-4-6 in argv; got %v", args)
@@ -34,7 +34,7 @@ func TestDockerRunArgs_OperatorOverridesWin(t *testing.T) {
 		ChatContainerImage: "garrison-claude:custom",
 		DefaultModel:       "claude-opus-4-7",
 		DockerNetwork:      "operator-net",
-	}, "/tmp/mcp.json", "CLAUDE_CODE_OAUTH_TOKEN=tok")
+	}, "/tmp/mcp.json", "CLAUDE_CODE_OAUTH_TOKEN=tok", "/host/supervisor", "/host/docker")
 	joined := strings.Join(args, " ")
 	if !strings.Contains(joined, "--model claude-opus-4-7") {
 		t.Errorf("expected operator-supplied model in argv; got %v", args)
@@ -45,6 +45,31 @@ func TestDockerRunArgs_OperatorOverridesWin(t *testing.T) {
 	if !strings.Contains(joined, "garrison-claude:custom") {
 		t.Errorf("expected custom image in argv; got %v", args)
 	}
+	// M5.2 follow-up: supervisor + docker CLI must be bind-mounted into
+	// the chat container at the host-side paths the MCP config writes,
+	// otherwise claude inside the container can't spawn either MCP
+	// server (postgres needs supervisorBin; mempalace needs dockerBin).
+	if !strings.Contains(joined, "/host/supervisor:/host/supervisor:ro") {
+		t.Errorf("expected supervisor bind mount in argv; got %v", args)
+	}
+	if !strings.Contains(joined, "/host/docker:/host/docker:ro") {
+		t.Errorf("expected docker CLI bind mount in argv; got %v", args)
+	}
+}
+
+// TestDockerRunArgs_NoMountWhenPathsEmpty: empty supervisorBin /
+// dockerBin must NOT add any -v flags (test-mode + ops-checklist
+// "minimal config" path). Without this skip, an empty path would
+// produce an invalid `-v :` flag and docker would refuse to start.
+func TestDockerRunArgs_NoMountWhenPathsEmpty(t *testing.T) {
+	args := dockerRunArgs(Deps{ChatContainerImage: "garrison-claude:m5"}, "/tmp/mcp.json", "T=t", "", "")
+	joined := strings.Join(args, " ")
+	if strings.Contains(joined, ":/usr/local/bin/supervisor") {
+		t.Errorf("empty supervisorBin must not produce a mount; got %v", args)
+	}
+	if strings.Contains(joined, ":/usr/bin/docker") {
+		t.Errorf("empty dockerBin must not produce a mount; got %v", args)
+	}
 }
 
 // TestDockerRunArgs_StrictMCPConfigAlwaysSet: --strict-mcp-config is
@@ -53,7 +78,7 @@ func TestDockerRunArgs_OperatorOverridesWin(t *testing.T) {
 // from ~/.claude/mcp.json). A regression that drops the flag would
 // silently allow the operator's local MCP config to leak in.
 func TestDockerRunArgs_StrictMCPConfigAlwaysSet(t *testing.T) {
-	args := dockerRunArgs(Deps{ChatContainerImage: "img"}, "/tmp/mcp.json", "T=t")
+	args := dockerRunArgs(Deps{ChatContainerImage: "img"}, "/tmp/mcp.json", "T=t", "", "")
 	if !contains(args, "--strict-mcp-config") {
 		t.Errorf("argv missing --strict-mcp-config: %v", args)
 	}
