@@ -21,7 +21,7 @@ export default async function AppLayout({
   // anchors to the viewport, not to the children container.
   const t = await getTranslations('a11y');
   return (
-    <div className="min-h-screen flex flex-col">
+    <div className="h-screen flex flex-col">
       <a
         href="#main-content"
         className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-50 focus:bg-surface-2 focus:text-text-1 focus:border focus:border-border-2 focus:rounded focus:px-3 focus:py-2 focus:text-sm"
@@ -32,7 +32,7 @@ export default async function AppLayout({
         <Sidebar />
         <div className="flex-1 flex flex-col min-h-0 min-w-0">
           <Topbar />
-          <main id="main-content" className="flex-1 overflow-auto">{children}</main>
+          <main id="main-content" className="flex-1 flex flex-col min-h-0 overflow-auto">{children}</main>
         </div>
       </div>
       {panel}
