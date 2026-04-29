@@ -142,6 +142,21 @@ func (p *ChatPolicy) OnStreamEvent(ctx context.Context, e claudeproto.StreamEven
 			p.Logger.Warn("chat: EmitDelta failed", "seq", seq, "err", err)
 		}
 	case "message_start":
+		// Claude emits ONE message_start per assistant message in the
+		// response stream. When the turn involves tool calls (text →
+		// tool_use → text → ...) the response can carry multiple
+		// message_start blocks. The committed `content` should be the
+		// LAST assistant message's text — the human-readable answer
+		// after any tool round-trips — not the concatenation of every
+		// intermediate text block. Reset contentBuf so subsequent
+		// content_block_delta text_deltas accumulate only into the
+		// current message.
+		//
+		// Token totals across messages are tracked separately:
+		// tokensInput is overridden every time (claude reports the same
+		// cumulative input tokens on each message_start); tokensOutput
+		// is taken from message_delta which fires per-message.
+		p.contentBuf.Reset()
 		p.tokensInput = e.Inner.InputTokens
 		p.cacheReadInput = e.Inner.CacheReadInput
 		p.cacheCreationInput = e.Inner.CacheCreationInput

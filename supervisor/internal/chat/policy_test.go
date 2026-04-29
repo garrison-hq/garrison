@@ -348,6 +348,36 @@ func TestOnStreamEvent_MessageStartCapturesUsage(t *testing.T) {
 	}
 }
 
+// TestOnStreamEvent_MessageStartResetsContentBuf: when a turn carries
+// multiple message_start events (claude's response splits into text →
+// tool_use → text round-trips), the committed content must be the
+// LAST assistant message only — not the concatenation of every
+// intermediate text block. Reproduces the M5.2 "pongYes, MemPalace
+// is up" bug where two assistant messages got glued.
+//
+// EmitDelta requires a real Postgres pool to exercise the text_delta
+// path; we simulate the post-first-message state by writing directly
+// into contentBuf, then dispatch message_start and assert the buffer
+// is empty. This isolates the reset behaviour without DB plumbing.
+func TestOnStreamEvent_MessageStartResetsContentBuf(t *testing.T) {
+	p := newPolicyForTest()
+	// Simulate end-of-first-message state: contentBuf carries "pong"
+	// (e.g. claude's first response message before a tool round-trip).
+	p.contentBuf.WriteString("pong")
+	if p.contentBuf.String() != "pong" {
+		t.Fatalf("setup: contentBuf=%q; want %q", p.contentBuf.String(), "pong")
+	}
+	// Second message_start (after tool round-trip): contentBuf must
+	// reset so the prior "pong" doesn't glue onto the next message.
+	p.OnStreamEvent(context.Background(), claudeproto.StreamEvent{
+		InnerType: "message_start",
+		Inner:     claudeproto.StreamInner{InputTokens: 200},
+	})
+	if p.contentBuf.Len() != 0 {
+		t.Errorf("contentBuf not reset on message_start; got %q", p.contentBuf.String())
+	}
+}
+
 // TestOnStreamEvent_MessageDeltaUpdatesOutputTokens: claude emits
 // the running output-token count via message_delta.usage. The policy
 // only updates when OutputTokens > 0 — guards against a zero-valued
