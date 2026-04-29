@@ -64,7 +64,7 @@ The threat-model amendment lands as `docs/security/chat-threat-model.md` *before
 1. **Given** an operator opens `docs/security/chat-threat-model.md`, **When** they read the document end to end, **Then** they find sections matching the vault threat model's structure (Scope / Assets / Adversaries / Threats addressed / Threats accepted / Architectural rules / Open questions / What the M5.3 retro must answer).
 2. **Given** the document's "Architectural rules" section, **When** the operator inspects the rules, **Then** each rule is numbered, binding, and includes a "Consequence" paragraph in the same shape vault rules use.
 3. **Given** the document's "Threats addressed" section, **When** the operator inspects how the autonomous-execution posture is justified, **Then** each spike §6 attack class (AC-1 palace-injected, AC-2 operator-typed, AC-3 tool-result feedback loop) is named explicitly with the M5.3 mitigation enumerated against it.
-4. **Given** the verb set referenced anywhere in the document, **When** the operator audits which verbs are in scope, **Then** the document enumerates exactly the nine verbs (`create_ticket`, `edit_ticket`, `transition_ticket`, `pause_agent`, `resume_agent`, `spawn_agent`, `edit_agent_config`, `propose_hire` — and any spec-resolved additions) and explicitly states vault verbs are NOT in scope.
+4. **Given** the verb set referenced anywhere in the document, **When** the operator audits which verbs are in scope, **Then** the document enumerates exactly the eight verbs (`create_ticket`, `edit_ticket`, `transition_ticket`, `pause_agent`, `resume_agent`, `spawn_agent`, `edit_agent_config`, `propose_hire`) and explicitly states vault verbs are NOT in scope.
 
 ---
 
@@ -132,7 +132,7 @@ The operator drags ticket #123 from `qa-review` to `engineer` in the dashboard's
 **Acceptance scenarios**:
 
 1. **Given** two simultaneous transition attempts on the same ticket, **When** both transactions race, **Then** the first to acquire the row lock commits successfully, the second's transaction aborts with `error_kind='ticket_state_changed'`.
-2. **Given** the chat-side mutation loses, **When** the `tool_result` event surfaces the failure, **Then** the message stream renders a failure chip; the chip's copy is per the [NEEDS CLARIFICATION: failure-chip text + link shape — see clarify-deferred items above].
+2. **Given** the chat-side mutation loses, **When** the `tool_result` event surfaces the failure, **Then** the message stream renders a failure chip carrying the verbatim `error_kind='ticket_state_changed'` text; no deep-link in M5.3.
 3. **Given** the dashboard-side mutation loses, **When** M4's existing UI lock-conflict surface fires, **Then** the operator sees the M4-shaped error per existing dashboard conventions; M5.3 does not change M4's behaviour.
 4. **Given** any conflict outcome, **When** both audit surfaces are inspected, **Then** the winning side's audit row reflects the successful commit, the losing side's audit row reflects the typed error_kind, both reference the same target resource for forensic reconstruction.
 
@@ -224,7 +224,7 @@ Three test fixtures, one per attack class from spike §6, exercise the threat-mo
 - **OAuth token expires mid-mutation**: the chat container's `CLAUDE_CODE_OAUTH_TOKEN` expires after `tool_use` arrives but before `tool_result`. The supervisor treats this the same as M5.1's vault-fetch-failure path: terminal-write with `error_kind='token_expired'`, the SSE typed-error frame surfaces, the chip renders in failure state. No partial mutation lands (the verb either commits cleanly or rolls back).
 - **Supervisor restart mid-mutation**: the supervisor SIGTERMs while a `garrison-mutate` verb's transaction is open. The mutation either commits (transaction completes within `TerminalWriteGrace`) or rolls back; M5.1's restart-sweep handles the resulting state. The chat session shows as `aborted` with `error_kind='supervisor_shutdown'` per FR-082-shape; no partial mutation lands.
 - **Chat container crashes mid-mutation**: similar to supervisor restart but at the container level. The supervisor's M5.1 chaos handling already covers this. M5.3 adds the assertion that no `chat_mutation_audit` row lands without a corresponding committed mutation — orphan audit rows are a bug.
-- **`edit_agent_config` with leak-scan failure**: the operator instructs the chat to update the engineer agent's system prompt, and the proposed prompt contains a verbatim secret. The leak-scanner [NEEDS CLARIFICATION: leak-scan failure semantics — see deferred items] rejects the verb; no `agents` row update; audit row records `error_kind='leak_scan_failed'`; failure chip renders.
+- **`edit_agent_config` with leak-scan failure**: the operator instructs the chat to update the engineer agent's system prompt, and the proposed prompt contains a verbatim secret. The leak-scanner runs pre-transaction (per FR-421); on detection the verb fails atomically with `error_kind='leak_scan_failed'`; no `agents` row mutation lands; an audit row records the rejected diff with offending values redacted to `[REDACTED]`; failure chip renders.
 - **`spawn_agent` for an already-running role**: the verb spawns a new agent_instance respecting the per-department concurrency cap (constitution principle X). If the cap is full, the verb returns `error_kind='concurrency_cap_full'`; failure chip surfaces; no spawn occurs.
 - **`transition_ticket` to an invalid target column**: the verb validates the target column exists on the ticket's department; if invalid, returns `error_kind='invalid_transition'`; failure chip with the typed error.
 - **`pause_agent` with already-paused agent**: idempotent. The verb returns successfully; audit row records the no-op; chip shows the post-call state ("engineer is paused").
@@ -278,7 +278,7 @@ Three test fixtures, one per attack class from spike §6, exercise the threat-mo
 - **FR-441**: System MUST render a corresponding `tool_result` chip transition (pre-call → post-call state) when the matching `tool_result` event arrives.
 - **FR-442**: Read tool calls (`postgres.query`, `mempalace.search`, etc.) MUST render with lower-emphasis chip styling distinct from mutation tool calls.
 - **FR-443**: Mutation tool calls (`garrison-mutate.<verb>`) MUST render with higher-emphasis chip styling, including the verb name, arg summary, and a deep-link to the affected resource (post-call state).
-- **FR-444**: Failed tool calls (`tool_result.is_error=true`) MUST render in failure-chip styling reusing M5.2's error palette. Failure-chip copy + link target [NEEDS CLARIFICATION: see deferred items above].
+- **FR-444**: Failed tool calls (`tool_result.is_error=true`) MUST render in failure-chip styling reusing M5.2's error palette. Default chip copy carries the verbatim `error_kind` text (e.g., `failed to transition ticket #142 — ticket_state_changed`); failure chips do NOT deep-link to a forensic surface in M5.3 (operator-week-of-use observation drives whether a polish round adds the deep-link).
 - **FR-445**: Chips MUST be informative-only. They MUST NOT carry undo, cancel, retry, approve, or reject affordances.
 - **FR-446**: Chip click target for mutation chips with a successful resource creation MUST open the dashboard route for that resource (e.g., `/tickets/<id>`, `/hiring/proposals/<id>`).
 - **FR-447**: On SSE disconnect/reconnect, the consumer MUST read `chat_messages.raw_event_envelope` for committed tool calls that arrived during disconnect and render them once (no duplicates, no drops). Reuses the M5.2 amended FR-261 row-state-read mechanism.
@@ -288,7 +288,7 @@ Three test fixtures, one per attack class from spike §6, exercise the threat-mo
 
 - **FR-450**: `dashboard/lib/sse/chatStream.ts` event union MUST extend with `tool_use` and `tool_result` discriminated variants carrying at minimum `messageId`, `toolUseId`, `toolName`, `args` (for `tool_use`) and `messageId`, `toolUseId`, `result`, `isError` (for `tool_result`).
 - **FR-451**: The `useChatStream` hook return shape MUST surface tool calls in a form the renderer can read for chip composition (Map keyed by messageId returning ordered tool call entries, or analogous; exact shape is plan-territory).
-- **FR-452**: The supervisor's `/api/sse/chat` route MUST emit tool events as SSE frames per the M5.1 NDJSON contract; `internal/chat/policy.go`'s existing `OnStreamEvent` hook is the integration point.
+- **FR-452**: The chat SSE pipeline — supervisor's `internal/chat/transport.go` emitter feeding the dashboard's `/api/sse/chat` route — MUST emit tool events as SSE frames per the M5.1 NDJSON contract; `internal/chat/policy.go`'s existing `OnStreamEvent` hook is the supervisor-side integration point.
 
 #### Activity feed integration
 
@@ -316,7 +316,7 @@ Three test fixtures, one per attack class from spike §6, exercise the threat-mo
 - **FR-491**: The page MUST show at minimum: `role_title`, `department`, `proposed_via`, `created_at`, `status` columns; rows sorted `created_at DESC`.
 - **FR-492**: The page MUST be authenticated per existing M3 conventions; unauthenticated access redirects to login.
 - **FR-493**: The page MUST NOT carry edit, approve, reject, or spawn affordances. M7 extends; M5.3 reads only.
-- **FR-494**: Left-rail placement [NEEDS CLARIFICATION: left-rail placement — under "CEO chat", new top-level "Hiring", or chat-side-effect surface].
+- **FR-494**: Sidebar entry placement is under the existing "CEO chat" subnav as a "Hiring proposals" sublink (chat originates these proposals; the operator's mental model groups them with chat). A new top-level "Hiring" entry deferred to M7 when the full hiring flow ships.
 
 #### Architecture amendment
 
