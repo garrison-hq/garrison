@@ -63,7 +63,20 @@ test.describe('theme parity', () => {
     // doesn't set data-theme; under headless Chromium 'system' often
     // resolves to light, so without this click data-theme is null.
     await page.goto('/');
+    // ThemeSwitcher applies the data-theme attribute optimistically
+    // (synchronous DOM write) before the /api/theme PUT completes, so
+    // toHaveAttribute alone can satisfy on the optimistic update while
+    // the DB still holds the old preference. Wait for the PUT response
+    // AND then reload to confirm the next server-rendered request sees
+    // the persisted preference — that's what the SURFACES loop relies
+    // on below.
+    const themeResponse = page.waitForResponse(
+      (resp) => resp.url().includes('/api/theme') && resp.request().method() === 'PUT',
+    );
     await page.getByTestId('theme-dark').click();
+    const dr = await themeResponse;
+    expect(dr.ok()).toBe(true);
+    await page.reload();
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark', { timeout: 5_000 });
     for (const path of SURFACES) {
       await page.goto(path);
@@ -94,9 +107,17 @@ test.describe('theme parity', () => {
   test('every primary surface renders in light theme with token-resolved colours', async ({ page }) => {
     const env = await bootHarness();
     await authenticate(page, env);
-    // Switch theme to light via the topbar.
+    // Switch theme to light via the topbar. Same optimistic-DOM-update
+    // race as the dark-theme test above — wait for the /api/theme PUT
+    // response and reload before entering the navigation loop.
     await page.goto('/');
+    const themeResponse = page.waitForResponse(
+      (resp) => resp.url().includes('/api/theme') && resp.request().method() === 'PUT',
+    );
     await page.getByTestId('theme-light').click();
+    const lr = await themeResponse;
+    expect(lr.ok()).toBe(true);
+    await page.reload();
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'light', { timeout: 5_000 });
     for (const path of SURFACES) {
       await page.goto(path);
@@ -127,7 +148,16 @@ test.describe('theme parity', () => {
     const page = await ctx.newPage();
     await authenticate(page, env);
     await page.goto('/');
+    // Wait for the /api/theme PUT to commit before closing the
+    // context — otherwise ctx.close() may abort the in-flight PUT and
+    // the DB never sees the update, breaking the persistence assertion
+    // when ctx2 re-authenticates below.
+    const themeResponse = page.waitForResponse(
+      (resp) => resp.url().includes('/api/theme') && resp.request().method() === 'PUT',
+    );
     await page.getByTestId('theme-light').click();
+    const r = await themeResponse;
+    expect(r.ok()).toBe(true);
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'light', { timeout: 5_000 });
     await ctx.close();
 
