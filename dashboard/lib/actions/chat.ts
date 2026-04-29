@@ -18,7 +18,7 @@
 // ≤100KB defensive bound). Session must be status='active' for
 // sendChatMessage.
 
-import { eq, and, sql, desc } from 'drizzle-orm';
+import { eq, and, sql } from 'drizzle-orm';
 import { appDb } from '@/lib/db/appClient';
 import { chatSessions, chatMessages } from '@/drizzle/schema.supervisor';
 import { getSession } from '@/lib/auth/session';

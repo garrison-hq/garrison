@@ -11,7 +11,9 @@ import { formatPerMessageCost, formatModelBadge } from './format';
 
 interface MessageBubbleProps {
   role: 'operator' | 'assistant';
-  status: 'pending' | 'streaming' | 'completed' | 'failed' | 'aborted' | string;
+  /** Free-form status string from chat_messages.status. Common values:
+   *  'pending' | 'streaming' | 'completed' | 'failed' | 'aborted'. */
+  status: string;
   content: string | null;
   costUsd?: number | string | null;
   modelBadge?: string | null;
@@ -47,11 +49,11 @@ export function MessageBubble({
       aria-live={ariaLive}
       aria-busy={ariaBusy}
     >
-      {!isOperator ? (
+      {isOperator ? null : (
         <div className="w-7 h-7 rounded bg-surface-3 text-text-1 grid place-items-center font-mono font-semibold text-[10px] shrink-0 mt-1">
           C
         </div>
-      ) : null}
+      )}
       <div
         className={
           isOperator
@@ -59,7 +61,7 @@ export function MessageBubble({
             : 'max-w-[80%] bg-surface-2 text-text-1 rounded px-3 py-2 text-sm whitespace-pre-wrap break-words'
         }
       >
-        {!isOperator ? (
+        {isOperator ? null : (
           <header className="flex items-center gap-1.5 mb-1 text-text-3 text-[10.5px] uppercase tracking-[0.06em]">
             <span>CEO</span>
             <span className="text-text-4">·</span>
@@ -67,7 +69,7 @@ export function MessageBubble({
               {formatModelBadge(modelBadge)}
             </span>
           </header>
-        ) : null}
+        )}
         {errorBlock ? <div className="mb-1">{errorBlock}</div> : null}
         <div data-testid="chat-message-body">
           {content ?? ''}
@@ -77,11 +79,11 @@ export function MessageBubble({
             </span>
           ) : null}
         </div>
-        {!isOperator && costUsd !== undefined ? (
+        {isOperator || costUsd === undefined ? null : (
           <footer className="mt-1 text-text-3 text-[10px] font-mono font-tabular text-right" data-testid="chat-message-cost">
             {formatPerMessageCost(costUsd) ?? ''}
           </footer>
-        ) : null}
+        )}
       </div>
     </article>
   );

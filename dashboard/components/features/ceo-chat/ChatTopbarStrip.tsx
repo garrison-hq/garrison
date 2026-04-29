@@ -21,7 +21,7 @@ interface ChatTopbarStripProps {
   idlePill?: ReactNode;
 }
 
-export function ChatTopbarStrip({ breadcrumbSuffix, idlePill }: ChatTopbarStripProps) {
+export function ChatTopbarStrip({ breadcrumbSuffix, idlePill }: Readonly<ChatTopbarStripProps>) {
   const router = useRouter();
   const [isPending, startTransition] = useTransition();
 

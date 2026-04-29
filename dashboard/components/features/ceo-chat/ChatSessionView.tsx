@@ -107,7 +107,7 @@ export function ChatSessionView({
   };
 
   const idlePill = <IdlePill status={session.status} />;
-  const threadLabel = threadNumber !== null ? `thread #${threadNumber}` : `thread ${sessionId.slice(-6)}`;
+  const threadLabel = threadNumber === null ? `thread ${sessionId.slice(-6)}` : `thread #${threadNumber}`;
 
   return (
     <>

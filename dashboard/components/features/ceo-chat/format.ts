@@ -12,6 +12,11 @@
 // operator sees in budget dashboards. Both helpers return null-safe
 // shapes — operator turns have cost_usd=NULL per M5.1 schema.
 
+/** Cost values arrive as plain numbers (in tests / hot client paths)
+ *  or as Drizzle's NUMERIC string ("1.234567") via the database
+ *  driver. The helpers below accept either, plus null/undefined. */
+export type CostInput = number | string | null | undefined;
+
 export function formatThreadTitle(threadNumber: number): string {
   return `thread #${threadNumber}`;
 }
@@ -23,7 +28,7 @@ const SESSION_COST_FMT = new Intl.NumberFormat('en-US', {
   maximumFractionDigits: 2,
 });
 
-export function formatSessionCost(usd: number | string | null | undefined): string {
+export function formatSessionCost(usd: CostInput): string {
   const n = toNumber(usd);
   if (n === null) return SESSION_COST_FMT.format(0);
   return SESSION_COST_FMT.format(n);
@@ -36,13 +41,13 @@ const PER_MESSAGE_COST_FMT = new Intl.NumberFormat('en-US', {
   maximumFractionDigits: 4,
 });
 
-export function formatPerMessageCost(usd: number | string | null | undefined): string | null {
+export function formatPerMessageCost(usd: CostInput): string | null {
   const n = toNumber(usd);
   if (n === null) return null;
   return PER_MESSAGE_COST_FMT.format(n);
 }
 
-function toNumber(v: number | string | null | undefined): number | null {
+function toNumber(v: CostInput): number | null {
   if (v === null || v === undefined) return null;
   if (typeof v === 'number') return Number.isFinite(v) ? v : null;
   const n = Number(v);

@@ -51,7 +51,8 @@ export type ChatStreamState =
 
 export interface ChatTerminalEvent {
   messageId: string;
-  status: 'completed' | 'failed' | 'aborted' | string;
+  /** Terminal chat_messages.status — typically 'completed' | 'failed' | 'aborted'. */
+  status: string;
   content: string | null;
   errorKind: string | null;
   costUsd: string | null;
@@ -97,8 +98,7 @@ export function emptyStore(): ChatStreamStore {
 // Backoff schedule per plan §1.5: 100ms doubling, capped at 30s.
 export function computeBackoff(prevMs: number): number {
   if (prevMs <= 0) return 100;
-  const next = prevMs * 2;
-  return next > 30_000 ? 30_000 : next;
+  return Math.min(prevMs * 2, 30_000);
 }
 
 // ChatStreamMachine — pure state transitions on a ChatStreamStore.

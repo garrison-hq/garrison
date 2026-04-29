@@ -4,7 +4,7 @@
 // getSessionWithMessages for long threads, and adds
 // getMostRecentMempalaceCallAge for the composer's palace-live chip).
 
-import { eq, and, lt, asc, desc, sum } from 'drizzle-orm';
+import { eq, and, lt, desc, sum } from 'drizzle-orm';
 import { appDb } from '@/lib/db/appClient';
 import { chatSessions, chatMessages } from '@/drizzle/schema.supervisor';
 
@@ -84,12 +84,12 @@ export async function getSessionWithMessages(
     .limit(1);
   if (!session) return null;
 
-  const whereClause = beforeTurnIndex !== undefined
-    ? and(
+  const whereClause = beforeTurnIndex === undefined
+    ? eq(chatMessages.sessionId, sessionId)
+    : and(
         eq(chatMessages.sessionId, sessionId),
         lt(chatMessages.turnIndex, beforeTurnIndex),
-      )
-    : eq(chatMessages.sessionId, sessionId);
+      );
 
   // Fetch limit+1 to detect hasMore without an extra COUNT roundtrip.
   const rows = await appDb

@@ -19,7 +19,8 @@ interface ThreadHeaderProps {
   startedAt: string | Date;
   turnCount: number;
   totalCostUsd: number | string | null;
-  status: 'active' | 'ended' | 'aborted' | string;
+  /** chat_sessions.status — typically 'active' | 'ended' | 'aborted'. */
+  status: string;
   isArchived: boolean;
 }
 

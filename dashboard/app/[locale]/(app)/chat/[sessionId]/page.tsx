@@ -91,25 +91,32 @@ export default async function ChatSessionPage({
 }
 
 function extractModelFromEnvelope(envelope: unknown): string | null {
-  if (!envelope || typeof envelope !== 'object') return null;
-  const e = envelope as Record<string, unknown>;
-  if (typeof e['model'] === 'string') return e['model'] as string;
-  // Stream-events shape: events[].message_start.message.model.
-  if (Array.isArray(e['events'])) {
-    for (const ev of e['events'] as unknown[]) {
-      if (ev && typeof ev === 'object') {
-        const evt = ev as Record<string, unknown>;
-        const ms = evt['message_start'];
-        if (ms && typeof ms === 'object') {
-          const m = (ms as Record<string, unknown>)['message'];
-          if (m && typeof m === 'object') {
-            const model = (m as Record<string, unknown>)['model'];
-            if (typeof model === 'string') return model;
-          }
-        }
-        if (typeof evt['model'] === 'string') return evt['model'] as string;
-      }
-    }
+  if (!isRecord(envelope)) return null;
+  if (typeof envelope['model'] === 'string') return envelope['model'];
+  if (!Array.isArray(envelope['events'])) return null;
+  for (const ev of envelope['events']) {
+    const found = extractModelFromEvent(ev);
+    if (found !== null) return found;
   }
   return null;
+}
+
+function extractModelFromEvent(ev: unknown): string | null {
+  if (!isRecord(ev)) return null;
+  const fromMessageStart = extractModelFromMessageStart(ev['message_start']);
+  if (fromMessageStart !== null) return fromMessageStart;
+  if (typeof ev['model'] === 'string') return ev['model'];
+  return null;
+}
+
+function extractModelFromMessageStart(messageStart: unknown): string | null {
+  if (!isRecord(messageStart)) return null;
+  const message = messageStart['message'];
+  if (!isRecord(message)) return null;
+  const model = message['model'];
+  return typeof model === 'string' ? model : null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
 }

@@ -26,7 +26,8 @@ import {
 
 interface ThreadOverflowMenuProps {
   sessionId: string;
-  status: 'active' | 'ended' | 'aborted' | string;
+  /** chat_sessions.status — typically 'active' | 'ended' | 'aborted'. */
+  status: string;
   isArchived: boolean;
 }
 

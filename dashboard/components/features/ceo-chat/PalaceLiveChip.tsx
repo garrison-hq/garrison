@@ -26,15 +26,22 @@ export function classifyAge(ageMs: number | null): PalaceLiveTone {
   return 'unavailable';
 }
 
+const TONE_DOT: Record<PalaceLiveTone, 'ok' | 'warn' | 'err'> = {
+  live: 'ok',
+  stale: 'warn',
+  unavailable: 'err',
+};
+
+const TONE_LABEL: Record<PalaceLiveTone, string> = {
+  live: 'palace live',
+  stale: 'palace stale',
+  unavailable: 'palace unavailable',
+};
+
 export function PalaceLiveChip({ ageMs }: Readonly<{ ageMs: number | null }>) {
   const tone = classifyAge(ageMs);
-  const dot = tone === 'live' ? 'ok' : tone === 'stale' ? 'warn' : 'err';
-  const label =
-    tone === 'live'
-      ? 'palace live'
-      : tone === 'stale'
-      ? 'palace stale'
-      : 'palace unavailable';
+  const dot = TONE_DOT[tone];
+  const label = TONE_LABEL[tone];
   return (
     <Chip tone={dot}>
       <span className="inline-flex items-center gap-1.5" data-testid="palace-live-chip" data-tone={tone}>

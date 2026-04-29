@@ -10,16 +10,14 @@
 
 import { StatusDot } from '@/components/ui/StatusDot';
 
-type SessionStatus = 'active' | 'ended' | 'aborted';
-
-const TONE_BY_STATUS = {
-  active: { tone: 'ok' as const, label: 'active', pulse: true },
-  ended: { tone: 'warn' as const, label: 'idle', pulse: false },
-  aborted: { tone: 'err' as const, label: 'aborted', pulse: false },
+const TONE_BY_STATUS: Record<string, { tone: 'ok' | 'warn' | 'err'; label: string; pulse: boolean }> = {
+  active: { tone: 'ok', label: 'active', pulse: true },
+  ended: { tone: 'warn', label: 'idle', pulse: false },
+  aborted: { tone: 'err', label: 'aborted', pulse: false },
 };
 
-export function IdlePill({ status }: Readonly<{ status: SessionStatus | string }>) {
-  const config = TONE_BY_STATUS[status as SessionStatus] ?? {
+export function IdlePill({ status }: Readonly<{ status: string }>) {
+  const config = TONE_BY_STATUS[status] ?? {
     tone: 'neutral' as const,
     label: status,
     pulse: false,

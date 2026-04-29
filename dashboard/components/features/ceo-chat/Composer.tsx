@@ -32,7 +32,8 @@ interface ComposerProps {
    *  from session.status + the latest assistant errorKind. Pass undefined
    *  for the "no session yet" case (the first message creates one). */
   sessionId?: string;
-  status?: 'active' | 'ended' | 'aborted' | string;
+  /** chat_sessions.status — typically 'active' | 'ended' | 'aborted'. */
+  status?: string;
   /** Whether the latest assistant turn is currently streaming — drives
    *  the disabled-during-streaming gate. */
   isStreaming?: boolean;
@@ -129,13 +130,7 @@ export function Composer({
     }
   };
 
-  const captionText = isEnded
-    ? 'This thread is ended. Open a new one to keep chatting.'
-    : isCostCapped
-    ? 'This thread hit its cost cap. Start a new thread to keep chatting.'
-    : isStreaming
-    ? 'CEO is responding…'
-    : 'CEO will be summoned when you send. Each message spawns a fresh process.';
+  const captionText = pickCaption({ isEnded, isCostCapped, isStreaming: !!isStreaming });
 
   const sendDisabled = disabled || isPending || trimmed.length === 0;
 
@@ -181,6 +176,16 @@ export function Composer({
       ) : null}
     </footer>
   );
+}
+
+// pickCaption returns the right caption for the current composer state,
+// picking from the four mutually-exclusive states (ended / cost-capped /
+// streaming / idle).
+function pickCaption(s: { isEnded: boolean; isCostCapped: boolean; isStreaming: boolean }): string {
+  if (s.isEnded) return 'This thread is ended. Open a new one to keep chatting.';
+  if (s.isCostCapped) return 'This thread hit its cost cap. Start a new thread to keep chatting.';
+  if (s.isStreaming) return 'CEO is responding…';
+  return 'CEO will be summoned when you send. Each message spawns a fresh process.';
 }
 
 // sliceByBytes returns a substring whose UTF-8 byte length is <= the
