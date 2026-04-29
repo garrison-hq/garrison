@@ -26,7 +26,8 @@ import { useChatStream } from '@/lib/sse/chatStream';
 interface ServerMessage {
   id: string;
   turnIndex: number;
-  role: 'operator' | 'assistant' | string;
+  /** chat_messages.role — 'operator' or 'assistant' per the schema check. */
+  role: string;
   status: string;
   content: string | null;
   costUsd: string | number | null;

@@ -94,12 +94,12 @@ export function Composer({
     setWarning(null);
     startTransition(async () => {
       try {
-        if (!sessionId) {
-          const result = await startFn(content);
-          onSent?.({ sessionId: result.sessionId, messageId: result.messageId });
-        } else {
+        if (sessionId) {
           const result = await sendFn(sessionId, content);
           onSent?.({ sessionId, messageId: result.messageId });
+        } else {
+          const result = await startFn(content);
+          onSent?.({ sessionId: result.sessionId, messageId: result.messageId });
         }
       } catch (err) {
         setWarning(err instanceof Error ? err.message : 'Send failed.');
@@ -170,9 +170,9 @@ export function Composer({
         </button>
       </div>
       {warning ? (
-        <p className="text-[11px] text-warn" role="status" data-testid="chat-composer-warning">
+        <output className="text-[11px] text-warn block" data-testid="chat-composer-warning">
           {warning}
-        </p>
+        </output>
       ) : null}
     </footer>
   );
