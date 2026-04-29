@@ -4,10 +4,13 @@ import { getTranslations } from 'next-intl/server';
 import { StatusDot } from '@/components/ui/StatusDot';
 import { getSession } from '@/lib/auth/session';
 import { fetchSidebarStats } from '@/lib/queries/sidebarStats';
+import { getRecentThreadsForCurrentUser } from '@/lib/actions/chat';
+import { ThreadHistorySubnav } from '@/components/features/ceo-chat/ThreadHistorySubnav';
 import {
   AdminIcon,
   AgentIcon,
   ActivityIcon,
+  ChatIcon,
   DeptIcon,
   HomeIcon,
   HygieneIcon,
@@ -30,6 +33,12 @@ export async function Sidebar() {
   const t = await getTranslations('nav');
   const session = await getSession();
   const stats = await fetchSidebarStats();
+  // M5.2 — fetch recent threads for the chat subnav. Soft-fail to []
+  // if the call throws (e.g. the chat schema migration hasn't run on
+  // this environment yet) so the sidebar stays mountable.
+  const recentThreads = session
+    ? await getRecentThreadsForCurrentUser(10).catch(() => [])
+    : [];
   const email = session?.user.email ?? '';
   const initials = email
     .split('@')[0]
@@ -83,6 +92,8 @@ export async function Sidebar() {
           <NavSubLink href="/departments/qa-engineer" label="qa-engineer" />
         </NavGroup>
         <NavLink href="/activity" label={t('activity')} icon={<ActivityIcon />} />
+        <NavLink href="/chat" label="CEO chat" icon={<ChatIcon />} />
+        <ThreadHistorySubnav threads={recentThreads.map((r) => ({ id: r.id, threadNumber: r.threadNumber }))} />
         <NavLink
           href="/hygiene"
           label={t('hygiene')}

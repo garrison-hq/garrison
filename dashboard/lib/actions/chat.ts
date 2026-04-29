@@ -299,19 +299,56 @@ export async function deleteChatSession(sessionId: string): Promise<void> {
 // the auth session to derive userId — kept in lib/actions/chat.ts
 // rather than lib/queries/chat.ts because actions can call queries
 // but queries are pure-data helpers per M3 convention.
+//
+// Returns rows enriched with a per-operator thread_number computed
+// via ROW_NUMBER() OVER (PARTITION BY started_by_user_id ORDER BY
+// started_at ASC) per plan §1.11. Numbering is recomputed on every
+// read — acceptable because per-operator session counts are bounded.
+export interface RecentThreadRow {
+  id: string;
+  startedAt: string;
+  threadNumber: number;
+  status: string;
+  isArchived: boolean;
+}
+
 export async function getRecentThreadsForCurrentUser(
   limit = 10,
-): Promise<ChatSessionRow[]> {
+): Promise<RecentThreadRow[]> {
   const userId = await requireUserId();
-  return appDb
-    .select()
-    .from(chatSessions)
-    .where(
-      and(
-        eq(chatSessions.startedByUserId, userId),
-        eq(chatSessions.isArchived, false),
-      ),
+  const rows = await appDb.execute<{
+    id: string;
+    started_at: string;
+    thread_number: number;
+    status: string;
+    is_archived: boolean;
+  }>(sql`
+    WITH numbered AS (
+      SELECT id, started_at, status, is_archived,
+             ROW_NUMBER() OVER (
+               PARTITION BY started_by_user_id
+               ORDER BY started_at ASC
+             ) AS thread_number
+        FROM chat_sessions
+       WHERE started_by_user_id = ${userId}
     )
-    .orderBy(desc(chatSessions.startedAt))
-    .limit(limit);
+    SELECT id, started_at, status, is_archived, thread_number
+      FROM numbered
+     WHERE is_archived = false
+     ORDER BY started_at DESC
+     LIMIT ${limit}
+  `);
+  return (rows as unknown as Array<{
+    id: string;
+    started_at: string;
+    thread_number: number | string;
+    status: string;
+    is_archived: boolean;
+  }>).map((r) => ({
+    id: r.id,
+    startedAt: r.started_at,
+    threadNumber: Number(r.thread_number),
+    status: r.status,
+    isArchived: r.is_archived,
+  }));
 }
