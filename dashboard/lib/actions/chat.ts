@@ -23,6 +23,7 @@ import { appDb } from '@/lib/db/appClient';
 import { chatSessions, chatMessages } from '@/drizzle/schema.supervisor';
 import { getSession } from '@/lib/auth/session';
 import { AuthError, AuthErrorKind } from '@/lib/auth/errors';
+import { getMostRecentMempalaceCallAge } from '@/lib/queries/chat';
 import {
   ChatError,
   ChatErrorKind,
@@ -335,4 +336,16 @@ export async function getRecentThreadsForCurrentUser(
     status: r.status,
     isArchived: r.is_archived,
   }));
+}
+
+// fetchPalaceAgeForSession is a server-action wrapper around the read
+// helper getMostRecentMempalaceCallAge. ChatSessionView calls this on
+// every terminal commit so the PalaceLiveChip can flip live/stale/
+// unavailable without waiting for a full router.refresh round-trip.
+// Caller-ownership gate so a guessed UUID can't sniff palace-call ages.
+export async function fetchPalaceAgeForSession(
+  sessionId: string,
+): Promise<{ ageMs: number | null }> {
+  await requireSessionOwner(sessionId);
+  return getMostRecentMempalaceCallAge(sessionId);
 }

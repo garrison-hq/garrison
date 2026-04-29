@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -135,6 +136,33 @@ func (p *ChatPolicy) OnStreamEvent(ctx context.Context, e claudeproto.StreamEven
 	p.rawEvents = append(p.rawEvents, json.RawMessage(append([]byte(nil), e.Raw...)))
 
 	switch e.InnerType {
+	case "content_block_start":
+		// When claude opens a tool_use content block within an
+		// assistant message, any text streamed earlier in the same
+		// message was preamble (e.g. "Let me check ..."). The
+		// committed terminal commits only the FINAL message's text
+		// (per message_start contentBuf reset above), but the live
+		// stream has already pushed the preamble into the dashboard's
+		// partialDeltas. Emit a scrub directive so the dashboard
+		// clears the visible buffer for this (messageId, block) the
+		// moment we know the preamble is no longer the answer.
+		//
+		// We detect tool_use by raw-substring search instead of
+		// extending claudeproto's wire shape — the Raw bytes are the
+		// canonical NDJSON line and `"type":"tool_use"` is unambiguous
+		// at the content_block.type position.
+		if bytes.Contains(e.Raw, []byte(`"content_block":{"type":"tool_use"`)) ||
+			bytes.Contains(e.Raw, []byte(`"content_block": {"type": "tool_use"`)) {
+			seq := p.deltaSeq
+			p.deltaSeq++
+			if err := EmitScrub(ctx, p.Pool, p.MessageID, p.messageBlock, seq); err != nil {
+				p.Logger.Warn("chat: EmitScrub failed", "block", p.messageBlock, "seq", seq, "err", err)
+			}
+			// Drop any preamble text already accumulated for this
+			// message — only the final message's text should commit
+			// regardless of whether the next message_start fires.
+			p.contentBuf.Reset()
+		}
 	case "content_block_delta":
 		if e.Inner.DeltaType != "text_delta" {
 			return // tool_use input deltas, thinking deltas: observational only

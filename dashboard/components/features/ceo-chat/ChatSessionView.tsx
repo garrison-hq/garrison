@@ -25,7 +25,7 @@ import {
   EmptyCurrentThreadHint,
   EndedThreadEmptyState,
 } from './EmptyStates';
-import { createEmptyChatSession } from '@/lib/actions/chat';
+import { createEmptyChatSession, fetchPalaceAgeForSession } from '@/lib/actions/chat';
 import { useChatStream } from '@/lib/sse/chatStream';
 
 interface ChatSessionViewProps {
@@ -65,16 +65,31 @@ export function ChatSessionView({
   const router = useRouter();
   const stream = useChatStream(sessionId);
   const [refocusKey, setRefocusKey] = useState(0);
+  // palaceAgeMs starts from the server-rendered initial value and gets
+  // refreshed client-side on each terminal commit. router.refresh()
+  // alone doesn't propagate quickly enough in practice — the chip
+  // would stay "unavailable" until the operator manually reloaded.
+  const [livePalaceAgeMs, setLivePalaceAgeMs] = useState<number | null>(palaceAgeMs);
 
   // Each terminal commit triggers a server re-render so the session
   // row + cost rollup are fresh; also bumps the refocus key for
-  // Composer's auto-focus per FR-218.
+  // Composer's auto-focus per FR-218; also re-fetches the palace-age
+  // so the PalaceLiveChip flips green within the same render tick.
   useEffect(() => {
     if (stream.terminals.size === 0) return;
     setRefocusKey((k) => k + 1);
     router.refresh();
+    let cancelled = false;
+    fetchPalaceAgeForSession(sessionId)
+      .then(({ ageMs }) => {
+        if (!cancelled) setLivePalaceAgeMs(ageMs);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stream.terminals.size]);
+  }, [stream.terminals.size, sessionId]);
 
   const turnCount = useMemo(
     () => new Set(initialMessages.map((m) => m.turnIndex)).size + Math.max(0, stream.terminals.size - countAssistantTerminalsInInitial(initialMessages)),
@@ -157,7 +172,7 @@ export function ChatSessionView({
         status={session.status}
         isStreaming={isStreaming}
         latestErrorKind={latestErrorKind}
-        palaceAgeMs={palaceAgeMs}
+        palaceAgeMs={livePalaceAgeMs}
         refocusKey={refocusKey}
         onSent={() => router.refresh()}
       />

@@ -46,16 +46,32 @@ const MaxNotifyPayloadBytes = 7000
 // Returns an error if the payload (when serialised) would exceed
 // MaxNotifyPayloadBytes; callers split deltas before reaching that bound.
 func EmitDelta(ctx context.Context, pool *pgxpool.Pool, messageID pgtype.UUID, block int, seq int, deltaText string) error {
+	return emitDeltaImpl(ctx, pool, messageID, block, seq, deltaText, false)
+}
+
+// EmitScrub emits a special "clear visible buffer" notification for
+// the given (messageId, block). Used when claude transitions from text
+// → tool_use mid-message: the prior text was a preamble that the
+// operator shouldn't see lingering once the tool round-trip starts.
+// The dashboard treats scrub deltas as a directive to clear
+// partialDeltas[messageId] for the current block.
+func EmitScrub(ctx context.Context, pool *pgxpool.Pool, messageID pgtype.UUID, block int, seq int) error {
+	return emitDeltaImpl(ctx, pool, messageID, block, seq, "", true)
+}
+
+func emitDeltaImpl(ctx context.Context, pool *pgxpool.Pool, messageID pgtype.UUID, block int, seq int, deltaText string, scrub bool) error {
 	body := struct {
 		MessageID string `json:"message_id"`
 		Block     int    `json:"block"`
 		Seq       int    `json:"seq"`
 		DeltaText string `json:"delta_text"`
+		Scrub     bool   `json:"scrub,omitempty"`
 	}{
 		MessageID: uuidString(messageID),
 		Block:     block,
 		Seq:       seq,
 		DeltaText: deltaText,
+		Scrub:     scrub,
 	}
 	encoded, err := json.Marshal(body)
 	if err != nil {

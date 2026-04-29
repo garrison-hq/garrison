@@ -80,6 +80,11 @@ interface DeltaPayload {
   block?: number;
   seq: number;
   delta_text: string;
+  /** When true, this is a directive to clear the visible buffer
+   *  for (messageId, block) — claude opened a tool_use content
+   *  block and the prior text was preamble that shouldn't linger
+   *  in the bubble. */
+  scrub?: boolean;
 }
 
 // ChatStreamStore is the mutable state container shared between the
@@ -138,6 +143,17 @@ export const ChatStreamMachine = {
     const key = `${payload.message_id}:${block}:${payload.seq}`;
     if (store.seenSeqs.has(key)) return store; // dedupe per plan §1.5
     store.seenSeqs.add(key);
+
+    // Scrub directive — claude opened a tool_use content block in the
+    // current message; the preamble we may have already streamed is
+    // no longer the answer. Wipe the visible buffer for this messageId
+    // immediately so the operator doesn't see lingering pre-tool text.
+    if (payload.scrub) {
+      store.blocks.set(payload.message_id, block);
+      store.partialDeltas.set(payload.message_id, '');
+      return store;
+    }
+
     // If we see a new (higher) block for this messageId, reset its
     // visible buffer — claude moved past a message_start boundary in
     // the same turn (text → tool_use → text). Without this reset, the
