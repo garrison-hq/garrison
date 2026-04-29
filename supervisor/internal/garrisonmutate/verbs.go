@@ -45,59 +45,81 @@ type Verb struct {
 // logic lands as part of the M5.3 task list (T005-T011); the registry
 // here exists so the sealed-allow-list test (T004) passes against
 // stub handlers before the verb logic ships (FR-433 ordering).
+// Verbs entries use forwarding closures so reassignments to the
+// per-verb handler vars (init-time replacement of stub→real in the
+// per-domain files) propagate at call time. A naive `Handler:
+// handleCreateTicket` in the slice literal would freeze the stub
+// function value at package-init phase 1; the closure resolves the
+// var lookup per call.
 var Verbs = []Verb{
 	{
-		Name:                 "create_ticket",
-		Handler:              handleCreateTicket,
+		Name: "create_ticket",
+		Handler: func(ctx context.Context, deps Deps, args json.RawMessage) (Result, error) {
+			return handleCreateTicket(ctx, deps, args)
+		},
 		ReversibilityClass:   3,
 		AffectedResourceType: "ticket",
 		Description:          "Create a new ticket in the named department.",
 	},
 	{
-		Name:                 "edit_ticket",
-		Handler:              handleEditTicket,
+		Name: "edit_ticket",
+		Handler: func(ctx context.Context, deps Deps, args json.RawMessage) (Result, error) {
+			return handleEditTicket(ctx, deps, args)
+		},
 		ReversibilityClass:   2,
 		AffectedResourceType: "ticket",
 		Description:          "Edit an existing ticket's editable fields.",
 	},
 	{
-		Name:                 "transition_ticket",
-		Handler:              handleTransitionTicket,
+		Name: "transition_ticket",
+		Handler: func(ctx context.Context, deps Deps, args json.RawMessage) (Result, error) {
+			return handleTransitionTicket(ctx, deps, args)
+		},
 		ReversibilityClass:   1,
 		AffectedResourceType: "ticket",
 		Description:          "Move a ticket to a different Kanban column.",
 	},
 	{
-		Name:                 "pause_agent",
-		Handler:              handlePauseAgent,
+		Name: "pause_agent",
+		Handler: func(ctx context.Context, deps Deps, args json.RawMessage) (Result, error) {
+			return handlePauseAgent(ctx, deps, args)
+		},
 		ReversibilityClass:   1,
 		AffectedResourceType: "agent_role",
 		Description:          "Pause an agent role so the supervisor stops spawning new instances.",
 	},
 	{
-		Name:                 "resume_agent",
-		Handler:              handleResumeAgent,
+		Name: "resume_agent",
+		Handler: func(ctx context.Context, deps Deps, args json.RawMessage) (Result, error) {
+			return handleResumeAgent(ctx, deps, args)
+		},
 		ReversibilityClass:   1,
 		AffectedResourceType: "agent_role",
 		Description:          "Resume a previously-paused agent role.",
 	},
 	{
-		Name:                 "spawn_agent",
-		Handler:              handleSpawnAgent,
+		Name: "spawn_agent",
+		Handler: func(ctx context.Context, deps Deps, args json.RawMessage) (Result, error) {
+			return handleSpawnAgent(ctx, deps, args)
+		},
 		ReversibilityClass:   3,
 		AffectedResourceType: "agent_role",
 		Description:          "Manually spawn an agent instance (respects per-department concurrency cap).",
 	},
 	{
-		Name:                 "edit_agent_config",
-		Handler:              handleEditAgentConfig,
+		Name: "edit_agent_config",
+		Handler: func(ctx context.Context, deps Deps, args json.RawMessage) (Result, error) {
+			return handleEditAgentConfig(ctx, deps, args)
+		},
 		ReversibilityClass:   2,
 		AffectedResourceType: "agent_role",
 		Description:          "Edit an agent role's configuration. Pre-tx leak-scan rejects secrets.",
 	},
 	{
-		Name:                 "propose_hire",
-		Handler:              handleProposeHire,
+		Name: "propose_hire",
+		Handler: func(ctx context.Context, deps Deps, args json.RawMessage) (Result, error) {
+			return handleProposeHire(ctx, deps, args)
+		},
 		ReversibilityClass:   3,
 		AffectedResourceType: "hiring_proposal",
 		Description:          "Write a hiring proposal row visible on the operator's stopgap page.",
