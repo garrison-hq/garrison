@@ -87,4 +87,27 @@ describe('formatModelBadge', () => {
     expect(formatModelBadge('')).toBe('model n/a');
     expect(formatModelBadge('   ')).toBe('model n/a');
   });
+
+  it('returns "model n/a" for undefined', () => {
+    expect(formatModelBadge(undefined)).toBe('model n/a');
+  });
+
+  it('trims surrounding whitespace from the model name', () => {
+    expect(formatModelBadge('  claude-haiku  ')).toBe('claude-haiku');
+  });
+});
+
+describe('formatTimeAgo edge cases', () => {
+  it('treats negative deltas as "just now" (clock skew tolerance)', () => {
+    const now = new Date('2026-04-29T12:00:00Z').getTime();
+    expect(formatTimeAgo(new Date(now + 5_000), now)).toBe('just now');
+  });
+
+  it('accepts string + number inputs equivalently', () => {
+    const now = new Date('2026-04-29T12:00:00Z').getTime();
+    const past = new Date(now - 30_000);
+    expect(formatTimeAgo(past, now)).toBe('30s ago');
+    expect(formatTimeAgo(past.toISOString(), now)).toBe('30s ago');
+    expect(formatTimeAgo(past.getTime(), now)).toBe('30s ago');
+  });
 });

@@ -93,4 +93,18 @@ describe('ThreadHeader', () => {
       }
     }
   });
+
+  it('CostBadge precision=4 path renders 4 decimals (separate from the 2dp default)', async () => {
+    const { CostBadge } = await import('./ThreadHeader');
+    const { renderToString: rts } = await import('react-dom/server');
+    const html4 = rts(<CostBadge value={0.012345} precision={4} />);
+    expect(html4).toContain('$0.0123');
+    const html2 = rts(<CostBadge value={null} />);
+    expect(html2).toContain('$0.00');
+    const html2num = rts(<CostBadge value={'1.5' as unknown as number} />);
+    expect(html2num).toContain('$1.50');
+    // precision=4 with NaN-string should not crash.
+    const htmlNan = rts(<CostBadge value={'not a number' as unknown as number} precision={4} />);
+    expect(htmlNan).toContain('$0.0000');
+  });
 });

@@ -30,4 +30,12 @@ describe('IdlePill', () => {
     expect(visible).toContain('aborted');
     expect(visible.toLowerCase()).toContain('err');
   });
+
+  it('falls back to neutral tone for unknown status', () => {
+    const html = renderToString(<IdlePill status="exotic-state" />);
+    const visible = html.replace(/<!--\s*-->/g, '');
+    expect(visible).toContain('data-status="exotic-state"');
+    // Label echoes the unknown status verbatim per fallback.
+    expect(visible).toContain('exotic-state');
+  });
 });

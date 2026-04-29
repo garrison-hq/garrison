@@ -55,4 +55,51 @@ describe('MessageBubble', () => {
     );
     expect(visible(html)).toContain('claude-sonnet-4-6');
   });
+
+  it('streaming=true + status=failed does NOT show cursor (short-circuit on terminal status)', () => {
+    const html = renderToString(
+      <MessageBubble role="assistant" status="failed" content="x" streaming />,
+    );
+    expect(visible(html)).not.toContain('garrison-cursor');
+  });
+
+  it('streaming=true + status=aborted does NOT show cursor', () => {
+    const html = renderToString(
+      <MessageBubble role="assistant" status="aborted" content="x" streaming />,
+    );
+    expect(visible(html)).not.toContain('garrison-cursor');
+  });
+
+  it('renders error block when supplied', () => {
+    const html = renderToString(
+      <MessageBubble
+        role="assistant"
+        status="failed"
+        content={null}
+        errorBlock={<div data-testid="error-block-stub">err</div>}
+      />,
+    );
+    expect(visible(html)).toContain('error-block-stub');
+  });
+
+  it('renders the C avatar only for assistant rows', () => {
+    const op = renderToString(
+      <MessageBubble role="operator" status="completed" content="x" />,
+    );
+    const asst = renderToString(
+      <MessageBubble role="assistant" status="completed" content="x" />,
+    );
+    // Operator bubble doesn't render the C avatar wrapper.
+    expect(visible(op)).not.toContain('CEO');
+    // Assistant bubble does.
+    expect(visible(asst)).toContain('CEO');
+  });
+
+  it('renders null cost gracefully (operator-style empty footer)', () => {
+    const html = renderToString(
+      <MessageBubble role="assistant" status="completed" content="x" costUsd={null} />,
+    );
+    // Footer renders but with empty content (formatPerMessageCost returns null for null).
+    expect(visible(html)).toContain('chat-message-cost');
+  });
 });

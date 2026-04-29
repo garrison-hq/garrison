@@ -47,4 +47,18 @@ describe('PalaceLiveChip threshold', () => {
   it('exact boundary at 30 min still reads stale', () => {
     expect(classifyAge(30 * 60_000)).toBe('stale');
   });
+
+  it('renders all three label/tone combinations distinctly', () => {
+    const live = visible(renderToString(<PalaceLiveChip ageMs={1_000} />));
+    const stale = visible(renderToString(<PalaceLiveChip ageMs={10 * 60_000} />));
+    const unavailable = visible(renderToString(<PalaceLiveChip ageMs={null} />));
+    // Each variant ends up with a distinct dot tone token.
+    expect(live).toContain('palace live');
+    expect(stale).toContain('palace stale');
+    expect(unavailable).toContain('palace unavailable');
+    // And distinct StatusDot tones via Chip wrapping.
+    expect(live.toLowerCase()).toContain('ok');
+    expect(stale.toLowerCase()).toContain('warn');
+    expect(unavailable.toLowerCase()).toContain('err');
+  });
 });
