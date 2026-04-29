@@ -141,7 +141,7 @@ export function Composer({
 
   return (
     <footer
-      className="border-t border-border-1 bg-surface-1 px-4 py-3 flex flex-col gap-2"
+      className="border-t border-border-1 bg-surface-1 px-4 py-3 flex flex-col gap-2 min-w-0"
       data-testid="chat-composer"
     >
       <textarea
@@ -155,16 +155,18 @@ export function Composer({
         aria-keyshortcuts="Meta+Enter"
         disabled={disabled}
         data-testid="chat-composer-textarea"
-        className="w-full resize-y min-h-[64px] max-h-[280px] bg-surface-2 border border-border-1 rounded px-3 py-2 text-sm font-mono outline-none focus:ring-2 focus:ring-accent/50 disabled:opacity-60 disabled:cursor-not-allowed"
+        className="w-full min-w-0 resize-y min-h-[64px] max-h-[280px] bg-surface-2 border border-border-1 rounded px-3 py-2 text-sm font-mono outline-none focus:ring-2 focus:ring-accent/50 disabled:opacity-60 disabled:cursor-not-allowed"
       />
-      <div className="flex items-center gap-3 text-[11px] text-text-3">
-        <PalaceLiveChip ageMs={palaceAgeMs} />
-        <span className="flex-1 truncate">{captionText}</span>
+      <div className="flex items-center gap-3 text-[11px] text-text-3 min-w-0">
+        <span className="shrink-0">
+          <PalaceLiveChip ageMs={palaceAgeMs} />
+        </span>
+        <span className="flex-1 min-w-0 truncate">{captionText}</span>
         <button
           type="button"
           onClick={handleSend}
           disabled={sendDisabled}
-          className="px-3 py-1.5 text-[12px] font-medium border border-border-2 rounded bg-accent/90 text-white hover:bg-accent disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
+          className="px-3 py-1.5 text-[12px] font-medium border border-border-2 rounded bg-accent/90 text-white hover:bg-accent disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2 shrink-0 whitespace-nowrap"
           data-testid="chat-composer-send"
           aria-label="send"
         >
