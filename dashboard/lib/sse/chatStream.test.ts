@@ -138,6 +138,39 @@ describe('ChatStreamMachine', () => {
     expect(IDLE_GRACE_MS).toBe(60_000);
   });
 
+  it('resets the visible buffer when block increments (multi-message_start turn)', () => {
+    const store = emptyStore();
+    ChatStreamMachine.open(store);
+    // Block 0: claude's first message streams "pong" before tool calls.
+    ChatStreamMachine.delta(store, JSON.stringify({ message_id: 'm-1', block: 0, seq: 0, delta_text: 'po' }));
+    ChatStreamMachine.delta(store, JSON.stringify({ message_id: 'm-1', block: 0, seq: 1, delta_text: 'ng' }));
+    expect(store.partialDeltas.get('m-1')).toBe('pong');
+
+    // Block 1: claude moved past message_start (tool_use happened);
+    // the new message starts streaming "Yes, MemPalace is up" — the
+    // dashboard must DROP the prior "pong" and render only the new
+    // message's deltas.
+    ChatStreamMachine.delta(store, JSON.stringify({ message_id: 'm-1', block: 1, seq: 2, delta_text: 'Yes, ' }));
+    expect(store.partialDeltas.get('m-1')).toBe('Yes, ');
+    ChatStreamMachine.delta(store, JSON.stringify({ message_id: 'm-1', block: 1, seq: 3, delta_text: 'MemPalace is up' }));
+    expect(store.partialDeltas.get('m-1')).toBe('Yes, MemPalace is up');
+
+    // A late delta from block 0 (out-of-order replay or reconnect
+    // race) is dropped — block tracking is monotonic per id, so
+    // anything below the last-seen block can't update the visible
+    // buffer.
+    ChatStreamMachine.delta(store, JSON.stringify({ message_id: 'm-1', block: 0, seq: 4, delta_text: 'STALE' }));
+    expect(store.partialDeltas.get('m-1')).toBe('Yes, MemPalace is up');
+  });
+
+  it('legacy supervisor without block field still works (defaults to 0)', () => {
+    const store = emptyStore();
+    ChatStreamMachine.open(store);
+    ChatStreamMachine.delta(store, JSON.stringify({ message_id: 'm-1', seq: 0, delta_text: 'A' }));
+    ChatStreamMachine.delta(store, JSON.stringify({ message_id: 'm-1', seq: 1, delta_text: 'B' }));
+    expect(store.partialDeltas.get('m-1')).toBe('AB');
+  });
+
   it('TestChatStreamBackoffSchedule', () => {
     expect(computeBackoff(0)).toBe(100);
     expect(computeBackoff(100)).toBe(200);

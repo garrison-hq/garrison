@@ -72,6 +72,12 @@ export interface UseChatStreamResult {
 
 interface DeltaPayload {
   message_id: string;
+  /** Per-message_start counter from the supervisor. Defaults to 0
+   *  for legacy supervisors that didn't emit it. The dashboard
+   *  resets the visible buffer when this counter increases so
+   *  multi-message turns (text → tool_use → text) render only the
+   *  current message's deltas while it streams. */
+  block?: number;
   seq: number;
   delta_text: string;
 }
@@ -80,8 +86,13 @@ interface DeltaPayload {
 // React hook and the underlying state machine. Tests construct one
 // directly and drive transitions through ChatStreamMachine.
 export interface ChatStreamStore extends UseChatStreamResult {
-  /** Internal: dedupe key set keyed on `${messageId}:${seq}`. */
+  /** Internal: dedupe key set keyed on `${messageId}:${block}:${seq}`. */
   seenSeqs: Set<string>;
+  /** Internal: highest block seen per messageId. When a delta arrives
+   *  with a higher block, the partial buffer for that messageId is
+   *  reset (so the visible text reflects only the current claude
+   *  message_start window). */
+  blocks: Map<string, number>;
 }
 
 export function emptyStore(): ChatStreamStore {
@@ -92,6 +103,7 @@ export function emptyStore(): ChatStreamStore {
     sessionEnded: false,
     lastError: null,
     seenSeqs: new Set(),
+    blocks: new Map(),
   };
 }
 
@@ -122,9 +134,27 @@ export const ChatStreamMachine = {
     } catch {
       return store;
     }
-    const key = `${payload.message_id}:${payload.seq}`;
+    const block = payload.block ?? 0;
+    const key = `${payload.message_id}:${block}:${payload.seq}`;
     if (store.seenSeqs.has(key)) return store; // dedupe per plan §1.5
     store.seenSeqs.add(key);
+    // If we see a new (higher) block for this messageId, reset its
+    // visible buffer — claude moved past a message_start boundary in
+    // the same turn (text → tool_use → text). Without this reset, the
+    // dashboard would render prior intermediate text glued onto the
+    // current message's stream.
+    const lastBlock = store.blocks.get(payload.message_id) ?? -1;
+    if (block > lastBlock) {
+      store.blocks.set(payload.message_id, block);
+      store.partialDeltas.set(payload.message_id, payload.delta_text);
+      return store;
+    }
+    if (block < lastBlock) {
+      // Stale delta from an earlier block (out-of-order replay or
+      // reconnect race). Drop it — the prior block-reset already
+      // overwrote the visible buffer.
+      return store;
+    }
     const prev = store.partialDeltas.get(payload.message_id) ?? '';
     store.partialDeltas.set(payload.message_id, prev + payload.delta_text);
     return store;

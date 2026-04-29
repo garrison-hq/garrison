@@ -35,15 +35,25 @@ const MaxNotifyPayloadBytes = 7000
 // via json_build_object so the SSE bridge consumer (dashboard) decodes
 // directly without an extra trip through the supervisor.
 //
+// `block` is the per-message_start counter — claude can emit multiple
+// message_start events in a single turn (text → tool_use → text round
+// trips) and each message's text_delta should be accumulated into a
+// fresh client-side buffer, otherwise the dashboard renders prior
+// intermediate text before the final answer streams in. The dashboard
+// keys partialDeltas by (messageId, block) and resets the visible
+// buffer whenever block increments.
+//
 // Returns an error if the payload (when serialised) would exceed
 // MaxNotifyPayloadBytes; callers split deltas before reaching that bound.
-func EmitDelta(ctx context.Context, pool *pgxpool.Pool, messageID pgtype.UUID, seq int, deltaText string) error {
+func EmitDelta(ctx context.Context, pool *pgxpool.Pool, messageID pgtype.UUID, block int, seq int, deltaText string) error {
 	body := struct {
 		MessageID string `json:"message_id"`
+		Block     int    `json:"block"`
 		Seq       int    `json:"seq"`
 		DeltaText string `json:"delta_text"`
 	}{
 		MessageID: uuidString(messageID),
+		Block:     block,
 		Seq:       seq,
 		DeltaText: deltaText,
 	}

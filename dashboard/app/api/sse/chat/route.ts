@@ -31,6 +31,12 @@ const CHANNELS = {
 
 interface DeltaPayload {
   message_id: string;
+  /** Per-message_start counter from the supervisor. Increments on each
+   *  claude message_start so the dashboard can reset the visible
+   *  buffer when claude moves to a new message in the same turn
+   *  (text → tool_use → text). Missing field defaults to 0 in the
+   *  client. */
+  block?: number;
   seq: number;
   delta_text: string;
 }

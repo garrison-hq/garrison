@@ -31,7 +31,12 @@ type ChatPolicy struct {
 
 	// runtime state populated as the stream is consumed
 	deltaSeq   int
-	contentBuf strings.Builder
+	// messageBlock increments on each claude message_start. The
+	// dashboard uses this to reset its per-message_id partial buffer
+	// so multi-message turns (text → tool_use → text) render only
+	// the current message's deltas while it streams.
+	messageBlock int
+	contentBuf   strings.Builder
 	rawEvents  []json.RawMessage
 	bailReason string // populated by OnInit on MCP-health bail
 
@@ -138,8 +143,8 @@ func (p *ChatPolicy) OnStreamEvent(ctx context.Context, e claudeproto.StreamEven
 		p.contentBuf.WriteString(e.Inner.DeltaText)
 		seq := p.deltaSeq
 		p.deltaSeq++
-		if err := EmitDelta(ctx, p.Pool, p.MessageID, seq, e.Inner.DeltaText); err != nil {
-			p.Logger.Warn("chat: EmitDelta failed", "seq", seq, "err", err)
+		if err := EmitDelta(ctx, p.Pool, p.MessageID, p.messageBlock, seq, e.Inner.DeltaText); err != nil {
+			p.Logger.Warn("chat: EmitDelta failed", "block", p.messageBlock, "seq", seq, "err", err)
 		}
 	case "message_start":
 		// Claude emits ONE message_start per assistant message in the
@@ -157,6 +162,13 @@ func (p *ChatPolicy) OnStreamEvent(ctx context.Context, e claudeproto.StreamEven
 		// cumulative input tokens on each message_start); tokensOutput
 		// is taken from message_delta which fires per-message.
 		p.contentBuf.Reset()
+		// Bump messageBlock so subsequent EmitDelta calls carry the
+		// new value; the dashboard resets its per-messageId visible
+		// buffer when it sees a higher block.
+		p.messageBlock++
+		// deltaSeq stays monotonic across blocks for dedupe purposes —
+		// the dashboard's seenSeqs set uses (messageId, block, seq) so
+		// reusing a seq inside a new block is a different key.
 		p.tokensInput = e.Inner.InputTokens
 		p.cacheReadInput = e.Inner.CacheReadInput
 		p.cacheCreationInput = e.Inner.CacheCreationInput
