@@ -621,8 +621,25 @@ No operator action required for either — they self-manage on the same compose 
 - `error_kind='session_ended'`: session timed out. Operator action: start a new session.
 - `error_kind='turn_timeout'`: turn exceeded `GARRISON_CHAT_TURN_TIMEOUT`. Operator action: investigate (rare — usually means claude is hung; the next turn will spawn fresh).
 
+## M5.2 — chat dashboard surface
+
+Pre-deploy:
+
+1. Apply `migrations/20260429000016_m5_2_chat_archive_and_cascade.sql` via goose. The migration adds `chat_sessions.is_archived BOOLEAN NOT NULL DEFAULT false` plus the partial index `idx_chat_sessions_user_active_unarchived`, recreates the `chat_messages.session_id` FK with `ON DELETE CASCADE`, and grants `DELETE ON chat_sessions` to `garrison_dashboard_app`.
+2. Verify `garrison_dashboard_app` now has `INSERT, SELECT, UPDATE, DELETE` on `chat_sessions` and only `INSERT, SELECT` on `chat_messages` (the cascade does the work; the dashboard role does NOT need DELETE on `chat_messages`). `\dp chat_sessions` and `\dp chat_messages` in psql.
+3. Verify the FK is now `ON DELETE CASCADE`. `\d+ chat_messages` should show `"chat_messages_session_id_fkey" FOREIGN KEY (session_id) REFERENCES chat_sessions(id) ON DELETE CASCADE`.
+4. `vault_access_log` is intentionally NOT touched (FR-236) — rows referencing a deleted `chat_session_id` via JSONB metadata survive as forensic trail. The dashboard role keeps its M4 INSERT-only grant on `vault_access_log`; no DELETE grant added.
+
+Post-deploy:
+
+1. On supervisor restart, `RunRestartSweep` runs the new orphan-row pass alongside the existing pending-message pass. Watch logs for `chat: orphan sweep synthesised aborted` — expected count zero on healthy boot.
+2. Confirm the dashboard's left-rail "CEO chat" entry renders between Activity and Hygiene with the thread-history subnav listing the latest 10 active threads as `thread #N`.
+3. Confirm `/chat/all` (full thread list view) and `/chat/<uuid>` (active session view) both load.
+4. The new literal channel `work.chat.session_deleted` joins `KNOWN_CHANNELS`; `deleteChatSession` emits IDs-only payload per FR-321.
+
 ## Changelog
 
+- **2026-04-29**: M5.2 chat dashboard surface deployment section added (one new migration, one new pg_notify channel, sidebar entry + thread-history subnav, /chat/all + /chat/[[...sessionId]] routes, orphan-row sweep extension).
 - **2026-04-28**: M5.1 chat backend deployment section added (per-message ephemeral chat containers, OAuth token vault seeding, 7 GARRISON_CHAT_* env vars, restart + idle sweeps).
 - **2026-04-27**: M4 dashboard mutations deployment section added (4 migrations, dashboard ML activation, supervisor restart for the cache invalidator).
 - **2026-04-26**: M3 dashboard deployment section added.
