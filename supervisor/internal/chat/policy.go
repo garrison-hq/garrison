@@ -31,15 +31,15 @@ type ChatPolicy struct {
 	GraceWrite time.Duration
 
 	// runtime state populated as the stream is consumed
-	deltaSeq   int
+	deltaSeq int
 	// messageBlock increments on each claude message_start. The
 	// dashboard uses this to reset its per-message_id partial buffer
 	// so multi-message turns (text → tool_use → text) render only
 	// the current message's deltas while it streams.
 	messageBlock int
 	contentBuf   strings.Builder
-	rawEvents  []json.RawMessage
-	bailReason string // populated by OnInit on MCP-health bail
+	rawEvents    []json.RawMessage
+	bailReason   string // populated by OnInit on MCP-health bail
 
 	// rate-limit observation
 	rateLimitOverage bool
