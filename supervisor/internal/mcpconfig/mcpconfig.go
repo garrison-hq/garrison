@@ -46,12 +46,22 @@ var bannedMCPNamePatterns = []string{"vault", "secret", "infisical"}
 // Infisical at all (spec D4.5 ordering / T013 assertion). Returns
 // ErrVaultMCPBanned wrapping the offending server name, nil if clean.
 // A nil/empty/"{}" input is always clean.
-// BuildChatConfig returns the MCP config JSON for an M5.1 chat-message
-// spawn — exactly two server entries (postgres read-only + mempalace),
-// plus a name-based mutation-server reject (T010 / FR-022 + operator's
-// Q-E decision). The bytes are ready to write to
-// ${MCPConfigDir}/chat-${chat_message_id}.json and bind-mount into the
-// chat container as /etc/garrison/mcp.json (read-only).
+// BuildChatConfig returns the MCP config JSON for a chat-message spawn.
+//
+// In M5.1 / M5.2 the config carried exactly two entries (postgres
+// read-only + mempalace). M5.3 adds a third entry — garrison-mutate —
+// when ChatConfigParams supplies the supervisor's main database URL and
+// the calling chat session + message IDs. The garrison-mutate MCP
+// server (in-tree, runs as `supervisor mcp garrison-mutate`) writes
+// to chat_mutation_audit / tickets / agents / hiring_proposals; it
+// reads its session-context env vars at startup to scope each tool
+// call's audit row.
+//
+// The bytes are ready to write to ${MCPConfigDir}/chat-${chat_message_id}.json
+// and bind-mount into the chat container as /etc/garrison/mcp.json
+// (read-only). Per chat-threat-model.md Rule 1, the entry set is
+// sealed: callers cannot inject additional servers; the only switch is
+// presence-or-absence of the garrison-mutate entry.
 func BuildChatConfig(p ChatConfigParams) ([]byte, error) {
 	if p.SupervisorBin == "" {
 		return nil, errors.New("mcpconfig: BuildChatConfig: SupervisorBin is empty")
@@ -83,11 +93,38 @@ func BuildChatConfig(p ChatConfigParams) ([]byte, error) {
 		},
 	}
 
-	// Name-based reject for would-be mutation servers (FR-022, M5.1
-	// Q-E). The set will broaden to a tool-surface check at M5.3 when
-	// garrison-mutate actually exists.
+	// M5.3 garrison-mutate entry. All-or-nothing: if any of the three
+	// session-context fields are set, all three must be set, and the
+	// entry lands. If all three are empty, the entry is omitted (M5.1 /
+	// M5.2 chat back-compat path used by older tests).
+	mutateConfigured := p.DatabaseURL != "" || p.ChatSessionID != "" || p.ChatMessageID != ""
+	if mutateConfigured {
+		if p.DatabaseURL == "" {
+			return nil, errors.New("mcpconfig: BuildChatConfig: garrison-mutate requires DatabaseURL")
+		}
+		if p.ChatSessionID == "" {
+			return nil, errors.New("mcpconfig: BuildChatConfig: garrison-mutate requires ChatSessionID")
+		}
+		if p.ChatMessageID == "" {
+			return nil, errors.New("mcpconfig: BuildChatConfig: garrison-mutate requires ChatMessageID")
+		}
+		servers["garrison-mutate"] = mcpServerSpec{
+			Command: p.SupervisorBin,
+			Args:    []string{"mcp", "garrison-mutate"},
+			Env: map[string]string{
+				"GARRISON_DATABASE_URL":   p.DatabaseURL,
+				"GARRISON_CHAT_SESSION_ID": p.ChatSessionID,
+				"GARRISON_CHAT_MESSAGE_ID": p.ChatMessageID,
+			},
+		}
+	}
+
+	// Defense-in-depth: vault-pattern names are still rejected even at
+	// the chat-config level (Rule 1 + Rule 2). garrison-mutate is now an
+	// expected entry so it's removed from the legacy banned-fixed-list;
+	// other write-shaped names stay banned to catch typos and
+	// would-be parallel mutation servers.
 	for _, banned := range []string{
-		"garrison-mutate", "mutate",
 		"tickets-write", "agents-write", "vault-write",
 	} {
 		if _, present := servers[banned]; present {
@@ -96,14 +133,34 @@ func BuildChatConfig(p ChatConfigParams) ([]byte, error) {
 	}
 
 	cfg := mcpConfig{MCPServers: servers}
+	// Run the vault-pattern check on the resulting config (defense in
+	// depth — covers the "future maintainer accidentally adds a
+	// vault-named entry inside this function" case).
+	if err := RejectVaultServers(cfg); err != nil {
+		return nil, err
+	}
 	return json.Marshal(cfg)
 }
 
 // ChatConfigParams wires BuildChatConfig.
+//
+// SupervisorBin / AgentRoDSN / Mempalace are required for every chat
+// spawn (M5.1 baseline).
+//
+// DatabaseURL / ChatSessionID / ChatMessageID are an all-or-nothing
+// triple. When set, BuildChatConfig adds the M5.3 garrison-mutate entry
+// configured to write audit rows scoped to the calling chat session
+// and message. When all three are empty, the legacy two-entry shape
+// is produced (used by older tests / the M5.1-M5.2 back-compat path).
 type ChatConfigParams struct {
 	SupervisorBin string
 	AgentRoDSN    string
 	Mempalace     MempalaceParams
+	// M5.3 fields. All three must be set together; setting only some
+	// returns an error.
+	DatabaseURL    string
+	ChatSessionID  string
+	ChatMessageID  string
 }
 
 func CheckExtraServers(extraServersJSON []byte) error {

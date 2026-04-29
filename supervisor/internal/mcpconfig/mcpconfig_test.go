@@ -698,3 +698,163 @@ func TestBuildChatConfigRejectsDisabledMempalace(t *testing.T) {
 		t.Errorf("error should mention mempalace; got %v", err)
 	}
 }
+
+// chatM53Params returns a ChatConfigParams with all three M5.3 fields
+// populated (the production shape from M5.3 onwards).
+func chatM53Params() ChatConfigParams {
+	return ChatConfigParams{
+		SupervisorBin: "/usr/local/bin/supervisor",
+		AgentRoDSN:    "postgres://garrison_agent_ro:pw@localhost/garrison",
+		Mempalace: MempalaceParams{
+			DockerBin:          "/usr/bin/docker",
+			MempalaceContainer: "garrison-mempalace",
+			PalacePath:         "/palace",
+			DockerHost:         "tcp://garrison-docker-proxy:2375",
+		},
+		DatabaseURL:   "postgres://garrison:pw@localhost/garrison",
+		ChatSessionID: "11111111-1111-1111-1111-111111111111",
+		ChatMessageID: "22222222-2222-2222-2222-222222222222",
+	}
+}
+
+// TestBuildChatConfigSealsThreeEntries pins the M5.3 sealed allow-list:
+// when all three M5.3 fields are set, the resulting config has exactly
+// {postgres, mempalace, garrison-mutate}, no more, no fewer. FR-430 /
+// chat-threat-model.md Rule 1.
+func TestBuildChatConfigSealsThreeEntries(t *testing.T) {
+	raw, err := BuildChatConfig(chatM53Params())
+	if err != nil {
+		t.Fatalf("BuildChatConfig: %v", err)
+	}
+	var cfg chatConfigCfg
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	want := map[string]struct{}{"postgres": {}, "mempalace": {}, "garrison-mutate": {}}
+	if got := len(cfg.MCPServers); got != 3 {
+		t.Errorf("len(mcpServers) = %d; want 3 (postgres + mempalace + garrison-mutate)", got)
+	}
+	for name := range cfg.MCPServers {
+		if _, ok := want[name]; !ok {
+			t.Errorf("unexpected server %q in chat MCP config", name)
+		}
+		delete(want, name)
+	}
+	for missing := range want {
+		t.Errorf("missing expected server %q", missing)
+	}
+}
+
+// TestBuildChatConfigGarrisonMutateEntryShape verifies the third entry
+// carries the supervisor binary, the right subcommand, and the env vars
+// the garrison-mutate server reads at startup.
+func TestBuildChatConfigGarrisonMutateEntryShape(t *testing.T) {
+	p := chatM53Params()
+	raw, err := BuildChatConfig(p)
+	if err != nil {
+		t.Fatalf("BuildChatConfig: %v", err)
+	}
+	var cfg chatConfigCfg
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	gm, ok := cfg.MCPServers["garrison-mutate"]
+	if !ok {
+		t.Fatalf("garrison-mutate entry missing; keys=%v", keys(cfg.MCPServers))
+	}
+	if gm.Command != p.SupervisorBin {
+		t.Errorf("garrison-mutate.command = %q; want supervisor bin", gm.Command)
+	}
+	if len(gm.Args) != 2 || gm.Args[0] != "mcp" || gm.Args[1] != "garrison-mutate" {
+		t.Errorf("garrison-mutate.args = %v; want [mcp garrison-mutate]", gm.Args)
+	}
+	if gm.Env["GARRISON_DATABASE_URL"] != p.DatabaseURL {
+		t.Errorf("garrison-mutate.env.GARRISON_DATABASE_URL = %q", gm.Env["GARRISON_DATABASE_URL"])
+	}
+	if gm.Env["GARRISON_CHAT_SESSION_ID"] != p.ChatSessionID {
+		t.Errorf("garrison-mutate.env.GARRISON_CHAT_SESSION_ID = %q", gm.Env["GARRISON_CHAT_SESSION_ID"])
+	}
+	if gm.Env["GARRISON_CHAT_MESSAGE_ID"] != p.ChatMessageID {
+		t.Errorf("garrison-mutate.env.GARRISON_CHAT_MESSAGE_ID = %q", gm.Env["GARRISON_CHAT_MESSAGE_ID"])
+	}
+}
+
+// TestBuildChatConfigBackCompatTwoEntries verifies the M5.1 / M5.2
+// callers (which don't pass the M5.3 session-context fields) still get
+// the legacy two-entry shape. Lets the M5.3 mcpconfig change land
+// without forcing the chat-spawn callers to update in lockstep.
+func TestBuildChatConfigBackCompatTwoEntries(t *testing.T) {
+	p := chatM53Params()
+	p.DatabaseURL = ""
+	p.ChatSessionID = ""
+	p.ChatMessageID = ""
+	raw, err := BuildChatConfig(p)
+	if err != nil {
+		t.Fatalf("BuildChatConfig: %v", err)
+	}
+	var cfg chatConfigCfg
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got := len(cfg.MCPServers); got != 2 {
+		t.Errorf("len(mcpServers) = %d; want 2 (back-compat path)", got)
+	}
+	if _, ok := cfg.MCPServers["garrison-mutate"]; ok {
+		t.Errorf("garrison-mutate entry should be absent when M5.3 fields empty")
+	}
+}
+
+// TestBuildChatConfigRejectsPartialM53Fields pins the all-or-nothing
+// rule for the M5.3 session-context triple. Setting only one or two
+// fields is a misconfiguration and must return an error rather than
+// silently dropping the garrison-mutate entry.
+func TestBuildChatConfigRejectsPartialM53Fields(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(*ChatConfigParams)
+		want   string
+	}{
+		{"missing DatabaseURL", func(p *ChatConfigParams) { p.DatabaseURL = "" }, "DatabaseURL"},
+		{"missing ChatSessionID", func(p *ChatConfigParams) { p.ChatSessionID = "" }, "ChatSessionID"},
+		{"missing ChatMessageID", func(p *ChatConfigParams) { p.ChatMessageID = "" }, "ChatMessageID"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := chatM53Params()
+			tc.mutate(&p)
+			_, err := BuildChatConfig(p)
+			if err == nil {
+				t.Fatalf("expected error for %s, got nil", tc.name)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error should mention %q; got %v", tc.want, err)
+			}
+		})
+	}
+}
+
+// TestBuildChatConfigRejectsVaultEntries pins the M2.3 Rule 3 carryover
+// for chat: vault-pattern entry names are still rejected at the chat
+// config level even though the chat config doesn't accept arbitrary
+// extras. CheckExtraServers is the public chokepoint when an agent
+// (legacy) or test passes them; this test exercises that path.
+// FR-431 / chat-threat-model.md Rule 2.
+func TestBuildChatConfigRejectsVaultEntries(t *testing.T) {
+	cases := [][]byte{
+		[]byte(`{"vault": {"command": "/x"}}`),
+		[]byte(`{"infisical": {"command": "/x"}}`),
+		[]byte(`{"garrison-vault": {"command": "/x"}}`),
+		[]byte(`{"my-secret-server": {"command": "/x"}}`),
+	}
+	for _, raw := range cases {
+		t.Run(string(raw), func(t *testing.T) {
+			err := CheckExtraServers(raw)
+			if err == nil {
+				t.Fatalf("expected error for %s, got nil", raw)
+			}
+			if !errors.Is(err, ErrVaultMCPBanned) {
+				t.Errorf("error should wrap ErrVaultMCPBanned; got %v", err)
+			}
+		})
+	}
+}
