@@ -60,12 +60,18 @@ export const tickets = pgTable("tickets", {
 	acceptanceCriteria: text("acceptance_criteria"),
 	metadata: jsonb().default({}).notNull(),
 	origin: text().default('sql').notNull(),
+	createdViaChatSessionId: uuid("created_via_chat_session_id"),
 }, (table) => [
 	foreignKey({
 			columns: [table.departmentId],
 			foreignColumns: [departments.id],
 			name: "tickets_department_id_fkey"
 		}),
+	foreignKey({
+			columns: [table.createdViaChatSessionId],
+			foreignColumns: [chatSessions.id],
+			name: "tickets_created_via_chat_session_id_fkey"
+		}).onDelete("set null"),
 ]);
 
 export const departments = pgTable("departments", {
@@ -236,4 +242,61 @@ export const secretMetadata = pgTable("secret_metadata", {
 }, (table) => [
 	primaryKey({ columns: [table.secretPath, table.customerId], name: "secret_metadata_pkey"}),
 	check("secret_metadata_rotation_provider_check", sql`rotation_provider = ANY (ARRAY['infisical_native'::text, 'manual_paste'::text, 'not_rotatable'::text])`),
+]);
+
+export const chatMutationAudit = pgTable("chat_mutation_audit", {
+	id: uuid().defaultRandom().primaryKey().notNull(),
+	chatSessionId: uuid("chat_session_id").notNull(),
+	chatMessageId: uuid("chat_message_id").notNull(),
+	verb: text().notNull(),
+	argsJsonb: jsonb("args_jsonb").notNull(),
+	outcome: text().notNull(),
+	reversibilityClass: integer("reversibility_class").notNull(),
+	affectedResourceId: text("affected_resource_id"),
+	affectedResourceType: text("affected_resource_type"),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+}, (table) => [
+	index("idx_cma_session").on(table.chatSessionId, table.createdAt),
+	index("idx_cma_resource").on(table.affectedResourceType, table.affectedResourceId),
+	foreignKey({
+			columns: [table.chatSessionId],
+			foreignColumns: [chatSessions.id],
+			name: "chat_mutation_audit_chat_session_id_fkey"
+		}).onDelete("cascade"),
+	foreignKey({
+			columns: [table.chatMessageId],
+			foreignColumns: [chatMessages.id],
+			name: "chat_mutation_audit_chat_message_id_fkey"
+		}).onDelete("cascade"),
+	check("chat_mutation_audit_verb_check", sql`verb = ANY (ARRAY['create_ticket'::text, 'edit_ticket'::text, 'transition_ticket'::text, 'pause_agent'::text, 'resume_agent'::text, 'spawn_agent'::text, 'edit_agent_config'::text, 'propose_hire'::text])`),
+	check("chat_mutation_audit_outcome_check", sql`outcome = ANY (ARRAY['success'::text, 'validation_failed'::text, 'leak_scan_failed'::text, 'ticket_state_changed'::text, 'concurrency_cap_full'::text, 'invalid_transition'::text, 'resource_not_found'::text, 'tool_call_ceiling_reached'::text])`),
+	check("chat_mutation_audit_reversibility_class_check", sql`reversibility_class = ANY (ARRAY[1, 2, 3])`),
+	check("chat_mutation_audit_affected_resource_type_check", sql`affected_resource_type = ANY (ARRAY['ticket'::text, 'agent_role'::text, 'hiring_proposal'::text])`),
+]);
+
+export const hiringProposals = pgTable("hiring_proposals", {
+	id: uuid().defaultRandom().primaryKey().notNull(),
+	roleTitle: text("role_title").notNull(),
+	departmentSlug: text("department_slug").notNull(),
+	justificationMd: text("justification_md").notNull(),
+	skillsSummaryMd: text("skills_summary_md"),
+	proposedVia: text("proposed_via").notNull(),
+	proposedByChatSessionId: uuid("proposed_by_chat_session_id"),
+	status: text().default('pending').notNull(),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+}, (table) => [
+	index("idx_hp_status_dept").on(table.status, table.departmentSlug, table.createdAt),
+	index("idx_hp_chat_session").on(table.proposedByChatSessionId),
+	foreignKey({
+			columns: [table.departmentSlug],
+			foreignColumns: [departments.slug],
+			name: "hiring_proposals_department_slug_fkey"
+		}).onDelete("restrict"),
+	foreignKey({
+			columns: [table.proposedByChatSessionId],
+			foreignColumns: [chatSessions.id],
+			name: "hiring_proposals_proposed_by_chat_session_id_fkey"
+		}).onDelete("set null"),
+	check("hiring_proposals_proposed_via_check", sql`proposed_via = ANY (ARRAY['ceo_chat'::text, 'dashboard'::text, 'agent'::text])`),
+	check("hiring_proposals_status_check", sql`status = ANY (ARRAY['pending'::text, 'approved'::text, 'rejected'::text, 'superseded'::text])`),
 ]);

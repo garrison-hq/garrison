@@ -12,7 +12,7 @@ import (
 )
 
 const getTicketByID = `-- name: GetTicketByID :one
-SELECT id, department_id, objective, created_at, column_slug, acceptance_criteria, metadata, origin FROM tickets WHERE id = $1
+SELECT id, department_id, objective, created_at, column_slug, acceptance_criteria, metadata, origin, created_via_chat_session_id FROM tickets WHERE id = $1
 `
 
 func (q *Queries) GetTicketByID(ctx context.Context, id pgtype.UUID) (Ticket, error) {
@@ -27,6 +27,7 @@ func (q *Queries) GetTicketByID(ctx context.Context, id pgtype.UUID) (Ticket, er
 		&i.AcceptanceCriteria,
 		&i.Metadata,
 		&i.Origin,
+		&i.CreatedViaChatSessionID,
 	)
 	return i, err
 }
@@ -34,7 +35,7 @@ func (q *Queries) GetTicketByID(ctx context.Context, id pgtype.UUID) (Ticket, er
 const insertTicket = `-- name: InsertTicket :one
 INSERT INTO tickets (department_id, objective)
 VALUES ($1, $2)
-RETURNING id, department_id, objective, created_at, column_slug, acceptance_criteria, metadata, origin
+RETURNING id, department_id, objective, created_at, column_slug, acceptance_criteria, metadata, origin, created_via_chat_session_id
 `
 
 type InsertTicketParams struct {
@@ -54,6 +55,7 @@ func (q *Queries) InsertTicket(ctx context.Context, arg InsertTicketParams) (Tic
 		&i.AcceptanceCriteria,
 		&i.Metadata,
 		&i.Origin,
+		&i.CreatedViaChatSessionID,
 	)
 	return i, err
 }

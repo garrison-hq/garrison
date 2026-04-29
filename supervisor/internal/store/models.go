@@ -65,6 +65,19 @@ type ChatMessage struct {
 	TerminatedAt     pgtype.Timestamptz
 }
 
+type ChatMutationAudit struct {
+	ID                   pgtype.UUID
+	ChatSessionID        pgtype.UUID
+	ChatMessageID        pgtype.UUID
+	Verb                 string
+	ArgsJsonb            []byte
+	Outcome              string
+	ReversibilityClass   int16
+	AffectedResourceID   *string
+	AffectedResourceType *string
+	CreatedAt            pgtype.Timestamptz
+}
+
 type ChatSession struct {
 	ID                 pgtype.UUID
 	StartedByUserID    pgtype.UUID
@@ -101,6 +114,18 @@ type EventOutbox struct {
 	ProcessedAt pgtype.Timestamptz
 }
 
+type HiringProposal struct {
+	ID                      pgtype.UUID
+	RoleTitle               string
+	DepartmentSlug          string
+	JustificationMd         string
+	SkillsSummaryMd         *string
+	ProposedVia             string
+	ProposedByChatSessionID pgtype.UUID
+	Status                  string
+	CreatedAt               pgtype.Timestamptz
+}
+
 type SecretMetadatum struct {
 	SecretPath       string
 	CustomerID       pgtype.UUID
@@ -115,14 +140,15 @@ type SecretMetadatum struct {
 }
 
 type Ticket struct {
-	ID                 pgtype.UUID
-	DepartmentID       pgtype.UUID
-	Objective          string
-	CreatedAt          pgtype.Timestamptz
-	ColumnSlug         string
-	AcceptanceCriteria *string
-	Metadata           []byte
-	Origin             string
+	ID                      pgtype.UUID
+	DepartmentID            pgtype.UUID
+	Objective               string
+	CreatedAt               pgtype.Timestamptz
+	ColumnSlug              string
+	AcceptanceCriteria      *string
+	Metadata                []byte
+	Origin                  string
+	CreatedViaChatSessionID pgtype.UUID
 }
 
 type TicketTransition struct {
