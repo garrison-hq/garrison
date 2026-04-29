@@ -34,22 +34,21 @@ export function ThreadHeader({
 }: Readonly<ThreadHeaderProps>) {
   return (
     <header
-      className="flex items-center gap-3 border-b border-border-1 bg-surface-1 px-4 py-2"
+      className="flex items-center gap-3 border-b border-border-1 bg-surface-1 px-4 py-2 min-w-0"
       data-testid="chat-thread-header"
     >
-      <div className="flex flex-col gap-0.5 min-w-0">
+      <div className="flex flex-col gap-0.5 min-w-0 flex-1">
         <h2 className="text-text-1 text-sm font-medium truncate" data-testid="chat-thread-title">
           {formatThreadTitle(threadNumber)}
         </h2>
-        <p className="text-text-3 text-[11px] flex items-center gap-2">
-          <span>started {formatTimeAgo(startedAt)}</span>
-          <span className="text-text-4">·</span>
-          <span className="font-mono font-tabular">{turnCount} turns</span>
-          <span className="text-text-4">·</span>
+        <p className="text-text-3 text-[11px] flex items-center gap-2 flex-wrap">
+          <span className="shrink-0">started {formatTimeAgo(startedAt)}</span>
+          <span className="text-text-4 shrink-0">·</span>
+          <span className="font-mono font-tabular shrink-0">{turnCount} turns</span>
+          <span className="text-text-4 shrink-0">·</span>
           <CostBadge value={totalCostUsd} />
         </p>
       </div>
-      <div className="flex-1" />
       <ThreadOverflowMenu sessionId={sessionId} status={status} isArchived={isArchived} />
     </header>
   );

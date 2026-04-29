@@ -33,23 +33,23 @@ export function ChatTopbarStrip({ breadcrumbSuffix, idlePill }: ChatTopbarStripP
   };
 
   return (
-    <div className="border-b border-border-1 bg-surface-1 px-4 py-2 flex items-center gap-3 text-sm" data-testid="chat-topbar-strip">
-      <nav aria-label="Chat breadcrumb" className="flex items-center gap-1.5 text-text-3 text-[12px]">
-        <span>CEO chat</span>
+    <div className="border-b border-border-1 bg-surface-1 px-4 py-2 flex items-center gap-3 text-sm min-w-0" data-testid="chat-topbar-strip">
+      <nav aria-label="Chat breadcrumb" className="flex items-center gap-1.5 text-text-3 text-[12px] min-w-0 truncate">
+        <span className="shrink-0">CEO chat</span>
         {breadcrumbSuffix ? (
           <>
-            <span className="text-text-4">/</span>
-            <span className="text-text-2 font-mono">{breadcrumbSuffix}</span>
+            <span className="text-text-4 shrink-0">/</span>
+            <span className="text-text-2 font-mono truncate">{breadcrumbSuffix}</span>
           </>
         ) : null}
       </nav>
       <div className="flex-1" />
-      {idlePill ? <div className="text-[11px]">{idlePill}</div> : null}
+      {idlePill ? <div className="text-[11px] shrink-0">{idlePill}</div> : null}
       <button
         type="button"
         onClick={handleNewThread}
         disabled={isPending}
-        className="px-3 py-1.5 text-[12px] font-medium border border-border-2 rounded bg-surface-2 hover:bg-surface-3 disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
+        className="px-3 py-1.5 text-[12px] font-medium border border-border-2 rounded bg-surface-2 hover:bg-surface-3 disabled:opacity-60 disabled:cursor-not-allowed transition-colors shrink-0 whitespace-nowrap"
         data-testid="chat-new-thread"
       >
         + New thread

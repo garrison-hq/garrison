@@ -10,8 +10,8 @@ import { KnowsPanePlaceholder } from './KnowsPanePlaceholder';
 
 export function ChatShell({ children }: Readonly<{ children: ReactNode }>) {
   return (
-    <div className="flex flex-1 min-h-0">
-      <section className="flex-1 flex flex-col min-w-0">{children}</section>
+    <div className="flex flex-1 min-h-0 min-w-0">
+      <section className="flex-1 flex flex-col min-w-0 overflow-hidden">{children}</section>
       <KnowsPanePlaceholder />
     </div>
   );
