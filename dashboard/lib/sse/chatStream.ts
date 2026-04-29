@@ -150,7 +150,9 @@ export const ChatStreamMachine = {
     // immediately so the operator doesn't see lingering pre-tool text.
     if (payload.scrub) {
       store.blocks.set(payload.message_id, block);
-      store.partialDeltas.set(payload.message_id, '');
+      const next = new Map(store.partialDeltas);
+      next.set(payload.message_id, '');
+      store.partialDeltas = next;
       return store;
     }
 
@@ -162,7 +164,9 @@ export const ChatStreamMachine = {
     const lastBlock = store.blocks.get(payload.message_id) ?? -1;
     if (block > lastBlock) {
       store.blocks.set(payload.message_id, block);
-      store.partialDeltas.set(payload.message_id, payload.delta_text);
+      const next = new Map(store.partialDeltas);
+      next.set(payload.message_id, payload.delta_text);
+      store.partialDeltas = next;
       return store;
     }
     if (block < lastBlock) {
@@ -172,7 +176,9 @@ export const ChatStreamMachine = {
       return store;
     }
     const prev = store.partialDeltas.get(payload.message_id) ?? '';
-    store.partialDeltas.set(payload.message_id, prev + payload.delta_text);
+    const next = new Map(store.partialDeltas);
+    next.set(payload.message_id, prev + payload.delta_text);
+    store.partialDeltas = next;
     return store;
   },
   terminal(store: ChatStreamStore, raw: string): ChatStreamStore {
@@ -183,7 +189,9 @@ export const ChatStreamMachine = {
       return store;
     }
     if (!payload.messageId) return store;
-    store.terminals.set(payload.messageId, payload);
+    const next = new Map(store.terminals);
+    next.set(payload.messageId, payload);
+    store.terminals = next;
     // Per plan §1.5 the renderer prefers terminal.content over
     // partialDeltas.get(messageId); we leave the partial buffer alone.
     return store;

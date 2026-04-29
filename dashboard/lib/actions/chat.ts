@@ -347,8 +347,5 @@ export async function fetchPalaceAgeForSession(
   sessionId: string,
 ): Promise<{ ageMs: number | null }> {
   await requireSessionOwner(sessionId);
-  const result = await getMostRecentMempalaceCallAge(sessionId);
-  // eslint-disable-next-line no-console
-  console.log('[palace-age]', { sessionId, ageMs: result.ageMs });
-  return result;
+  return getMostRecentMempalaceCallAge(sessionId);
 }
