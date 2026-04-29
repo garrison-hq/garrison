@@ -4,66 +4,83 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/garrison-hq/garrison/supervisor/internal/store"
 )
 
 // AssembleTranscript composes the NDJSON bytes the supervisor pipes
-// into the chat container's stdin. Each line is a single JSON object
-// in the wire shape claude expects under
+// into the chat container's stdin. The output is exactly ONE
+// `{"type":"user","message":{...}}` line whose content is the full
+// conversation history followed by the current operator message.
 //
-//	`--input-format stream-json --output-format stream-json`:
+// Why one line instead of one-per-turn: real claude in
+// `--input-format stream-json --output-format stream-json --print`
+// mode treats each input `user` message as a separate turn and emits
+// one `result` event per turn (observed empirically — N>0 prior turns
+// → 2 result events: one for the first message in the stream, one
+// for the last). That broke the dashboard, which committed both
+// terminals into the same chat_messages row. Flattening the
+// transcript into a single user message gives claude one turn → one
+// response, which is what the chat surface expects.
 //
-//	{"type":"user","message":{"role":"user","content":"..."}}
-//	{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"..."}]}}
-//	{"type":"user","message":{"role":"user","content":"<current turn>"}}
+// Format:
+//
+//	## Prior conversation
+//
+//	**Operator:** ...
+//	**You:** ...
+//
+//	## Current message
+//
+//	<current operator content>
 //
 // Operator rows always replay; assistant rows replay only when their
-// status is 'completed' (clarify Q4: failed / aborted turns are
-// excluded so the model doesn't see a half-finished prior assistant
-// turn). The current-turn operator content goes last as the final
-// user line so claude responds to it.
+// status is 'completed' (failed/aborted excluded so claude doesn't see
+// half-finished prior turns). On the first turn (no prior history) the
+// "Prior conversation" + "Current message" headers are omitted — the
+// content is just the operator's text verbatim.
 //
 // Output ends with a trailing newline so claude sees a clean EOF
-// after the last NDJSON envelope. The caller closes stdin after the
-// write to signal end-of-input.
+// after the NDJSON envelope. The caller closes stdin after the write
+// to signal end-of-input.
 func AssembleTranscript(prior []store.GetSessionTranscriptRow, currentOperatorContent string) ([]byte, error) {
-	var buf bytes.Buffer
-
+	var historyBuf strings.Builder
+	hasPrior := false
 	for _, r := range prior {
 		switch r.Role {
 		case "operator":
-			line, err := operatorLine(textOf(r.Content))
-			if err != nil {
-				return nil, err
-			}
-			buf.Write(line)
+			fmt.Fprintf(&historyBuf, "**Operator:** %s\n\n", textOf(r.Content))
+			hasPrior = true
 		case "assistant":
 			if r.Status != "completed" {
 				continue
 			}
-			line, err := assistantLine(textOf(r.Content))
-			if err != nil {
-				return nil, err
-			}
-			buf.Write(line)
+			fmt.Fprintf(&historyBuf, "**You:** %s\n\n", textOf(r.Content))
+			hasPrior = true
 		default:
 			return nil, fmt.Errorf("chat: AssembleTranscript: unknown role %q", r.Role)
 		}
 	}
 
-	// Current operator turn always lands last, regardless of whether
-	// the prior list ends with an operator or assistant entry.
-	cur, err := operatorLine(currentOperatorContent)
+	var content strings.Builder
+	if hasPrior {
+		content.WriteString("## Prior conversation\n\n")
+		content.WriteString(historyBuf.String())
+		content.WriteString("## Current message\n\n")
+	}
+	content.WriteString(currentOperatorContent)
+
+	line, err := userLine(content.String())
 	if err != nil {
 		return nil, err
 	}
-	buf.Write(cur)
-
+	var buf bytes.Buffer
+	buf.Write(line)
 	return buf.Bytes(), nil
 }
 
-func operatorLine(content string) ([]byte, error) {
+func userLine(content string) ([]byte, error) {
 	type wire struct {
 		Type    string `json:"type"`
 		Message struct {
@@ -77,34 +94,7 @@ func operatorLine(content string) ([]byte, error) {
 	w.Message.Content = content
 	b, err := json.Marshal(&w)
 	if err != nil {
-		return nil, fmt.Errorf("chat: operator line: %w", err)
-	}
-	return append(b, '\n'), nil
-}
-
-func assistantLine(content string) ([]byte, error) {
-	// Assistant content uses the structured form claude emits
-	// (content blocks with type="text"). Re-emitting the same shape
-	// on input ensures claude treats the replay as identical to its
-	// own prior output.
-	type contentBlock struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
-	}
-	type wire struct {
-		Type    string `json:"type"`
-		Message struct {
-			Role    string         `json:"role"`
-			Content []contentBlock `json:"content"`
-		} `json:"message"`
-	}
-	var w wire
-	w.Type = "assistant"
-	w.Message.Role = "assistant"
-	w.Message.Content = []contentBlock{{Type: "text", Text: content}}
-	b, err := json.Marshal(&w)
-	if err != nil {
-		return nil, fmt.Errorf("chat: assistant line: %w", err)
+		return nil, fmt.Errorf("chat: user line: %w", err)
 	}
 	return append(b, '\n'), nil
 }

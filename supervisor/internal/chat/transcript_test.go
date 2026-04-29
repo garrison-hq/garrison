@@ -12,8 +12,10 @@ import (
 
 func ptr(s string) *string { return &s }
 
-// TestAssembleTranscript_SingleTurn: one operator turn at index 0; the
-// assembled NDJSON is exactly one user line.
+// TestAssembleTranscript_SingleTurn: one operator turn at index 0
+// emits exactly one user NDJSON line whose content is the operator
+// message verbatim — no "Prior conversation" / "Current message"
+// headers when there's no history.
 func TestAssembleTranscript_SingleTurn(t *testing.T) {
 	out, err := AssembleTranscript(nil, "hello")
 	if err != nil {
@@ -26,12 +28,22 @@ func TestAssembleTranscript_SingleTurn(t *testing.T) {
 	if got := role(t, lines[0]); got != "user" {
 		t.Errorf("line 0 role=%q; want user", got)
 	}
+	got := contentOf(t, lines[0])
+	if got != "hello" {
+		t.Errorf("content=%q; want %q", got, "hello")
+	}
+	if strings.Contains(got, "Prior conversation") || strings.Contains(got, "Current message") {
+		t.Errorf("first-turn content should not carry history headers: %q", got)
+	}
 }
 
-// TestAssembleTranscript_MultiTurnReplay: 3 prior turns (operator/
-// assistant/operator) + current operator turn → 4 lines in order
-// user/assistant/user/user.
-func TestAssembleTranscript_MultiTurnReplay(t *testing.T) {
+// TestAssembleTranscript_MultiTurn_FlattensIntoOneUserLine: 3 prior
+// turns + the current op message produce ONE user NDJSON line whose
+// content includes the prior history + current message under
+// markdown headers. Real claude in stream-json input mode emits one
+// result event per `user` line, so flattening into a single line is
+// what makes the chat surface work.
+func TestAssembleTranscript_MultiTurn_FlattensIntoOneUserLine(t *testing.T) {
 	prior := []store.GetSessionTranscriptRow{
 		{Role: "operator", Status: "completed", TurnIndex: 0, Content: ptr("favorite color is purple")},
 		{Role: "assistant", Status: "completed", TurnIndex: 1, Content: ptr("Noted.")},
@@ -42,19 +54,29 @@ func TestAssembleTranscript_MultiTurnReplay(t *testing.T) {
 		t.Fatalf("err: %v", err)
 	}
 	lines := splitLines(out)
-	if len(lines) != 4 {
-		t.Fatalf("got %d lines; want 4", len(lines))
+	if len(lines) != 1 {
+		t.Fatalf("got %d lines; want 1 (flattened): %q", len(lines), out)
 	}
-	wantRoles := []string{"user", "assistant", "user", "user"}
-	for i, want := range wantRoles {
-		if got := role(t, lines[i]); got != want {
-			t.Errorf("line %d role=%q; want %q", i, got, want)
+	if got := role(t, lines[0]); got != "user" {
+		t.Errorf("line role=%q; want user", got)
+	}
+	c := contentOf(t, lines[0])
+	for _, want := range []string{
+		"## Prior conversation",
+		"**Operator:** favorite color is purple",
+		"**You:** Noted.",
+		"**Operator:** ok",
+		"## Current message",
+		"what is my favorite color?",
+	} {
+		if !strings.Contains(c, want) {
+			t.Errorf("content missing %q\n--- full content ---\n%s", want, c)
 		}
 	}
 }
 
 // TestAssembleTranscript_SkipsFailedAssistant: an assistant row at
-// status='failed' is excluded from replay (clarify Q4).
+// status='failed' is excluded from the history block (clarify Q4).
 func TestAssembleTranscript_SkipsFailedAssistant(t *testing.T) {
 	prior := []store.GetSessionTranscriptRow{
 		{Role: "operator", Status: "completed", TurnIndex: 0, Content: ptr("q1")},
@@ -65,14 +87,12 @@ func TestAssembleTranscript_SkipsFailedAssistant(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	lines := splitLines(out)
-	if len(lines) != 3 {
-		t.Fatalf("got %d lines; want 3 (assistant failed skipped)", len(lines))
+	c := contentOf(t, splitLines(out)[0])
+	if strings.Contains(c, "DROPPED") {
+		t.Errorf("failed assistant text leaked into transcript: %s", c)
 	}
-	for _, ln := range lines {
-		if role(t, ln) == "assistant" {
-			t.Errorf("unexpected assistant line in replay: %s", ln)
-		}
+	if !strings.Contains(c, "**Operator:** q1") || !strings.Contains(c, "**Operator:** q2") {
+		t.Errorf("operator turns missing from content: %s", c)
 	}
 }
 
@@ -87,9 +107,9 @@ func TestAssembleTranscript_SkipsAbortedAssistant(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	lines := splitLines(out)
-	if len(lines) != 2 {
-		t.Fatalf("got %d lines; want 2", len(lines))
+	c := contentOf(t, splitLines(out)[0])
+	if strings.Contains(c, "DROPPED") {
+		t.Errorf("aborted assistant text leaked into transcript: %s", c)
 	}
 }
 
@@ -101,25 +121,15 @@ func TestAssembleTranscript_HandlesUnicodeAndJSONEscapes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	// Re-decode and verify the content survived intact.
-	var w struct {
-		Type    string `json:"type"`
-		Message struct {
-			Role    string `json:"role"`
-			Content string `json:"content"`
-		} `json:"message"`
-	}
-	if err := json.Unmarshal(bytes.TrimSpace(out), &w); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if w.Message.Content != tricky {
-		t.Errorf("round-trip lost data:\n  got %q\n want %q", w.Message.Content, tricky)
+	if got := contentOf(t, splitLines(out)[0]); got != tricky {
+		t.Errorf("round-trip lost data:\n  got %q\n want %q", got, tricky)
 	}
 }
 
 func splitLines(b []byte) []string {
 	var out []string
 	sc := bufio.NewScanner(bytes.NewReader(b))
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for sc.Scan() {
 		if line := strings.TrimSpace(sc.Text()); line != "" {
 			out = append(out, line)
@@ -140,4 +150,18 @@ func role(t *testing.T, line string) string {
 		t.Fatalf("unmarshal %q: %v", line, err)
 	}
 	return w.Message.Role
+}
+
+func contentOf(t *testing.T, line string) string {
+	t.Helper()
+	var w struct {
+		Type    string `json:"type"`
+		Message struct {
+			Content string `json:"content"`
+		} `json:"message"`
+	}
+	if err := json.Unmarshal([]byte(line), &w); err != nil {
+		t.Fatalf("unmarshal %q: %v", line, err)
+	}
+	return w.Message.Content
 }
