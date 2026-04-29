@@ -571,7 +571,7 @@ Some milestones carry genuine external unknowns — how a tool actually behaves 
 
 **M4 — Dashboard mutations.** Create tickets in UI, drag between columns, edit agent configs. Everything the operator does daily.
 
-**M5 — CEO chat (summoned, read-only).** Conversation panel, summon-per-message pattern, Q&A only. CEO can query state and the palace but cannot create tickets yet.
+**M5 — CEO chat (summoned).** Conversation panel, summon-per-message pattern. M5.1 ships the read-only backend (server actions, SSE producer, transcript reads, idle/restart sweeps). M5.2 ships the dashboard surface (three-pane layout, message stream, composer, multi-session UX, end/archive/delete affordances). M5.3 adds chat-driven mutations behind a threat-model amendment. M5.4 ships the "WHAT THE CEO KNOWS" knowledge-base pane.
 
 **M6 — CEO ticket decomposition + hygiene checks.** CEO writes tickets from conversation. Hygiene dashboard shows thin/missing writes. Rate-limit back-off and cost-based throttling land here (M2.1 observes cost and rate-limit events; M6 acts on them).
 
