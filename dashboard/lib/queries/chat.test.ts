@@ -115,18 +115,33 @@ describe('getMostRecentMempalaceCallAge', () => {
     const sql = postgres(env.TEST_SUPERUSER_DSN, { max: 1 });
     try {
       // Seed an assistant row whose raw_event_envelope carries a
-      // successful mempalace tool_result.
+      // mempalace tool_use + matching tool_result with no is_error.
+      // This mirrors the supervisor's actual envelope shape: a
+      // top-level array of stream events; assistant carries the
+      // tool_use; user carries the tool_result; tool_use_id ties them.
       await sql`
         INSERT INTO chat_messages (session_id, turn_index, role, status, content, raw_event_envelope, terminated_at)
         VALUES (
           ${sessionId}, 1, 'assistant', 'completed',
           'response',
-          ${JSON.stringify({
-            events: [
-              { type: 'tool_use', tool_use: { server_name: 'mempalace', name: 'mempalace_search' } },
-              { type: 'tool_result', mcp_server: 'mempalace', is_error: false },
-            ],
-          })}::jsonb,
+          ${JSON.stringify([
+            {
+              type: 'assistant',
+              message: {
+                content: [
+                  { type: 'tool_use', id: 'toolu_test_001', name: 'mcp__mempalace__mempalace_search' },
+                ],
+              },
+            },
+            {
+              type: 'user',
+              message: {
+                content: [
+                  { type: 'tool_result', tool_use_id: 'toolu_test_001', content: [{ type: 'text', text: 'ok' }] },
+                ],
+              },
+            },
+          ])}::jsonb,
           NOW()
         )
       `;
@@ -172,12 +187,24 @@ describe('getMostRecentMempalaceCallAge', () => {
         VALUES (
           ${sessionId}, 1, 'assistant', 'completed',
           'response',
-          ${JSON.stringify({
-            events: [
-              { type: 'tool_use', tool_use: { server_name: 'mempalace', name: 'mempalace_search' } },
-              { type: 'tool_result', mcp_server: 'mempalace', is_error: true },
-            ],
-          })}::jsonb,
+          ${JSON.stringify([
+            {
+              type: 'assistant',
+              message: {
+                content: [
+                  { type: 'tool_use', id: 'toolu_test_002', name: 'mcp__mempalace__mempalace_search' },
+                ],
+              },
+            },
+            {
+              type: 'user',
+              message: {
+                content: [
+                  { type: 'tool_result', tool_use_id: 'toolu_test_002', is_error: true, content: [{ type: 'text', text: 'boom' }] },
+                ],
+              },
+            },
+          ])}::jsonb,
           NOW()
         )
       `;

@@ -154,9 +154,22 @@ export async function getMostRecentMempalaceCallAge(
 }
 
 // parseSuccessfulMempalaceCallTimestamp pulls the timestamp of the
-// most recent successful mempalace tool_result from a raw_event_envelope.
-// The envelope shape varies — we accept both array-of-events and
-// object-with-events payloads. Returns null if no successful mempalace
+// most recent successful mempalace tool call from a raw_event_envelope.
+//
+// The supervisor stores the envelope as a top-level JSON array of
+// stream events (claudeproto.OnStreamEvent accumulator). Each element
+// has shape { type, message: { content: [...] } } — the array carries
+// `assistant` events whose message.content includes `tool_use` blocks
+// (the dispatch) and `user` events whose message.content includes
+// `tool_result` blocks (the response).
+//
+// Detection is two-step:
+//   1. Build a Map<tool_use_id, tool_name> from assistant.tool_use blocks
+//   2. For each user.tool_result block, check whether the paired
+//      tool name starts with `mcp__mempalace__` and is_error is not true
+//
+// Pre-M5 envelopes / fixtures may carry a `{events: [...]}` shape; we
+// fall back to that for parity. Returns null if no successful mempalace
 // call is present.
 function parseSuccessfulMempalaceCallTimestamp(
   envelope: unknown,
@@ -164,10 +177,37 @@ function parseSuccessfulMempalaceCallTimestamp(
 ): number | null {
   if (!envelope) return null;
   const events = extractStreamEvents(envelope);
-  // Walk in reverse chronological order so the latest successful
-  // tool_result wins when multiple appear in a single turn.
+
+  // Pass 1: collect tool_use_id → name from assistant blocks.
+  const toolUses = new Map<string, string>();
+  for (const ev of events) {
+    if (!isRecord(ev)) continue;
+    if (ev['type'] !== 'assistant') continue;
+    for (const block of extractMessageContent(ev)) {
+      if (!isRecord(block)) continue;
+      if (block['type'] !== 'tool_use') continue;
+      const id = block['id'];
+      const name = block['name'];
+      if (typeof id === 'string' && typeof name === 'string') {
+        toolUses.set(id, name);
+      }
+    }
+  }
+
+  // Pass 2: walk tool_result blocks (user events) in reverse so the
+  // latest successful mempalace call wins.
   for (let i = events.length - 1; i >= 0; i--) {
-    if (isSuccessfulMempalaceToolEvent(events[i])) {
+    const ev = events[i];
+    if (!isRecord(ev)) continue;
+    if (ev['type'] !== 'user') continue;
+    for (const block of extractMessageContent(ev)) {
+      if (!isRecord(block)) continue;
+      if (block['type'] !== 'tool_result') continue;
+      if (block['is_error'] === true) continue;
+      const useId = block['tool_use_id'];
+      if (typeof useId !== 'string') continue;
+      const name = toolUses.get(useId);
+      if (!name || !name.startsWith('mcp__mempalace__')) continue;
       return fallbackAt ? new Date(fallbackAt as string | number | Date).getTime() : Date.now();
     }
   }
@@ -183,15 +223,13 @@ function extractStreamEvents(envelope: unknown): unknown[] {
   return [];
 }
 
-function isSuccessfulMempalaceToolEvent(ev: unknown): boolean {
-  if (typeof ev !== 'object' || ev === null) return false;
-  const e = ev as Record<string, unknown>;
-  // Only tool_result events count — they carry the success/failure
-  // signal via is_error. tool_use events are dispatch-only and tell
-  // us nothing about whether the call succeeded.
-  if (e['type'] !== 'tool_result') return false;
-  const server = e['mcp_server'] ?? e['server_name'];
-  if (server !== 'mempalace') return false;
-  // is_error must be explicitly false. Missing or true → failure.
-  return e['is_error'] === false;
+function extractMessageContent(ev: Record<string, unknown>): unknown[] {
+  const message = ev['message'];
+  if (!isRecord(message)) return [];
+  const content = message['content'];
+  return Array.isArray(content) ? content : [];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
