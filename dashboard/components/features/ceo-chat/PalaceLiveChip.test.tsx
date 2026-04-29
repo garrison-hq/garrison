@@ -17,12 +17,13 @@ describe('PalaceLiveChip threshold', () => {
     expect(v).toContain('data-tone="live"');
   });
 
-  it('TestPalaceLiveChipStaleAt15Min', () => {
-    expect(classifyAge(15 * 60_000)).toBe('stale');
+  it('TestPalaceLiveChipIdleAt15Min', () => {
+    // 5-30min range maps to 'idle' (was 'stale' pre-Apr-29 polish).
+    expect(classifyAge(15 * 60_000)).toBe('idle');
     const html = renderToString(<PalaceLiveChip ageMs={15 * 60_000} />);
     const v = visible(html);
-    expect(v).toContain('palace stale');
-    expect(v).toContain('data-tone="stale"');
+    expect(v).toContain('palace idle');
+    expect(v).toContain('data-tone="idle"');
   });
 
   it('TestPalaceLiveChipUnavailableOver30Min', () => {
@@ -51,24 +52,23 @@ describe('PalaceLiveChip threshold', () => {
     expect(classifyAge(5 * 60_000)).toBe('live');
   });
 
-  it('exact boundary at 30 min still reads stale', () => {
-    expect(classifyAge(30 * 60_000)).toBe('stale');
+  it('exact boundary at 30 min still reads idle', () => {
+    expect(classifyAge(30 * 60_000)).toBe('idle');
   });
 
-  it('renders all four label/tone combinations distinctly', () => {
+  it('renders all three label/tone combinations distinctly', () => {
     const live = visible(renderToString(<PalaceLiveChip ageMs={1_000} />));
-    const stale = visible(renderToString(<PalaceLiveChip ageMs={10 * 60_000} />));
+    const idleRecent = visible(renderToString(<PalaceLiveChip ageMs={10 * 60_000} />));
+    const idleNull = visible(renderToString(<PalaceLiveChip ageMs={null} />));
     const unavailable = visible(renderToString(<PalaceLiveChip ageMs={31 * 60_000} />));
-    const idle = visible(renderToString(<PalaceLiveChip ageMs={null} />));
-    // Each variant ends up with a distinct label.
     expect(live).toContain('palace live');
-    expect(stale).toContain('palace stale');
+    expect(idleRecent).toContain('palace idle');
+    expect(idleNull).toContain('palace idle');
     expect(unavailable).toContain('palace unavailable');
-    expect(idle).toContain('palace idle');
-    // And distinct StatusDot tones via Chip wrapping.
+    // StatusDot tones via Chip wrapping.
     expect(live.toLowerCase()).toContain('ok');
-    expect(stale.toLowerCase()).toContain('warn');
+    expect(idleRecent.toLowerCase()).toContain('info');
+    expect(idleNull.toLowerCase()).toContain('info');
     expect(unavailable.toLowerCase()).toContain('err');
-    expect(idle.toLowerCase()).toContain('info');
   });
 });

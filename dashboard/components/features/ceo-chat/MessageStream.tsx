@@ -142,9 +142,16 @@ export function MessageStream({
       const partial = stream.partialDeltas.get(m.id);
       const mergedContent = terminal?.content ?? m.content ?? partial ?? null;
       const mergedStatus = terminal?.status ?? m.status;
-      const isStreaming = m.role === 'assistant' && (mergedStatus === 'streaming' || (partial !== undefined && terminal === undefined));
+      // "Streaming" here means "in-flight from the operator's POV": the
+      // bubble should show the typing dots / cursor. We treat both
+      // 'pending' (row inserted, claude not yet emitting) and
+      // 'streaming' (claude has started) as in-flight; a live partial
+      // buffer without a terminal also qualifies for the SSE-leading-
+      // refresh window.
+      const isInFlight = m.role === 'assistant' && terminal === undefined &&
+        (mergedStatus === 'pending' || mergedStatus === 'streaming' || partial !== undefined);
       const errorKindFinal = terminal?.errorKind ?? m.errorKind;
-      return { ...m, mergedContent, mergedStatus, isStreaming, errorKindFinal };
+      return { ...m, mergedContent, mergedStatus, isStreaming: isInFlight, errorKindFinal };
     });
   }, [messages, stream.terminals, stream.partialDeltas]);
 

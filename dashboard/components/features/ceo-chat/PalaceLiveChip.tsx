@@ -2,18 +2,18 @@
 //
 // Reads the operator-supplied ageMs (parent fetches via
 // getMostRecentMempalaceCallAge on every terminal commit) and renders
-// one of four states (FR-283 + Apr-29 polish):
+// one of three states:
 //
-//   ageMs <= 5min       → 'live'         (ok)
-//   5min < ageMs <= 30m → 'stale'        (warn)
-//   ageMs > 30m         → 'unavailable'  (err)
-//   ageMs == null       → 'idle'         (info)
+//   ageMs <= 5min  → 'live'         (ok, green)
+//   ageMs > 30min  → 'unavailable'  (err, red)
+//   else           → 'idle'         (info, muted)
 //
-// "Unavailable" / err is now reserved for the genuinely-broken path
-// (palace had a successful call recently but it's gone cold). The
-// initial empty state — operator just opened a thread, no mempalace
-// call has happened yet — renders as muted "idle" so the chip doesn't
-// look like the surface is broken before anything's been tried.
+// "Idle" covers both (a) no mempalace call has happened in this thread
+// yet (ageMs === null) and (b) the most recent call is in the 5-30min
+// range. In both cases the palace itself is fine, it just hasn't been
+// touched recently — the muted info tone says "nothing wrong, nothing
+// active" without the warn-yellow alarm. "Unavailable" / err is
+// reserved for the >30min cold path that's likely an actual problem.
 //
 // Per FR-332 the chip combines a colored StatusDot with a text label
 // — colorblind operators read the label.
@@ -24,25 +24,23 @@ import { StatusDot } from '@/components/ui/StatusDot';
 const FIVE_MIN_MS = 5 * 60_000;
 const THIRTY_MIN_MS = 30 * 60_000;
 
-export type PalaceLiveTone = 'live' | 'stale' | 'unavailable' | 'idle';
+export type PalaceLiveTone = 'live' | 'idle' | 'unavailable';
 
 export function classifyAge(ageMs: number | null): PalaceLiveTone {
   if (ageMs === null) return 'idle';
   if (ageMs <= FIVE_MIN_MS) return 'live';
-  if (ageMs <= THIRTY_MIN_MS) return 'stale';
+  if (ageMs <= THIRTY_MIN_MS) return 'idle';
   return 'unavailable';
 }
 
-const TONE_DOT: Record<PalaceLiveTone, 'ok' | 'warn' | 'err' | 'info'> = {
+const TONE_DOT: Record<PalaceLiveTone, 'ok' | 'err' | 'info'> = {
   live: 'ok',
-  stale: 'warn',
   unavailable: 'err',
   idle: 'info',
 };
 
 const TONE_LABEL: Record<PalaceLiveTone, string> = {
   live: 'palace live',
-  stale: 'palace stale',
   unavailable: 'palace unavailable',
   idle: 'palace idle',
 };

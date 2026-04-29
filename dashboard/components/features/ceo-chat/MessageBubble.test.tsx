@@ -102,4 +102,24 @@ describe('MessageBubble', () => {
     // Footer renders but with empty content (formatPerMessageCost returns null for null).
     expect(visible(html)).toContain('chat-message-cost');
   });
+
+  it('shows the typing dots while pending with no content yet', () => {
+    const html = renderToString(
+      <MessageBubble role="assistant" status="pending" content={null} streaming />,
+    );
+    const v = visible(html);
+    expect(v).toContain('chat-typing-indicator');
+    expect(v).toContain('garrison-typing-dot');
+    expect(v).not.toContain('garrison-cursor');
+  });
+
+  it('swaps dots for streaming text + cursor once content arrives', () => {
+    const html = renderToString(
+      <MessageBubble role="assistant" status="streaming" content="hello" streaming />,
+    );
+    const v = visible(html);
+    expect(v).not.toContain('chat-typing-indicator');
+    expect(v).toContain('garrison-cursor');
+    expect(v).toContain('hello');
+  });
 });
