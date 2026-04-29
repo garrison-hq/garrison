@@ -1,0 +1,7 @@
+# M5.3 mockclaude fixture — m5_3_chaos_ceiling_breach
+# See m5_3/README.md for the scenario this fixture drives.
+# T020 chaos test commits refine this body inline if specific
+# behavioural assertions need a tighter sequence.
+#init-mcp-servers [{"name":"postgres","status":"connected"},{"name":"mempalace","status":"connected"},{"name":"garrison-mutate","status":"connected"}]
+{"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","content":[{"type":"text","text":"M5.3 fixture skeleton for m5_3_chaos_ceiling_breach. Refine in T020 chaos test commits."}]}}
+{"type":"result","subtype":"success","is_error":false,"duration_ms":100,"duration_api_ms":80,"total_cost_usd":0.001,"stop_reason":"end_turn","terminal_reason":"completed","result":"M5.3 fixture skeleton","session_id":"mock-session-m5_3_chaos_ceiling_breach","permission_denials":[]}
