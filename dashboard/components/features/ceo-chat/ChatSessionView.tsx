@@ -95,11 +95,21 @@ export function ChatSessionView({
   }, [initialMessages, stream.terminals]);
 
   // Streaming gate — disable composer if there's an in-flight assistant.
+  // partialDeltas survive after the terminal arrives by design (renderer
+  // prefers terminal but keeps the partial for forensic / scroll-back per
+  // plan §1.5). So a non-empty partialDeltas alone doesn't mean
+  // "streaming" — we need at least one partial whose messageId has NOT
+  // received a terminal yet. Otherwise the composer locks forever once a
+  // turn has streamed.
   const isStreaming = useMemo(() => {
-    return initialMessages.some(
+    if (initialMessages.some(
       (m) => m.role === 'assistant' && (m.status === 'pending' || m.status === 'streaming'),
-    ) || stream.partialDeltas.size > 0;
-  }, [initialMessages, stream.partialDeltas.size]);
+    )) return true;
+    for (const messageId of stream.partialDeltas.keys()) {
+      if (!stream.terminals.has(messageId)) return true;
+    }
+    return false;
+  }, [initialMessages, stream.partialDeltas, stream.terminals]);
 
   const handleCreateNew = async () => {
     const { sessionId: nextId } = await createEmptyChatSession();
