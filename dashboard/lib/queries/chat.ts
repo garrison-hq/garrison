@@ -177,41 +177,62 @@ function parseSuccessfulMempalaceCallTimestamp(
 ): number | null {
   if (!envelope) return null;
   const events = extractStreamEvents(envelope);
+  const toolUses = collectToolUseNames(events);
+  if (!hasSuccessfulMempalaceResult(events, toolUses)) return null;
+  return fallbackAt ? new Date(fallbackAt as string | number | Date).getTime() : Date.now();
+}
 
-  // Pass 1: collect tool_use_id → name from assistant blocks.
-  const toolUses = new Map<string, string>();
+// Pass 1: build tool_use_id → name from assistant.tool_use blocks.
+function collectToolUseNames(events: unknown[]): Map<string, string> {
+  const out = new Map<string, string>();
   for (const ev of events) {
-    if (!isRecord(ev)) continue;
-    if (ev['type'] !== 'assistant') continue;
+    if (!isAssistantEvent(ev)) continue;
     for (const block of extractMessageContent(ev)) {
-      if (!isRecord(block)) continue;
-      if (block['type'] !== 'tool_use') continue;
+      if (!isToolUseBlock(block)) continue;
       const id = block['id'];
       const name = block['name'];
       if (typeof id === 'string' && typeof name === 'string') {
-        toolUses.set(id, name);
+        out.set(id, name);
       }
     }
   }
+  return out;
+}
 
-  // Pass 2: walk tool_result blocks (user events) in reverse so the
-  // latest successful mempalace call wins.
+// Pass 2: walk tool_result blocks (user events) in reverse so the
+// latest successful mempalace call wins.
+function hasSuccessfulMempalaceResult(
+  events: unknown[],
+  toolUses: Map<string, string>,
+): boolean {
   for (let i = events.length - 1; i >= 0; i--) {
     const ev = events[i];
-    if (!isRecord(ev)) continue;
-    if (ev['type'] !== 'user') continue;
+    if (!isUserEvent(ev)) continue;
     for (const block of extractMessageContent(ev)) {
-      if (!isRecord(block)) continue;
-      if (block['type'] !== 'tool_result') continue;
-      if (block['is_error'] === true) continue;
+      if (!isSuccessfulToolResult(block)) continue;
       const useId = block['tool_use_id'];
       if (typeof useId !== 'string') continue;
       const name = toolUses.get(useId);
-      if (!name || !name.startsWith('mcp__mempalace__')) continue;
-      return fallbackAt ? new Date(fallbackAt as string | number | Date).getTime() : Date.now();
+      if (name?.startsWith('mcp__mempalace__')) return true;
     }
   }
-  return null;
+  return false;
+}
+
+function isAssistantEvent(ev: unknown): ev is Record<string, unknown> {
+  return isRecord(ev) && ev['type'] === 'assistant';
+}
+
+function isUserEvent(ev: unknown): ev is Record<string, unknown> {
+  return isRecord(ev) && ev['type'] === 'user';
+}
+
+function isToolUseBlock(block: unknown): block is Record<string, unknown> {
+  return isRecord(block) && block['type'] === 'tool_use';
+}
+
+function isSuccessfulToolResult(block: unknown): block is Record<string, unknown> {
+  return isRecord(block) && block['type'] === 'tool_result' && block['is_error'] !== true;
 }
 
 function extractStreamEvents(envelope: unknown): unknown[] {

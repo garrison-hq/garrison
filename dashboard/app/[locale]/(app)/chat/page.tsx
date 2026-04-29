@@ -40,11 +40,7 @@ export default async function ChatLandingPage() {
   return (
     <>
       <ChatTopbarStrip />
-      {!everHadThread ? (
-        <div className="flex-1 flex items-center justify-center p-8">
-          <ChatLandingClient />
-        </div>
-      ) : (
+      {everHadThread ? (
         <div className="flex-1 overflow-auto p-6 max-w-[1200px] w-full mx-auto">
           <header className="flex items-center justify-between mb-4">
             <div className="space-y-1">
@@ -80,6 +76,10 @@ export default async function ChatLandingPage() {
               </Link>
             </div>
           ) : null}
+        </div>
+      ) : (
+        <div className="flex-1 flex items-center justify-center p-8">
+          <ChatLandingClient />
         </div>
       )}
     </>
