@@ -135,25 +135,22 @@ export function MessageStream({
   };
 
   // Project messages into render rows: each row carries the merged
-  // content (terminal preferred, partial fallback).
+  // content (terminal preferred, partial fallback) plus the M5.3
+  // tool-call entry list (chips render inside the assistant bubble
+  // alongside the text content).
   const rows = useMemo(() => {
     return [...messages].sort((a, b) => a.turnIndex - b.turnIndex).map((m) => {
       const terminal = stream.terminals.get(m.id);
       const partial = stream.partialDeltas.get(m.id);
+      const toolCalls = stream.toolCalls.get(m.id) ?? [];
       const mergedContent = terminal?.content ?? m.content ?? partial ?? null;
       const mergedStatus = terminal?.status ?? m.status;
-      // "Streaming" here means "in-flight from the operator's POV": the
-      // bubble should show the typing dots / cursor. We treat both
-      // 'pending' (row inserted, claude not yet emitting) and
-      // 'streaming' (claude has started) as in-flight; a live partial
-      // buffer without a terminal also qualifies for the SSE-leading-
-      // refresh window.
       const isInFlight = m.role === 'assistant' && terminal === undefined &&
         (mergedStatus === 'pending' || mergedStatus === 'streaming' || partial !== undefined);
       const errorKindFinal = terminal?.errorKind ?? m.errorKind;
-      return { ...m, mergedContent, mergedStatus, isStreaming: isInFlight, errorKindFinal };
+      return { ...m, mergedContent, mergedStatus, isStreaming: isInFlight, errorKindFinal, toolCalls };
     });
-  }, [messages, stream.terminals, stream.partialDeltas]);
+  }, [messages, stream.terminals, stream.partialDeltas, stream.toolCalls]);
 
   const showNewPill = !isStuck && newPillCount > 0 && lastDistanceFromBottom.current > SCROLL_UP_PILL_THRESHOLD_PX;
 
@@ -187,6 +184,7 @@ export function MessageStream({
             costUsd={row.role === 'assistant' ? row.costUsd : undefined}
             modelBadge={modelBadge}
             streaming={row.isStreaming}
+            toolCalls={row.toolCalls}
             errorBlock={
               row.errorKindFinal && renderErrorBlock
                 ? renderErrorBlock(row.errorKindFinal)
