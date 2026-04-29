@@ -169,3 +169,61 @@ SELECT COUNT(*)::INTEGER AS count
   FROM chat_messages
  WHERE session_id = @session_id
    AND status IN ('pending', 'streaming');
+
+-- name: FindOrphanedOperatorSessions :many
+-- M5.2 — orphan-row sweep query (FR-290).
+-- Detect chat_sessions with status='active' whose newest chat_messages
+-- row is role='operator', older than the supplied cutoff, with no
+-- assistant pair at turn_index+1. The boot-time sweep in
+-- internal/chat/listener.go uses this to detect sessions where the
+-- supervisor crashed between the operator INSERT and the assistant
+-- pending row creation; the M5.1 pending-message sweep cannot catch
+-- these because there's no pending/streaming row to filter on.
+SELECT cm.session_id AS session_id,
+       cm.id AS operator_message_id,
+       cm.turn_index AS orphan_turn_index
+  FROM chat_messages cm
+  JOIN chat_sessions cs ON cs.id = cm.session_id
+ WHERE cs.status = 'active'
+   AND cm.role = 'operator'
+   AND cm.created_at < @cutoff
+   AND cm.turn_index = (
+       SELECT MAX(turn_index)
+         FROM chat_messages cmx
+        WHERE cmx.session_id = cm.session_id
+   )
+   AND NOT EXISTS (
+       SELECT 1 FROM chat_messages cm2
+        WHERE cm2.session_id = cm.session_id
+          AND cm2.turn_index = cm.turn_index + 1
+   );
+
+-- name: InsertSyntheticAssistantAborted :exec
+-- M5.2 — synthesise an aborted assistant row for an orphaned operator
+-- turn. Used only by the M5.2 orphan-sweep extension at supervisor boot.
+-- The synthetic row is aborted-from-inception; it never transitions
+-- through pending/streaming.
+INSERT INTO chat_messages (
+    id, session_id, turn_index, role, status, content, error_kind, terminated_at
+)
+VALUES (
+    gen_random_uuid(),
+    @session_id,
+    @turn_index,
+    'assistant',
+    'aborted',
+    @content,
+    @error_kind,
+    NOW()
+);
+
+-- name: MarkSessionAborted :exec
+-- M5.2 — marks a single chat_sessions row aborted. Used by the orphan
+-- sweep alongside InsertSyntheticAssistantAborted. The existing M5.1
+-- AbortSessionsWithAbortedMessages query takes a different shape (it
+-- joins via error_kind across all aborted messages); this is the
+-- single-row-by-id companion.
+UPDATE chat_sessions
+   SET status = 'aborted', ended_at = NOW()
+ WHERE id = @id
+   AND status = 'active';

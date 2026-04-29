@@ -36,6 +36,7 @@ export const KNOWN_CHANNELS = [
   'work.ticket.created',
   'work.ticket.edited',
   'work.agent.edited',
+  'work.chat.session_deleted',
 ] as const;
 export type KnownChannel = (typeof KNOWN_CHANNELS)[number];
 
@@ -89,6 +90,47 @@ function pickStringArray(value: unknown): string[] {
   return [];
 }
 
+// parseLiteralChannel handles the literal entries in KNOWN_CHANNELS.
+// Returns null when the row's channel is parameterised — parseChannel
+// then falls through to the regex matchers.
+function parseLiteralChannel(
+  row: OutboxRow,
+  at: string,
+  payload: Record<string, unknown>,
+  ticketId: string,
+): ActivityEvent | null {
+  switch (row.channel) {
+    case 'work.ticket.created':
+      return { kind: 'ticket.created', eventId: row.id, at, ticketId };
+    case 'work.ticket.edited':
+      return {
+        kind: 'ticket.edited',
+        eventId: row.id,
+        at,
+        ticketId,
+        diff: pickRecord(payload.diff),
+      };
+    case 'work.agent.edited':
+      return {
+        kind: 'agent.edited',
+        eventId: row.id,
+        at,
+        roleSlug: pickString(payload.role_slug, payload.roleSlug),
+        diff: pickRecord(payload.diff),
+      };
+    case 'work.chat.session_deleted':
+      return {
+        kind: 'chat.session_deleted',
+        eventId: row.id,
+        at,
+        chatSessionId: pickString(payload.chat_session_id, payload.chatSessionId),
+        actorUserId: pickString(payload.actor_user_id, payload.actorUserId),
+      };
+    default:
+      return null;
+  }
+}
+
 export function parseChannel(row: OutboxRow): ActivityEvent {
   const at = row.createdAt instanceof Date
     ? row.createdAt.toISOString()
@@ -96,29 +138,8 @@ export function parseChannel(row: OutboxRow): ActivityEvent {
   const payload = row.payload ?? {};
   const ticketId = pickString(payload.ticket_id, payload.ticketId);
 
-  if (row.channel === 'work.ticket.created') {
-    return { kind: 'ticket.created', eventId: row.id, at, ticketId };
-  }
-
-  if (row.channel === 'work.ticket.edited') {
-    return {
-      kind: 'ticket.edited',
-      eventId: row.id,
-      at,
-      ticketId,
-      diff: pickRecord(payload.diff),
-    };
-  }
-
-  if (row.channel === 'work.agent.edited') {
-    return {
-      kind: 'agent.edited',
-      eventId: row.id,
-      at,
-      roleSlug: pickString(payload.role_slug, payload.roleSlug),
-      diff: pickRecord(payload.diff),
-    };
-  }
+  const literal = parseLiteralChannel(row, at, payload, ticketId);
+  if (literal) return literal;
 
   const transitionMatch = /^work\.ticket\.transitioned\.([a-z0-9_-]+)\.([a-z0-9_]+)\.([a-z0-9_]+)$/.exec(
     row.channel,

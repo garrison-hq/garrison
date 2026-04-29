@@ -137,12 +137,32 @@ func dispatchNotify(ctx context.Context, deps Deps, worker *Worker, payload stri
 // 60s as aborted with error_kind='supervisor_restart' and rolls their
 // parent sessions to status='aborted'. Runs once at supervisor boot,
 // BEFORE RunListener starts LISTEN. FR-083.
+//
+// M5.2 — also runs a second pass that detects "orphan operator rows":
+// sessions whose newest chat_messages row is role='operator', older than
+// the same 60s cutoff, with no assistant pair at turn_index+1. The
+// pending-message pass cannot catch these because there's no pending/
+// streaming row to filter on; the orphan case happens when the supervisor
+// crashes between the operator INSERT (committed by the dashboard) and
+// the assistant pending-row creation (supervisor side). For each match
+// the sweep synthesises an aborted assistant row at turn_index+1 with
+// error_kind='supervisor_restart' and rolls the session to 'aborted'.
+//
+// Per FR-292 + plan §1.14: no pg_notify is emitted for synthetic rows.
+// The dashboard sees the aborted state on next page load or SSE reconnect.
+//
+// Per AGENTS.md concurrency rule 6: orphan terminal writes run under
+// context.WithoutCancel(ctx) + TerminalWriteGrace so a SIGTERM mid-sweep
+// still commits the synthetic row instead of leaving the operator-side
+// row dangling.
 func RunRestartSweep(ctx context.Context, deps Deps) error {
 	cutoff := time.Now().Add(-60 * time.Second)
 	cutoffTS := pgtype.Timestamptz{}
 	if err := cutoffTS.Scan(cutoff); err != nil {
 		return fmt.Errorf("chat: restart sweep cutoff: %w", err)
 	}
+
+	// First pass — M5.1: pending/streaming messages older than 60s.
 	ekVal := ErrorSupervisorRestart
 	rows, err := deps.Queries.MarkPendingMessagesAborted(ctx, store.MarkPendingMessagesAbortedParams{
 		ErrorKind: &ekVal,
@@ -157,6 +177,87 @@ func RunRestartSweep(ctx context.Context, deps Deps) error {
 		}
 		deps.Logger.Info("chat: restart sweep marked rows aborted",
 			"count", len(rows))
+	}
+
+	// Second pass — M5.2: orphan operator rows (FR-290–292).
+	if err := runOrphanOperatorSweep(ctx, deps, cutoffTS); err != nil {
+		return fmt.Errorf("chat: orphan sweep: %w", err)
+	}
+	return nil
+}
+
+// orphanSyntheticContent is the literal content the orphan-row sweep
+// writes into the synthetic assistant row. Exported as a const so tests
+// can pin the exact string (UI side renders this verbatim per FR-271).
+const orphanSyntheticContent = "[supervisor restarted before this turn could complete]"
+
+// runOrphanOperatorSweep detects sessions where the newest chat_messages
+// row is role='operator' older than the supplied cutoff, with no
+// assistant pair, and synthesises an aborted assistant row +
+// chat_sessions.status='aborted' for each. Pure additive: never touches
+// the pending-message pass's outputs.
+func runOrphanOperatorSweep(ctx context.Context, deps Deps, cutoffTS pgtype.Timestamptz) error {
+	orphans, err := deps.Queries.FindOrphanedOperatorSessions(ctx, cutoffTS)
+	if err != nil {
+		return fmt.Errorf("find orphans: %w", err)
+	}
+	if len(orphans) == 0 {
+		return nil
+	}
+
+	grace := deps.TerminalWriteGrace
+	if grace <= 0 {
+		grace = 5 * time.Second
+	}
+
+	synthesised := 0
+	for _, o := range orphans {
+		if err := writeOrphanSyntheticTerminal(ctx, deps, o, grace); err != nil {
+			deps.Logger.Warn("chat: orphan sweep synthesise failed",
+				"session_id", uuidString(o.SessionID),
+				"err", err)
+			continue
+		}
+		synthesised++
+		deps.Logger.Info("chat: orphan sweep synthesised aborted",
+			"session_id", uuidString(o.SessionID),
+			"turn_index", o.OrphanTurnIndex+1)
+	}
+	deps.Logger.Info("chat: orphan sweep summary",
+		"matched", len(orphans), "synthesised", synthesised)
+	return nil
+}
+
+// writeOrphanSyntheticTerminal commits the synthetic-aborted assistant
+// row + flips the session to aborted, both inside one tx, under a
+// WithoutCancel grace context so a SIGTERM mid-sweep still gets the
+// invariant committed.
+func writeOrphanSyntheticTerminal(parent context.Context, deps Deps, o store.FindOrphanedOperatorSessionsRow, grace time.Duration) error {
+	twCtx, cancel := context.WithTimeout(context.WithoutCancel(parent), grace)
+	defer cancel()
+
+	tx, err := deps.Pool.Begin(twCtx)
+	if err != nil {
+		return fmt.Errorf("tx begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(twCtx) }()
+
+	q := deps.Queries.WithTx(tx)
+	content := orphanSyntheticContent
+	ek := ErrorSupervisorRestart
+	if err := q.InsertSyntheticAssistantAborted(twCtx, store.InsertSyntheticAssistantAbortedParams{
+		SessionID: o.SessionID,
+		TurnIndex: o.OrphanTurnIndex + 1,
+		Content:   &content,
+		ErrorKind: &ek,
+	}); err != nil {
+		return fmt.Errorf("insert synthetic: %w", err)
+	}
+	if err := q.MarkSessionAborted(twCtx, o.SessionID); err != nil {
+		return fmt.Errorf("mark session aborted: %w", err)
+	}
+	if err := tx.Commit(twCtx); err != nil {
+		return fmt.Errorf("commit: %w", err)
 	}
 	return nil
 }

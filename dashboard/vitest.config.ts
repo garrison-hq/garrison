@@ -12,6 +12,10 @@ export default defineConfig({
       'lib/**/*.{test,spec}.{ts,tsx}',
       'components/**/*.{test,spec}.{ts,tsx}',
       'app/**/*.{test,spec}.{ts,tsx}',
+      // M5.2 — repo-wide assertion tests (e.g. ARCHITECTURE.md amendment).
+      // Per-test files only at the top of tests/, not the Playwright
+      // suite under tests/integration/ (still excluded below).
+      'tests/*.{test,spec}.{ts,tsx}',
     ],
     exclude: [
       'node_modules/**',

@@ -33,6 +33,7 @@ const KIND_CHIP_TONE: Record<string, ChipTone> = {
   'agent.spawned': 'ok',
   'agent.completed': 'ok',
   'hygiene.flagged': 'warn',
+  'chat.session_deleted': 'warn',
   unknown: 'neutral',
 };
 
@@ -43,6 +44,7 @@ const KIND_DOT_TONE: Record<string, ChipTone> = {
   'agent.spawned': 'ok',
   'agent.completed': 'ok',
   'hygiene.flagged': 'warn',
+  'chat.session_deleted': 'warn',
   unknown: 'neutral',
 };
 
@@ -120,6 +122,18 @@ function EventDescription({ event }: Readonly<{ event: ActivityEvent }>) {
   }
   if (event.kind === 'unknown') {
     return <span className="text-text-3">unknown channel: {event.channel}</span>;
+  }
+  if (event.kind === 'chat.session_deleted') {
+    // M5.2 (FR-322 amended): chat-flavoured concise predicate per the
+    // M3 audit-event design language. The actor is named generically
+    // "operator" because Garrison is single-operator per Constitution X
+    // — multi-operator naming lands post-M5 with the actor lookup.
+    const sessionShort = event.chatSessionId ? event.chatSessionId.slice(-8) : '—';
+    return (
+      <span className="text-text-3">
+        Chat thread <span className="text-text-2 font-mono">{sessionShort}</span> deleted by operator
+      </span>
+    );
   }
   // M4 mutation event variants (ticket.edited / agent.edited /
   // vault.*). Each has dedicated rendering wired in by T011 /

@@ -73,6 +73,7 @@ type ChatSession struct {
 	Status             string
 	TotalCostUsd       pgtype.Numeric
 	ClaudeSessionLabel *string
+	IsArchived         bool
 }
 
 type Company struct {

@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -30,10 +31,15 @@ type ChatPolicy struct {
 	GraceWrite time.Duration
 
 	// runtime state populated as the stream is consumed
-	deltaSeq   int
-	contentBuf strings.Builder
-	rawEvents  []json.RawMessage
-	bailReason string // populated by OnInit on MCP-health bail
+	deltaSeq int
+	// messageBlock increments on each claude message_start. The
+	// dashboard uses this to reset its per-message_id partial buffer
+	// so multi-message turns (text → tool_use → text) render only
+	// the current message's deltas while it streams.
+	messageBlock int
+	contentBuf   strings.Builder
+	rawEvents    []json.RawMessage
+	bailReason   string // populated by OnInit on MCP-health bail
 
 	// rate-limit observation
 	rateLimitOverage bool
@@ -130,6 +136,33 @@ func (p *ChatPolicy) OnStreamEvent(ctx context.Context, e claudeproto.StreamEven
 	p.rawEvents = append(p.rawEvents, json.RawMessage(append([]byte(nil), e.Raw...)))
 
 	switch e.InnerType {
+	case "content_block_start":
+		// When claude opens a tool_use content block within an
+		// assistant message, any text streamed earlier in the same
+		// message was preamble (e.g. "Let me check ..."). The
+		// committed terminal commits only the FINAL message's text
+		// (per message_start contentBuf reset above), but the live
+		// stream has already pushed the preamble into the dashboard's
+		// partialDeltas. Emit a scrub directive so the dashboard
+		// clears the visible buffer for this (messageId, block) the
+		// moment we know the preamble is no longer the answer.
+		//
+		// We detect tool_use by raw-substring search instead of
+		// extending claudeproto's wire shape — the Raw bytes are the
+		// canonical NDJSON line and `"type":"tool_use"` is unambiguous
+		// at the content_block.type position.
+		if bytes.Contains(e.Raw, []byte(`"content_block":{"type":"tool_use"`)) ||
+			bytes.Contains(e.Raw, []byte(`"content_block": {"type": "tool_use"`)) {
+			seq := p.deltaSeq
+			p.deltaSeq++
+			if err := EmitScrub(ctx, p.Pool, p.MessageID, p.messageBlock, seq); err != nil {
+				p.Logger.Warn("chat: EmitScrub failed", "block", p.messageBlock, "seq", seq, "err", err)
+			}
+			// Drop any preamble text already accumulated for this
+			// message — only the final message's text should commit
+			// regardless of whether the next message_start fires.
+			p.contentBuf.Reset()
+		}
 	case "content_block_delta":
 		if e.Inner.DeltaType != "text_delta" {
 			return // tool_use input deltas, thinking deltas: observational only
@@ -138,10 +171,32 @@ func (p *ChatPolicy) OnStreamEvent(ctx context.Context, e claudeproto.StreamEven
 		p.contentBuf.WriteString(e.Inner.DeltaText)
 		seq := p.deltaSeq
 		p.deltaSeq++
-		if err := EmitDelta(ctx, p.Pool, p.MessageID, seq, e.Inner.DeltaText); err != nil {
-			p.Logger.Warn("chat: EmitDelta failed", "seq", seq, "err", err)
+		if err := EmitDelta(ctx, p.Pool, p.MessageID, p.messageBlock, seq, e.Inner.DeltaText); err != nil {
+			p.Logger.Warn("chat: EmitDelta failed", "block", p.messageBlock, "seq", seq, "err", err)
 		}
 	case "message_start":
+		// Claude emits ONE message_start per assistant message in the
+		// response stream. When the turn involves tool calls (text →
+		// tool_use → text → ...) the response can carry multiple
+		// message_start blocks. The committed `content` should be the
+		// LAST assistant message's text — the human-readable answer
+		// after any tool round-trips — not the concatenation of every
+		// intermediate text block. Reset contentBuf so subsequent
+		// content_block_delta text_deltas accumulate only into the
+		// current message.
+		//
+		// Token totals across messages are tracked separately:
+		// tokensInput is overridden every time (claude reports the same
+		// cumulative input tokens on each message_start); tokensOutput
+		// is taken from message_delta which fires per-message.
+		p.contentBuf.Reset()
+		// Bump messageBlock so subsequent EmitDelta calls carry the
+		// new value; the dashboard resets its per-messageId visible
+		// buffer when it sees a higher block.
+		p.messageBlock++
+		// deltaSeq stays monotonic across blocks for dedupe purposes —
+		// the dashboard's seenSeqs set uses (messageId, block, seq) so
+		// reusing a seq inside a new block is a different key.
 		p.tokensInput = e.Inner.InputTokens
 		p.cacheReadInput = e.Inner.CacheReadInput
 		p.cacheCreationInput = e.Inner.CacheCreationInput

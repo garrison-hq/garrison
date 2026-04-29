@@ -178,11 +178,26 @@ func TestM5_1_MultiTurn_ContextFidelity(t *testing.T) {
 		t.Errorf("turn 2 content = %q; want to contain 'purple'", ptrValMT(turn2Asst.content))
 	}
 
-	// SC-002: cache_read_input_tokens > 0 in the raw envelope.
-	cacheRead := extractCacheRead(t, turn2Asst.envelope)
-	if cacheRead <= 0 {
-		t.Errorf("turn 2 cache_read_input_tokens = %d; want > 0 (proves prefix replay)", cacheRead)
-	}
+	// SC-002 was: cache_read_input_tokens > 0 on turn 2 (validated
+	// the M5.1 plan's per-turn NDJSON replay strategy where prior
+	// turns formed a stable token prefix claude could cache).
+	//
+	// Apr-29 — the supervisor flattens the transcript into a single
+	// user message containing the full conversation as markdown-
+	// formatted text. This was forced by real claude in --print
+	// stream-json mode emitting one result event per `user` line in
+	// the input (the M5.1 spike used a mock that didn't reproduce
+	// this). Single-user-message has different prefix shape per turn
+	// (each turn's message starts with the new "## Prior conversation"
+	// header that grows by one row each time), so the cache no longer
+	// hits at the message-array boundary. The trade-off is correct
+	// per-turn semantics over prompt-cache amortisation. Fidelity
+	// itself (claude remembering "purple") is still asserted above —
+	// that's the actual user-facing guarantee.
+	//
+	// We still call extractCacheRead to keep the helper exercised; we
+	// just don't assert a positive value any more.
+	_ = extractCacheRead(t, turn2Asst.envelope)
 
 	// SC-003: cost rolled up.
 	updated, _ := q.GetChatSession(ctx, sess.ID)

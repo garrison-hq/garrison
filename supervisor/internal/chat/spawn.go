@@ -73,7 +73,7 @@ func (deps Deps) SpawnTurn(
 	defer func() { _ = os.Remove(mcpPath) }()
 
 	// Step 3 — docker run argv.
-	args := dockerRunArgs(deps, mcpPath, tokenEnvSpec(tokenSV))
+	args := dockerRunArgs(deps, mcpPath, tokenEnvSpec(tokenSV), supervisorBin, mcpExtraEnv.DockerBin)
 
 	// Step 4 — RunStream wires writeStdin (transcript + close) +
 	// scanStdout (spawn.Run with ChatPolicy).
@@ -157,7 +157,7 @@ func writeChatMCPConfig(deps Deps, messageID pgtype.UUID, supervisorBin, agentRo
 	return path, nil
 }
 
-func dockerRunArgs(deps Deps, mcpHostPath string, tokenEnv string) []string {
+func dockerRunArgs(deps Deps, mcpHostPath string, tokenEnv string, supervisorBin string, dockerBin string) []string {
 	model := deps.DefaultModel
 	if model == "" {
 		model = "claude-sonnet-4-6"
@@ -166,10 +166,27 @@ func dockerRunArgs(deps Deps, mcpHostPath string, tokenEnv string) []string {
 	if network == "" {
 		network = "garrison-net"
 	}
-	return []string{
+	args := []string{
 		"run", "--rm", "-i",
 		"-e", tokenEnv,
 		"-v", mcpHostPath + ":/etc/garrison/mcp.json:ro",
+	}
+	// M5.1 chat container needs the supervisor binary at the path the
+	// MCP config references (BuildChatConfig writes the host-side
+	// supervisorBin verbatim) so claude can spawn the postgres MCP
+	// server. Without this mount the postgres MCP fails to start and
+	// the supervisor bails on mcp_postgres health-check.
+	if supervisorBin != "" {
+		args = append(args, "-v", supervisorBin+":"+supervisorBin+":ro")
+	}
+	// Same shape for the mempalace MCP: BuildChatConfig writes the
+	// host-side dockerBin path; claude inside the chat container
+	// runs `<dockerBin> exec garrison-mempalace …`. Without this
+	// mount the mempalace MCP fails to start.
+	if dockerBin != "" {
+		args = append(args, "-v", dockerBin+":"+dockerBin+":ro")
+	}
+	args = append(args,
 		"--network", network,
 		deps.ChatContainerImage,
 		"-p",
@@ -182,7 +199,8 @@ func dockerRunArgs(deps Deps, mcpHostPath string, tokenEnv string) []string {
 		"--strict-mcp-config",
 		"--permission-mode", "bypassPermissions",
 		"--model", model,
-	}
+	)
+	return args
 }
 
 // tokenEnvSpec returns the "VAR=value" env-pair string for the

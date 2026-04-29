@@ -33,6 +33,18 @@ export const ActivityIcon = (p: Props) => (
   </svg>
 );
 
+// M5.2 — thin-line speech-bubble for the CEO chat sidebar entry.
+export const ChatIcon = (p: Props) => (
+  <svg {...base} {...p}>
+    <path
+      d="M3 4h10a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H7l-3 2.5V12H3a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1Z"
+      stroke="currentColor"
+      strokeWidth="1.2"
+      strokeLinejoin="round"
+    />
+  </svg>
+);
+
 export const HygieneIcon = (p: Props) => (
   <svg {...base} {...p}>
     <path d="M8 2l6 11H2L8 2Z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />

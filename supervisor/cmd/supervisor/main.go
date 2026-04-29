@@ -342,11 +342,27 @@ func runDaemon() int {
 	if err := chat.RunRestartSweep(ctx, chatDeps); err != nil {
 		logger.Warn("chat: restart sweep failed; continuing", "err", err)
 	}
-	chatWorker := chat.NewWorker(chatDeps, supervisorBin, cfg.AgentRODSN(), chat.MempalaceWiring{
+	// GARRISON_CHAT_INTERNAL_DOCKER_HOST + GARRISON_CHAT_INTERNAL_AGENT_RO_DSN
+	// untangle the supervisor-side and chat-container-side values when the
+	// two surfaces aren't on the same network. The supervisor on host uses
+	// localhost-flavoured DSN/DOCKER_HOST; the chat container spawns into
+	// garrison-net and must reach `garrison-dev-pg:5432` /
+	// `garrison-docker-proxy:2375` via Docker DNS. Both env vars fall back
+	// to the matching cfg.* value when unset (matches the production
+	// compose where supervisor + chat share the network).
+	chatInternalDockerHost := cfg.DockerHost
+	if v := os.Getenv("GARRISON_CHAT_INTERNAL_DOCKER_HOST"); v != "" {
+		chatInternalDockerHost = v
+	}
+	chatInternalAgentRODSN := cfg.AgentRODSN()
+	if v := os.Getenv("GARRISON_CHAT_INTERNAL_AGENT_RO_DSN"); v != "" {
+		chatInternalAgentRODSN = v
+	}
+	chatWorker := chat.NewWorker(chatDeps, supervisorBin, chatInternalAgentRODSN, chat.MempalaceWiring{
 		DockerBin:          cfg.DockerBin,
 		MempalaceContainer: cfg.MempalaceContainer,
 		PalacePath:         cfg.PalacePath,
-		DockerHost:         cfg.DockerHost,
+		DockerHost:         chatInternalDockerHost,
 	})
 	g.Go(func() error {
 		return chat.RunListener(gctx, chatDeps, chatWorker)
