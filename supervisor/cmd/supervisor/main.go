@@ -57,7 +57,7 @@ const (
 	EngineeringQAReviewChannel = "work.ticket.transitioned.engineering.in_dev.qa_review"
 )
 
-const usage = `Usage: supervisor [FLAGS] | mcp-postgres | mcp finalize
+const usage = `Usage: supervisor [FLAGS] | mcp-postgres | mcp finalize | mcp garrison-mutate
 
 Garrison supervisor daemon. Listens on Postgres pg_notify and spawns
 Claude Code subprocesses on work.ticket.created.<dept>.<column> events.
@@ -113,6 +113,15 @@ func run(args []string) int {
 	// config validation.
 	if len(args) >= 2 && args[0] == "mcp" && args[1] == "finalize" {
 		return runMCPFinalize()
+	}
+	// M5.3 T004: `supervisor mcp garrison-mutate` — the in-tree
+	// chat-driven mutation MCP server. Invoked per chat-message spawn
+	// by Claude via the per-message MCP config (see
+	// internal/mcpconfig.BuildChatConfig). Same dispatch shape as
+	// finalize: env-only deps, JSON-RPC over stdio, exits on stdin EOF
+	// or SIGTERM.
+	if len(args) >= 2 && args[0] == "mcp" && args[1] == "garrison-mutate" {
+		return runMCPGarrisonMutate()
 	}
 
 	fs := flag.NewFlagSet("supervisor", flag.ContinueOnError)
