@@ -30,7 +30,7 @@ export default async function AppLayout({
       </a>
       <div className="flex flex-1 min-h-0">
         <Sidebar />
-        <div className="flex-1 flex flex-col min-h-0">
+        <div className="flex-1 flex flex-col min-h-0 min-w-0">
           <Topbar />
           <main id="main-content" className="flex-1 overflow-auto">{children}</main>
         </div>
