@@ -22,6 +22,12 @@ const agentURLPrefix = "/agents/"
 // constraint.
 const resourceTypeAgentRole = "agent_role"
 
+// agentRoleNotFoundFmt is the shared resource-not-found message format
+// for the four agent verbs. Centralised so the wording matches across
+// pause/resume/spawn/edit and so Sonar's duplicate-literal check
+// (go:S1192) sees a single canonical literal.
+const agentRoleNotFoundFmt = "%s: agent role %q not found"
+
 // secretLeakPatterns mirrors M2.3's internal/finalize.scanAndRedactPayload
 // pattern set. Used by edit_agent_config to reject proposed agent_md
 // containing a verbatim secret value (M2.3 Rule 1 carryover into the
@@ -95,7 +101,7 @@ func setAgentStatus(ctx context.Context, deps Deps, verb, roleSlug, target strin
 		return Result{}, fmt.Errorf("%s: count agents: %w", verb, err)
 	}
 	if count == 0 {
-		return resourceNotFound("%s: agent role %q not found", verb, roleSlug),
+		return resourceNotFound(agentRoleNotFoundFmt, verb, roleSlug),
 			writeFailureAudit(ctx, deps, verb, args, ErrResourceNotFound, 1, roleSlug)
 	}
 	if count > 1 {
@@ -113,7 +119,7 @@ func setAgentStatus(ctx context.Context, deps Deps, verb, roleSlug, target strin
 	agent, err := q.FindAgentByRoleSlug(ctx, roleSlug)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return resourceNotFound("%s: agent role %q not found", verb, roleSlug),
+			return resourceNotFound(agentRoleNotFoundFmt, verb, roleSlug),
 				writeFailureAudit(ctx, deps, verb, args, ErrResourceNotFound, 1, roleSlug)
 		}
 		return Result{}, fmt.Errorf("%s: find agent: %w", verb, err)
@@ -200,7 +206,7 @@ func realSpawnAgentHandler(ctx context.Context, deps Deps, raw json.RawMessage) 
 		return Result{}, fmt.Errorf("spawn_agent: count agents: %w", err)
 	}
 	if count == 0 {
-		return resourceNotFound("spawn_agent: agent role %q not found", args.AgentRoleSlug),
+		return resourceNotFound(agentRoleNotFoundFmt, "spawn_agent", args.AgentRoleSlug),
 			writeFailureAudit(ctx, deps, "spawn_agent", args, ErrResourceNotFound, 3, args.AgentRoleSlug)
 	}
 	if count > 1 {
@@ -387,7 +393,7 @@ func resolveSingleAgent(ctx context.Context, deps Deps, verb string, args any, c
 		return Result{}, fmt.Errorf("%s: count agents: %w", verb, err), false
 	}
 	if count == 0 {
-		return resourceNotFound("%s: agent role %q not found", verb, roleSlug),
+		return resourceNotFound(agentRoleNotFoundFmt, verb, roleSlug),
 			writeFailureAudit(ctx, deps, verb, args, ErrResourceNotFound, class, roleSlug), false
 	}
 	if count > 1 {

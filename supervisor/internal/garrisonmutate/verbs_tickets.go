@@ -253,20 +253,9 @@ type TransitionTicketArgs struct {
 // event-bus AND emits the chat-namespaced work.chat.ticket.transitioned
 // channel.
 func realTransitionTicketHandler(ctx context.Context, deps Deps, raw json.RawMessage) (Result, error) {
-	var args TransitionTicketArgs
-	if err := json.Unmarshal(raw, &args); err != nil {
-		return validationFailure("transition_ticket: parse args: " + err.Error()), nil
-	}
-	args.ToColumn = strings.TrimSpace(args.ToColumn)
-	if args.TicketID == "" {
-		return validationFailure("transition_ticket: ticket_id is required"), nil
-	}
-	if args.ToColumn == "" {
-		return validationFailure("transition_ticket: to_column is required"), nil
-	}
-	var ticketID pgtype.UUID
-	if err := ticketID.Scan(args.TicketID); err != nil {
-		return validationFailure("transition_ticket: invalid ticket_id: " + err.Error()), nil
+	args, ticketID, vRes := parseTransitionArgs(raw)
+	if vRes != nil {
+		return *vRes, nil
 	}
 
 	tx, err := deps.Pool.Begin(ctx)
@@ -287,49 +276,41 @@ func realTransitionTicketHandler(ctx context.Context, deps Deps, raw json.RawMes
 		return Result{}, fmt.Errorf("transition_ticket: get current: %w", err)
 	}
 	if cur.ColumnSlug == args.ToColumn {
-		// Idempotent: same column → no-op + audit. No notify.
-		rt := "ticket"
-		resourceID := args.TicketID
-		if _, err := WriteAudit(ctx, q, AuditWriteParams{
-			ChatSessionID:        deps.ChatSessionID,
-			ChatMessageID:        deps.ChatMessageID,
-			Verb:                 "transition_ticket",
-			Args:                 args,
-			Outcome:              "success",
-			ReversibilityClass:   1,
-			AffectedResourceID:   &resourceID,
-			AffectedResourceType: &rt,
-		}); err != nil {
-			return Result{}, fmt.Errorf("transition_ticket: write audit: %w", err)
-		}
-		if err := tx.Commit(ctx); err != nil {
-			return Result{}, fmt.Errorf("transition_ticket: commit: %w", err)
-		}
-		return Result{
-			Success:             true,
-			AffectedResourceID:  resourceID,
-			AffectedResourceURL: ticketURLPrefix + resourceID,
-			Message:             "Ticket " + resourceID + " already in column " + args.ToColumn,
-		}, nil
+		return commitNoopTransition(ctx, tx, q, deps, args)
 	}
+	return commitTransition(ctx, tx, q, deps, args, ticketID, cur.ColumnSlug)
+}
 
-	fromColumn := cur.ColumnSlug
-	if _, err := q.InsertTicketTransition(ctx, store.InsertTicketTransitionParams{
-		TicketID:                   ticketID,
-		FromColumn:                 &fromColumn,
-		ToColumn:                   args.ToColumn,
-		TriggeredByAgentInstanceID: pgtype.UUID{}, // chat-driven transitions have no triggering agent_instance
-	}); err != nil {
-		return Result{}, fmt.Errorf("transition_ticket: insert transition: %w", err)
+// parseTransitionArgs unmarshals + validates transition_ticket's input
+// shape. Returns a non-nil *Result on validation failure; the caller
+// returns it verbatim with nil error per the verb-handler contract.
+func parseTransitionArgs(raw json.RawMessage) (TransitionTicketArgs, pgtype.UUID, *Result) {
+	var args TransitionTicketArgs
+	if err := json.Unmarshal(raw, &args); err != nil {
+		r := validationFailure("transition_ticket: parse args: " + err.Error())
+		return args, pgtype.UUID{}, &r
 	}
-	if err := q.UpdateTicketColumnSlug(ctx, store.UpdateTicketColumnSlugParams{
-		ID:         ticketID,
-		ColumnSlug: args.ToColumn,
-	}); err != nil {
-		return Result{}, fmt.Errorf("transition_ticket: update column: %w", err)
+	args.ToColumn = strings.TrimSpace(args.ToColumn)
+	if args.TicketID == "" {
+		r := validationFailure("transition_ticket: ticket_id is required")
+		return args, pgtype.UUID{}, &r
 	}
+	if args.ToColumn == "" {
+		r := validationFailure("transition_ticket: to_column is required")
+		return args, pgtype.UUID{}, &r
+	}
+	var ticketID pgtype.UUID
+	if err := ticketID.Scan(args.TicketID); err != nil {
+		r := validationFailure("transition_ticket: invalid ticket_id: " + err.Error())
+		return args, pgtype.UUID{}, &r
+	}
+	return args, ticketID, nil
+}
 
-	rt := "ticket"
+// commitNoopTransition handles the same-column idempotent branch:
+// audit-only commit, no notify, success result describing the no-op.
+func commitNoopTransition(ctx context.Context, tx pgx.Tx, q *store.Queries, deps Deps, args TransitionTicketArgs) (Result, error) {
+	rt := resourceTypeTicket
 	resourceID := args.TicketID
 	if _, err := WriteAudit(ctx, q, AuditWriteParams{
 		ChatSessionID:        deps.ChatSessionID,
@@ -346,7 +327,49 @@ func realTransitionTicketHandler(ctx context.Context, deps Deps, raw json.RawMes
 	if err := tx.Commit(ctx); err != nil {
 		return Result{}, fmt.Errorf("transition_ticket: commit: %w", err)
 	}
+	return Result{
+		Success:             true,
+		AffectedResourceID:  resourceID,
+		AffectedResourceURL: ticketURLPrefix + resourceID,
+		Message:             "Ticket " + resourceID + " already in column " + args.ToColumn,
+	}, nil
+}
 
+// commitTransition handles the non-idempotent path: insert the
+// ticket_transitions row, update tickets.column_slug, write the audit
+// row, commit, then post-commit notify.
+func commitTransition(ctx context.Context, tx pgx.Tx, q *store.Queries, deps Deps, args TransitionTicketArgs, ticketID pgtype.UUID, fromColumn string) (Result, error) {
+	if _, err := q.InsertTicketTransition(ctx, store.InsertTicketTransitionParams{
+		TicketID:                   ticketID,
+		FromColumn:                 &fromColumn,
+		ToColumn:                   args.ToColumn,
+		TriggeredByAgentInstanceID: pgtype.UUID{},
+	}); err != nil {
+		return Result{}, fmt.Errorf("transition_ticket: insert transition: %w", err)
+	}
+	if err := q.UpdateTicketColumnSlug(ctx, store.UpdateTicketColumnSlugParams{
+		ID:         ticketID,
+		ColumnSlug: args.ToColumn,
+	}); err != nil {
+		return Result{}, fmt.Errorf("transition_ticket: update column: %w", err)
+	}
+	rt := resourceTypeTicket
+	resourceID := args.TicketID
+	if _, err := WriteAudit(ctx, q, AuditWriteParams{
+		ChatSessionID:        deps.ChatSessionID,
+		ChatMessageID:        deps.ChatMessageID,
+		Verb:                 "transition_ticket",
+		Args:                 args,
+		Outcome:              "success",
+		ReversibilityClass:   1,
+		AffectedResourceID:   &resourceID,
+		AffectedResourceType: &rt,
+	}); err != nil {
+		return Result{}, fmt.Errorf("transition_ticket: write audit: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Result{}, fmt.Errorf("transition_ticket: commit: %w", err)
+	}
 	emitNotifyBestEffort(deps, "ticket.transitioned", chatNotifyPayload{
 		ChatSessionID:        uuidString(deps.ChatSessionID),
 		ChatMessageID:        uuidString(deps.ChatMessageID),
@@ -358,7 +381,6 @@ func realTransitionTicketHandler(ctx context.Context, deps Deps, raw json.RawMes
 			"to_column":   args.ToColumn,
 		},
 	})
-
 	return Result{
 		Success:             true,
 		AffectedResourceID:  resourceID,

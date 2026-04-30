@@ -133,10 +133,18 @@ function TicketTransitioned({ from, to, dept }: Readonly<{ from: string; to: str
   );
 }
 
-function describeChatLifecycle(kind: 'chat.session_started' | 'chat.message_sent' | 'chat.session_ended', sessionId: string) {
+// CHAT_LIFECYCLE_VERBS keeps describeChatLifecycle's per-kind copy in
+// one place so the function body stays a single render expression
+// (avoids the nested-ternary lint).
+const CHAT_LIFECYCLE_VERBS: Record<'chat.session_started' | 'chat.message_sent' | 'chat.session_ended', string> = {
+  'chat.session_started': 'started',
+  'chat.message_sent': 'message sent',
+  'chat.session_ended': 'ended',
+};
+
+function describeChatLifecycle(kind: keyof typeof CHAT_LIFECYCLE_VERBS, sessionId: string) {
   const s = shortId(sessionId);
-  const verb = kind === 'chat.session_started' ? 'started' : kind === 'chat.message_sent' ? 'message sent' : 'ended';
-  return <span className="text-text-3">Chat session <span className="text-text-2 font-mono">{s}</span> {verb}</span>;
+  return <span className="text-text-3">Chat session <span className="text-text-2 font-mono">{s}</span> {CHAT_LIFECYCLE_VERBS[kind]}</span>;
 }
 
 function describeChatMutation(event: ActivityEvent): React.ReactNode {
