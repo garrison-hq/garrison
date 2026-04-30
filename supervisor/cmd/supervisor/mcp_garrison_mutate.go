@@ -22,8 +22,8 @@ import (
 // spawn time when ChatConfigParams.DatabaseURL/ChatSessionID/ChatMessageID
 // are set):
 //   - GARRISON_DATABASE_URL  (supervisor's main DSN; the verb handlers
-//                              write to chat_mutation_audit, tickets,
-//                              agents, hiring_proposals)
+//     write to chat_mutation_audit, tickets,
+//     agents, hiring_proposals)
 //   - GARRISON_CHAT_SESSION_ID (uuid; scopes audit rows)
 //   - GARRISON_CHAT_MESSAGE_ID (uuid; scopes audit rows)
 func runMCPGarrisonMutate() int {

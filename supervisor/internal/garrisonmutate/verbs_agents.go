@@ -17,16 +17,16 @@ import (
 // containing a verbatim secret value (M2.3 Rule 1 carryover into the
 // chat mutation surface).
 var secretLeakPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`sk-[A-Za-z0-9_\-]{20,}`),    // Anthropic / OpenAI key shape
-	regexp.MustCompile(`xoxb-[A-Za-z0-9_\-]{20,}`),  // Slack bot token
-	regexp.MustCompile(`AKIA[0-9A-Z]{16}`),          // AWS access key id
+	regexp.MustCompile(`sk-[A-Za-z0-9_\-]{20,}`),             // Anthropic / OpenAI key shape
+	regexp.MustCompile(`xoxb-[A-Za-z0-9_\-]{20,}`),           // Slack bot token
+	regexp.MustCompile(`AKIA[0-9A-Z]{16}`),                   // AWS access key id
 	regexp.MustCompile(`-----BEGIN [A-Z ]+PRIVATE KEY-----`), // PEM header
-	regexp.MustCompile(`ghp_[A-Za-z0-9]{36}`),       // GitHub PAT
-	regexp.MustCompile(`ghs_[A-Za-z0-9]{36}`),       // GitHub server-to-server
-	regexp.MustCompile(`gho_[A-Za-z0-9]{36}`),       // GitHub OAuth
-	regexp.MustCompile(`ghr_[A-Za-z0-9]{36}`),       // GitHub refresh
-	regexp.MustCompile(`ghu_[A-Za-z0-9]{36}`),       // GitHub user-to-server
-	regexp.MustCompile(`Bearer [A-Za-z0-9_\-\.]{30,}`), // bearer-shape
+	regexp.MustCompile(`ghp_[A-Za-z0-9]{36}`),                // GitHub PAT
+	regexp.MustCompile(`ghs_[A-Za-z0-9]{36}`),                // GitHub server-to-server
+	regexp.MustCompile(`gho_[A-Za-z0-9]{36}`),                // GitHub OAuth
+	regexp.MustCompile(`ghr_[A-Za-z0-9]{36}`),                // GitHub refresh
+	regexp.MustCompile(`ghu_[A-Za-z0-9]{36}`),                // GitHub user-to-server
+	regexp.MustCompile(`Bearer [A-Za-z0-9_\-\.]{30,}`),       // bearer-shape
 }
 
 // scanForSecrets returns the set of pattern indices that match the

@@ -15,10 +15,10 @@ import (
 // length bounds match the FR-422 / plan §13.8 spec; the M5.3 stopgap
 // page renders these fields directly.
 type ProposeHireArgs struct {
-	RoleTitle        string `json:"role_title"`
-	DepartmentSlug   string `json:"department_slug"`
-	JustificationMD  string `json:"justification_md"`
-	SkillsSummaryMD  string `json:"skills_summary_md,omitempty"`
+	RoleTitle       string `json:"role_title"`
+	DepartmentSlug  string `json:"department_slug"`
+	JustificationMD string `json:"justification_md"`
+	SkillsSummaryMD string `json:"skills_summary_md,omitempty"`
 }
 
 // realProposeHireHandler implements garrison-mutate.propose_hire. Tier 3

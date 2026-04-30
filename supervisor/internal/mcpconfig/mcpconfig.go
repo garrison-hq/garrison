@@ -112,7 +112,7 @@ func BuildChatConfig(p ChatConfigParams) ([]byte, error) {
 			Command: p.SupervisorBin,
 			Args:    []string{"mcp", "garrison-mutate"},
 			Env: map[string]string{
-				"GARRISON_DATABASE_URL":   p.DatabaseURL,
+				"GARRISON_DATABASE_URL":    p.DatabaseURL,
 				"GARRISON_CHAT_SESSION_ID": p.ChatSessionID,
 				"GARRISON_CHAT_MESSAGE_ID": p.ChatMessageID,
 			},
@@ -158,9 +158,9 @@ type ChatConfigParams struct {
 	Mempalace     MempalaceParams
 	// M5.3 fields. All three must be set together; setting only some
 	// returns an error.
-	DatabaseURL    string
-	ChatSessionID  string
-	ChatMessageID  string
+	DatabaseURL   string
+	ChatSessionID string
+	ChatMessageID string
 }
 
 func CheckExtraServers(extraServersJSON []byte) error {

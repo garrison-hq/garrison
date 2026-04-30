@@ -248,9 +248,9 @@ func realEditTicketHandler(ctx context.Context, deps Deps, raw json.RawMessage) 
 
 // TransitionTicketArgs is the JSON input shape for transition_ticket.
 type TransitionTicketArgs struct {
-	TicketID  string `json:"ticket_id"`
-	ToColumn  string `json:"to_column"`
-	Reason    string `json:"reason,omitempty"`
+	TicketID string `json:"ticket_id"`
+	ToColumn string `json:"to_column"`
+	Reason   string `json:"reason,omitempty"`
 }
 
 // realTransitionTicketHandler implements garrison-mutate.transition_ticket.
