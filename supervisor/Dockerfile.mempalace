@@ -31,7 +31,7 @@ RUN apt-get update \
 # Palace lives on a named volume mounted at /palace (see docker-compose.yml).
 # Supervisor writes via docker exec; this image does not own palace state.
 COPY requirements-lock.txt /tmp/requirements-lock.txt
-RUN pip install --no-cache-dir --require-hashes -r /tmp/requirements-lock.txt \
+RUN pip install --no-cache-dir --require-hashes --only-binary :all: -r /tmp/requirements-lock.txt \
  && mkdir -p /palace \
  && chown -R nobody:nogroup /palace
 

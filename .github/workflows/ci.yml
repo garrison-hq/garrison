@@ -112,7 +112,7 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: latest
-      - run: bun install --frozen-lockfile
+      - run: bun install --frozen-lockfile --ignore-scripts
       - run: bun run typecheck
 
   dashboard-test-unit:
@@ -138,7 +138,7 @@ jobs:
           cache-dependency-path: supervisor/go.sum
       - name: Install goose CLI
         run: go install github.com/pressly/goose/v3/cmd/goose@v3.21.1
-      - run: bun install --frozen-lockfile
+      - run: bun install --frozen-lockfile --ignore-scripts
       - run: bun run test:coverage
       - name: Upload dashboard coverage
         uses: actions/upload-artifact@v4
@@ -159,7 +159,7 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: latest
-      - run: bun install --frozen-lockfile
+      - run: bun install --frozen-lockfile --ignore-scripts
       # Build with placeholder DSNs — the lazy-init clients in
       # lib/db/{appClient,vaultRoClient}.ts no longer throw at
       # module-load time, so this just verifies next build succeeds
@@ -202,7 +202,7 @@ jobs:
           cache-dependency-path: supervisor/go.sum
       - name: Install goose CLI
         run: go install github.com/pressly/goose/v3/cmd/goose@v3.21.1
-      - run: bun install --frozen-lockfile
+      - run: bun install --frozen-lockfile --ignore-scripts
       # Pre-pull Docker images so the per-test boot doesn't
       # contend with the registry. ~700 MB total; pulled in
       # parallel.
@@ -217,14 +217,19 @@ jobs:
       # (libnss, libgbm, fonts, …). Cheaper than running
       # `bunx playwright install-deps` separately.
       - name: Install Playwright Chromium
-        run: bunx playwright install --with-deps chromium
+        # Pinned to the playwright version in dashboard/package.json
+        # (1.59.1 — both the @playwright/test and playwright deps
+        # are pinned exactly there) so Sonar's "exact version" rule
+        # is satisfied and the install can't drift between CI runs
+        # if a newer 1.x release lands in the registry.
+        run: bunx playwright@1.59.1 install --with-deps chromium
       # CI runs only the chromium-1280 project; the 1024 and 768
       # viewports gate responsive specs locally during the M3
       # polish round but don't add coverage that the primary
       # viewport doesn't already pin. Re-run all three locally
       # before a release.
       - name: Run Playwright integration suite
-        run: bunx playwright test --project=chromium-1280
+        run: bunx playwright@1.59.1 test --project=chromium-1280
       # Path A — server-side V8 coverage. The Playwright harness
       # spawns the dashboard with NODE_V8_COVERAGE; this step
       # converts those profiles to lcov via v8-to-istanbul.
