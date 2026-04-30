@@ -19,16 +19,17 @@ Three primary components:
 Garrison is being built milestone-by-milestone (M1 through M8). Each milestone ships end-to-end functional before the next begins.
 
 - **M1** — event bus + supervisor core. Shipped 2026-04-22.
-- **M2** — first real agent loop. Shipped 2026-04-22 → 2026-04-24 across five sub-milestones:
-  - **M2.1** — Claude Code invocation. Shipped 2026-04-22.
-  - **M2.2** — MemPalace MCP wiring. Shipped 2026-04-23.
-  - **M2.2.1** — Structured completion via `finalize_ticket` tool. Shipped 2026-04-23.
-  - **M2.2.2** — Compliance calibration. Shipped 2026-04-24.
-  - **M2.3** — Secret vault (Infisical). Shipped 2026-04-24.
-- **M3** — dashboard. **Active.**
-- **M4** through **M8** — see `ARCHITECTURE.md`.
+- **M2** — first real agent loop, shipped 2026-04-22 → 2026-04-24 across five sub-milestones (M2.1 Claude Code invocation, M2.2 MemPalace MCP wiring, M2.2.1 `finalize_ticket`, M2.2.2 compliance calibration, M2.3 Infisical vault).
+- **M3** — operator dashboard, read-only. Shipped 2026-04-26.
+- **M4** — operator dashboard mutations. Shipped 2026-04-27.
+- **M5.1** — CEO chat backend. Shipped 2026-04-28.
+- **M5.2** — CEO chat dashboard surface. Shipped 2026-04-29.
+- **M5.3** — chat-driven mutations under autonomous-execution posture. **Active.**
+- **M6** through **M8** — see `ARCHITECTURE.md`.
 
-Current milestone: **M3 — dashboard**.
+Current milestone: **M5.3 — chat-driven mutations**.
+
+Per-milestone domain knowledge (the "activate before writing code" detail) lives in [`docs/agents/milestone-context.md`](docs/agents/milestone-context.md) so it's not in every-session context.
 
 ---
 
@@ -40,7 +41,9 @@ These documents govern this project. Read the ones relevant to your current task
 |---|---|---|
 | Rationale | `RATIONALE.md` | 13 architectural decisions with alternatives considered and trade-offs accepted. Do not re-litigate decisions here. |
 | Architecture | `ARCHITECTURE.md` | System components, data model, event flow, build plan, dashboard surfaces. |
-| Active milestone context | `specs/_context/m{N}-context.md` (active: M3 — context file written via `/garrison-specify m3` when M3 spec phase opens) | Binding constraints for the active milestone. The active milestone's context file is always the most operationally relevant document for code work. |
+| Active milestone context | `specs/_context/m{N}-context.md` (active: M5.3 — `specs/_context/m5-3-context.md`) | Binding constraints for the active milestone. The active milestone's context file is always the most operationally relevant document for code work. |
+| Per-milestone agent context | `docs/agents/milestone-context.md` | The "activate before writing code" detail per milestone (M1 → M5.3). Read the entries for the current milestone plus all prior milestones whose code remains in the codebase. |
+| Repository layout | `docs/agents/repository-layout.md` | Annotated file tree. Read on first session in the repo or when uncertain where a file belongs. |
 | Constitution | `.specify/memory/constitution.md` | Spec-kit's constitution file. Populated via `/speckit.constitution`. |
 | Research spikes | `docs/research/m{N}-spike.md` | Observed behavior of external tools that a milestone depends on. Binding input to the milestone's context file. |
 | Vault threat model | `docs/security/vault-threat-model.md` | Design input for M2.3 (Infisical integration). |
@@ -68,80 +71,9 @@ If a lower authority contradicts a higher one, the higher one wins. Flag the con
 
 ## Activate before writing code
 
-Before producing any code in this repository, explicitly bring relevant domain knowledge into working memory. Which domains to activate depends on which milestone is active. Activate the current milestone's domains plus all prior milestones' domains that remain in the codebase.
+Before producing any code in this repository, explicitly bring relevant domain knowledge into working memory. The per-milestone "activate" lists live in [`docs/agents/milestone-context.md`](docs/agents/milestone-context.md) so they're loaded on demand, not in every session.
 
-### M1 — event bus + supervisor core (shipped)
-
-- **Go 1.23+ idioms**: `context.Context` threaded through every goroutine; no bare `go func()`; `errgroup.WithContext` for "run N subsystems, cancel all if one fails" at the top level; channels with explicit sender/receiver responsibility; buffered channels only with a documented reason; stdlib `log/slog` for structured logging.
-- **`jackc/pgx/v5` patterns**: the LISTEN connection is dedicated (a plain `*pgx.Conn` or manually hijacked `*pgxpool.Conn`), never from the pool; reconnect with exponential backoff (100ms → 30s cap); on reconnect, run the `processed_at` fallback poll before re-LISTENing.
-- **Postgres LISTEN/NOTIFY**: payload size is limited (8KB); channel names are dot-delimited (`work.ticket.created.<dept>.<column>`); NOTIFY fires inside the same transaction as the state change; missed notifications are expected and handled via `processed_at` + periodic poll.
-- **`sqlc`**: SQL migrations are the source of truth; query types are generated, not hand-written; both Go (`sqlc`) and TypeScript (Drizzle, later) derive from the same SQL.
-- **`os/exec` with `CommandContext`**: every subprocess has a timeout context; cancellation sends SIGTERM then SIGKILL after a grace period; stdout/stderr piped per the pipeline-drain rule (concurrency rule 8).
-- **`testcontainers-go`**: integration tests spin ephemeral Postgres containers; no mocking of the DB layer.
-
-### M2.1 — Claude Code invocation (shipped)
-
-- **Claude Code non-interactive invocation contract**: exact flags, input format, stdout/stderr shape, exit code vocabulary. Specifics from `docs/research/m2-spike.md` Part 1. Do not activate assumptions — activate the spike's findings.
-- **stream-json event routing**: every invocation uses `--output-format stream-json --verbose`. The first event is `system`/`init`; subsequent events are `assistant`, `user` (tool_result), `rate_limit_event`, and a terminal `result`. The supervisor parses NDJSON line-by-line and routes by `type`.
-- **MCP health via init event**: the supervisor parses the `mcp_servers[]` array in the `system`/`init` event. A server with `status == "connected"` is healthy; anything else (`failed`, `needs-auth`, unknown value) means the supervisor kills the Claude process group immediately and records the agent_instance as failed with `exit_reason = "mcp_<server>_<status>"`. Unknown status values are treated as failures (fail-closed).
-- **`internal/pgmcp`**: in-tree Go Postgres MCP server (~300 LOC), stdio JSON-RPC, `query` + `explain` tools. Read-only enforced via Postgres role (`garrison_agent_ro`) plus protocol-layer filter. Works as `supervisor mcp postgres` subcommand.
-
-### M2.2 — MemPalace MCP wiring (shipped)
-
-- **MemPalace MCP server lifecycle and concurrent access semantics.** From `docs/research/m2-spike.md` Part 2.
-- **MemPalace `init --yes` discipline.** Runs against a dedicated non-git-tracked directory. Never against the Garrison repo or supervisor workspace. T001 finding F1: the init is idempotent in 3.3.2; the `chroma.sqlite3` marker-file heuristic is unreliable.
-- **Diary entry and KG triple write contracts** as described in `ARCHITECTURE.md` "MemPalace write contract" section.
-- **Hygiene check query patterns** — post-transition async checks for expected writes. Two evaluation paths now coexist (see M2.2.1).
-- **`garrison_agent_mempalace` Postgres role** — SELECT-only on `ticket_transitions + agent_instances + tickets + agents`; password set via ops checklist post-migrate; composed into `AgentMempalaceDSN()` at supervisor startup (parallels M2.1's `garrison_agent_ro`).
-- **Three-container deployment topology**: supervisor + `Dockerfile.mempalace` (python:3.11-slim with chromadb wheels — alpine fails) + `linuxserver/socket-proxy` on `tcp://garrison-docker-proxy:2375` (NOT a unix-socket proxy, despite the name).
-- **`emit_ticket_transitioned` Postgres trigger** with `department_id` resolved via subquery — the M2.2 retro flagged the original payload-omission bug.
-
-### M2.2.1 — Structured completion via `finalize_ticket` tool (shipped)
-
-- **`internal/finalize` MCP server**: in-tree, single-tool (`finalize_ticket`), the only path that commits a ticket transition. Schema-strict (`outcome ≥ 10 chars`, `rationale ≥ 50`, `kg_triples ≥ 1` with each field ≥ 3 chars).
-- **`spawn.WriteFinalize` atomic transaction**: brackets two MemPalace sidecar calls (AddDrawer + N× AddTriples) and four DML writes (`ticket_transitions`, `tickets` update, `agent_instances` terminal, `event_outbox` mark-processed). 30-second wall-clock ceiling via `GARRISON_FINALIZE_WRITE_TIMEOUT`. Retries cap at 3 in `internal/spawn/pipeline.go`.
-- **Hygiene-status vocabulary extensions**: `finalize_failed`, `finalize_partial`, `stuck` alongside the M2.2 vocabulary.
-- **Two hygiene evaluation paths coexist**: pure-Go `EvaluateFinalizeOutcome` for finalize-shaped rows; palace-query `Evaluate` for legacy M2.2 rows. Routed by `agent_instances.exit_reason`. No retroactive UPDATE; no CHECK constraint on the column during the transition window.
-- **The objective-prose-prepend pattern** for diary bodies — `mempalace_search` is vector-similarity, not substring; raw UUIDs return zero matches. Anything you want findable by ticket-id needs prose around it.
-
-### M2.2.2 — Compliance calibration (shipped)
-
-- **Richer structured error responses** in `internal/finalize`: `Failure`/`Constraint` typed enums; `ValidationError` with `line/column/excerpt/constraint/expected/actual/hint` fields. `decodePosition` helper sanitises ASCII control chars in excerpts to `·`.
-- **Adjudicate precedence fix**: `isBudgetTerminalReason` checked BEFORE `result.IsError` when `ResultSeen=true` (one-line swap in `internal/spawn/pipeline.go`). Budget-cap events no longer masked as `claude_error`. See M2.2.1 retro §"Bonus finding" for the surfacing run.
-- **Seed agent.md shape**: front-loaded goal sentence in `## Wake-up context`; palace-search calibration as 3 bullets (Skip-if-trivial / Search-if / In-doubt-skip); example payload as fenced JSON with angle-bracket placeholders; retry framing in `## Failure modes` naming the `hint` field. Files at `migrations/seed/{engineer,qa-engineer}.md`, embedded into migrations via `+embed-agent-md` markers.
-- **Live-matrix caveat**: M2.2.2's retro originally read the calibration thesis as falsified on live models. The M2.2.x arc retro (`docs/retros/m2-2-x-compliance-retro.md`) revises that read against the contaminated-data root cause uncovered in the post-ship pgmcp investigation. The richer-error infra is correct and ready; whether it moves model behaviour is partially observed (one positive retry in the post-fix matrix).
-
-### M2.3 — Secret vault / Infisical (shipped)
-
-- **`vault.SecretValue` opaque type**: `LogValue()` returns `[REDACTED]`; `UnsafeBytes()` is grep-auditable (only 2 production call sites: spawn env injection, Rule 1 leak scan); `Zero()` clears the backing slice after subprocess start. **The `tools/vaultlog` go vet analyzer rejects slog/fmt/log calls with `SecretValue` arguments at build time.**
-- **Four vault rules**: (1) no agent.md may contain a raw secret value (Rule 1 leak scan against fetched grant set); (2) zero-grants spawns get zero secrets (no implicit fetch); (3) the agent's MCP config cannot reference the vault MCP — vault is opaque to agents, `mcpconfig.CheckExtraServers` runs BEFORE vault fetch; (4) every fetch writes a `vault_access_log` row inside the spawn tx, **fail-closed if INSERT fails**.
-- **Seven-step spawn ordering** in `spawn.go` (D4.5 / FR-416): grants → mcpconfig pre-check → vault fetch → leak scan → audit row → env build + `cmd.Start` (with `defer val.Zero()`) → existing M2.2.x subprocess pipeline.
-- **Three new tables + first production trigger**: `agent_role_secrets`, `vault_access_log`, `secret_metadata`; trigger `rebuild_secret_metadata_role_slugs` (AFTER INSERT/DELETE on `agent_role_secrets`) rebuilds the denorm `allowed_role_slugs` array. Use this trigger pattern for denorm columns derived from another table where the rebuild is cheap; avoid for cross-schema joins or expensive computation.
-- **Finalize-path scanner hook** (`scanAndRedactPayload` in `finalize.go`): non-blocking pattern scan over `DiaryEntry.Rationale` and `KGTriples[*].{Subject,Predicate,Object}` before MemPalace write; sets `hygiene_status='suspected_secret_emitted'` on any match. 10 patterns: sk-prefix, xoxb, AWS AKIA, PEM header, GitHub PAT/App/User/Server/Refresh, bearer-shape.
-- **Infisical SDK quirks** (caught at integration-test time, not in the spike): SDK caches access tokens eagerly and renews on 401 — auth-expired tests need a short-lived ML (`accessTokenTTL=1`, `numUsesLimit=1`), not a rotated client_secret. 403/429 testing requires an HTTP proxy injecting status codes; testcontainers can't reproduce them natively.
-
-### M3 — dashboard (active)
-
-When working on M3, additionally activate:
-- Next.js 16 App Router patterns, React 19 (including Server Components, Server Actions where appropriate)
-- Tailwind v4 and shadcn/ui conventions
-- Note from M2.1 retro: real Claude Code emits 5-10 `assistant` events per run (not the mockclaude fixture's 2). M3's activity feed UI must render high-volume event streams without visual bloat.
-- M3 reads from the M2.3 vault tables (`agent_role_secrets`, `vault_access_log`, `secret_metadata`) via a dashboard-scoped read role with explicit grants — do NOT read these via `garrison_agent_ro` or any agent-facing role.
-- M3 surfaces both `hygiene_status` failure modes (sandbox-escape "artifact claimed vs artifact on disk", finalize-never-called, suspected_secret_emitted) and the cost-telemetry blind spot — see `docs/issues/` for the open issues.
-
-### M7 — hiring (not yet active)
-
-When M7 becomes active, additionally activate:
-- MCP server authoring patterns (using `anthropics/skills/mcp-builder`)
-- `skills.sh` registry semantics for discovery and install
-- **SkillHub (iflytek)** as the target-state private-skills component alongside the public `skills.sh` feed; see `docs/skill-registry-candidates.md` and `docs/architecture-reconciliation-2026-04-24.md` §2 for the decision provenance.
-
-### M8 — MCP server registry (not yet active)
-
-When M8 becomes active, additionally activate:
-- **MCPJungle** as the leading candidate for the M8-era MCP server registry (self-hosted, Go-based, Postgres-backed, combines registry + runtime proxy). Maturity re-check at M7 kickoff. See `docs/mcp-registry-candidates.md`.
-
-**Do not** activate domains from future milestones. M3 sessions have no business carrying M7 hiring-flow context or M8 MCP-registry context; it dilutes attention and tempts scope creep.
+The activation rule: read the entries for the **current milestone plus all prior milestones whose code remains in the codebase**. Future-milestone entries are listed only so the operator can plan ahead — do not pre-activate them. M5.3 sessions have no business carrying M7 hiring-flow or M8 MCP-registry context; it dilutes attention and tempts scope creep.
 
 ---
 
@@ -213,16 +145,13 @@ These apply throughout the supervisor code:
 
 ## Scope discipline (the most important rule)
 
-Specs are narrow per milestone. Each milestone's spec covers only that milestone's concerns. The following are explicitly **out of scope for M3** even though they appear in `ARCHITECTURE.md` or in open issues:
+Specs are narrow per milestone. Each milestone's spec covers only that milestone's concerns. The active milestone's `specs/_context/m{N}-context.md` enumerates what is in scope; ARCHITECTURE.md and `docs/issues/` enumerate work that is intentionally deferred.
 
-- CEO agent + chat surfaces (M5)
-- Hiring flow / agent creation UI (M7)
-- skills.sh / SkillHub integration (M7)
-- MCPJungle MCP-server registry (M8)
-- **Workspace sandboxing / Docker-per-agent** — post-M2 follow-up; see `docs/issues/agent-workspace-sandboxing.md`. The chosen resolution is per-agent Docker containers with hard guardrails preventing workspace escape; this work happens after M3 ships.
-- **Cost-telemetry blind-spot fix** — post-M2 follow-up; see `docs/issues/cost-telemetry-blind-spot.md`. M3 reads from `agent_instances.total_cost_usd` and must surface the blind spot, but does not fix it.
-- Multi-department wire-up beyond engineering + qa-engineer (M2.2 / M2.2.1 shipped these two; new departments are post-M3)
-- Mutating any sealed M2/M2.3 surface — supervisor spawn semantics, finalize tool schema, vault rules, `garrison_agent_*` Postgres roles, MemPalace MCP wiring. M3 is read-side work over data the M2 arc owns.
+Standing out-of-scope for any non-named milestone:
+- **Workspace sandboxing / Docker-per-agent** — see `docs/issues/agent-workspace-sandboxing.md`. Per-agent Docker containers with hard guardrails preventing workspace escape; deferred post-M5.
+- **Cost-telemetry blind-spot fix** — see `docs/issues/cost-telemetry-blind-spot.md`. Successful finalize runs read `$0.00` for `total_cost_usd`; surface the caveat in any cost UI but do not fix the supervisor signal-handling here.
+- **Mutating sealed M2/M2.3 surfaces** — supervisor spawn semantics, finalize tool schema, vault rules, `garrison_agent_*` Postgres roles, MemPalace MCP wiring. These are sealed unless the active milestone's context file explicitly amends them.
+- Future-milestone surfaces — M5.3 sessions don't carry M7 hiring or M8 MCP-registry work; M7 sessions don't carry M8 work; etc.
 
 When tempted to broaden scope because "we'll need it later," stop. Note it as an open question in the spec or the retro. Do not implement it.
 
@@ -287,14 +216,10 @@ These are installed and will auto-activate when relevant:
 
 - `obra/superpowers` — spec → plan → implement discipline, verification-before-completion, systematic debugging, TDD, requesting/receiving code review, dispatching parallel agents, using git worktrees, finishing a development branch
 - `supabase/agent-skills` — general Postgres best practices (despite the name, not Supabase-specific)
+- Dashboard-relevant skills (Next.js 16 / React 19 patterns, `frontend-design`, shadcn/ui) — added when M3 became active; remain available for M3+ work.
 
-When M3 becomes active, add:
-- `vercel-labs/agent-skills` — Next.js 16 / React 19 patterns
-- `anthropics/skills` for `frontend-design`
-- `shadcn/ui` if shadcn is used in the dashboard
-
-When M7 becomes active, add:
-- `anthropics/skills` for `mcp-builder`
+Add when M7 becomes active:
+- `anthropics/skills` for `mcp-builder`.
 
 Skills are lower authority than this file, the rationale, and the milestone context.
 
@@ -302,93 +227,17 @@ Skills are lower authority than this file, the rationale, and the milestone cont
 
 ## Repository layout
 
-```
-garrison/
-├── AGENTS.md                     ← this file
-├── ARCHITECTURE.md
-├── RATIONALE.md
-├── README.md
-├── CONTRIBUTING.md
-├── CODE_OF_CONDUCT.md
-├── SECURITY.md
-├── CHANGELOG.md
-├── LICENSE                       ← AGPL-3.0-only
-├── LICENSE-DOCS                  ← CC-BY-4.0
-├── .agents/                      ← Garrison-flavored slash commands (.claude → .agents)
-│   └── commands/
-│       ├── garrison-specify.md
-│       ├── garrison-plan.md
-│       ├── garrison-tasks.md
-│       └── garrison-implement.md
-├── specs/
-│   ├── _context/                 ← filenames mix dots/hyphens (historical — do not normalise mid-milestone)
-│   │   ├── m1-context.md
-│   │   ├── m2.1-context.md
-│   │   ├── m2.2-context.md
-│   │   ├── m2-2-1-context.md
-│   │   ├── m2.2.2-context.md
-│   │   └── m2.3-context.md
-│   ├── m1-event-bus/             ← M1 (un-numbered, predates the 00N scheme)
-│   ├── 003-m2-1-claude-invocation/
-│   ├── 004-m2-2-mempalace/
-│   ├── 005-m2-2-1-finalize-ticket/
-│   ├── 006-m2-2-2-compliance-calibration/
-│   └── 007-m2-3-infisical-vault/
-├── supervisor/                   ← Go binary
-│   ├── cmd/supervisor/           ← main + `mcp postgres` + `mcp finalize` subcommands
-│   ├── internal/
-│   │   ├── claudeproto/          ← M2.1: stream-json event types + Router
-│   │   ├── mcpconfig/            ← M2.1 + M2.3: per-invocation MCP config + Rule 3 pre-check
-│   │   ├── pgmcp/                ← M2.1: in-tree Postgres MCP server (CallToolResult-shape after 59fc977)
-│   │   ├── agents/               ← M2.1: startup-once cache
-│   │   ├── spawn/                ← M2.1 + M2.2 + M2.2.1 + M2.3: subprocess pipeline, finalize write, vault orchestration
-│   │   ├── mempalace/            ← M2.2: bootstrap + wake-up + Client + DockerExec seam
-│   │   ├── hygiene/              ← M2.2 + M2.2.1: Evaluator + listener + sweep
-│   │   ├── finalize/             ← M2.2.1 + M2.2.2: finalize_ticket MCP server + richer-error infra
-│   │   ├── vault/                ← M2.3: SecretValue + Client + ScanAndRedact + audit row
-│   │   ├── config/, store/, events/, pgdb/, recovery/, health/, concurrency/, testdb/
-│   ├── tools/
-│   │   └── vaultlog/             ← M2.3: custom go vet analyzer rejecting SecretValue logging
-│   ├── go.mod
-│   └── Dockerfile
-├── dashboard/                    ← Next.js 16 app (M3 — active)
-├── migrations/                   ← SQL, consumed by sqlc (Go) and Drizzle (TS)
-│   └── seed/                     ← engineer.md, qa-engineer.md (embedded into migrations via +embed-agent-md)
-├── docs/
-│   ├── architecture.md           ← pointer file
-│   ├── architecture-reconciliation-2026-04-24.md  ← frozen decision-provenance snapshot
-│   ├── getting-started.md
-│   ├── mcp-registry-candidates.md   ← M8 input: MCPJungle commitment
-│   ├── skill-registry-candidates.md ← M7 input: SkillHub commitment
-│   ├── ops-checklist.md          ← post-migrate and post-deploy steps
-│   ├── README.md
-│   ├── research/
-│   │   └── m2-spike.md
-│   ├── security/
-│   │   └── vault-threat-model.md
-│   ├── forensics/
-│   │   └── pgmcp-three-bug-chain.md  ← post-M2.2.2 root-cause investigation
-│   ├── issues/
-│   │   ├── agent-workspace-sandboxing.md  ← Docker-per-agent fix planned post-M3
-│   │   └── cost-telemetry-blind-spot.md   ← supervisor signal-handling fix
-│   └── retros/
-│       ├── m1.md
-│       ├── m1-retro-addendum.md
-│       ├── m2-1.md
-│       ├── m2-2.md
-│       ├── m2-2-1.md
-│       ├── m2-2-2.md
-│       ├── m2-2-x-compliance-retro.md     ← arc synthesis
-│       └── m2-3.md
-├── experiment-results/           ← exploratory matrices (e.g. matrix-post-uuid-fix.md), not production
-├── examples/                     ← toy company YAML, sample agent.md files
-└── .specify/                     ← spec-kit scaffolding
-    ├── memory/constitution.md
-    ├── scripts/
-    └── templates/
-```
+The annotated file tree lives at [`docs/agents/repository-layout.md`](docs/agents/repository-layout.md). Read it on first session in the repo or when uncertain where a file belongs. Top-level shape:
 
-When in doubt about where a file belongs, look at what this tree implies and follow the pattern. If the pattern doesn't cover your case, ask.
+- `supervisor/` — Go binary. `cmd/supervisor/` (main + MCP subcommands), `internal/` (per-domain packages), `tools/vaultlog/` (custom go vet analyzer).
+- `dashboard/` — Next.js 16 app. M3/M4/M5.1/M5.2 surfaces.
+- `migrations/` — SQL, consumed by sqlc (Go) and Drizzle (TS).
+- `specs/` — per-milestone spec-kit artifacts; `specs/_context/m{N}-context.md` is binding for the active milestone.
+- `docs/` — non-spec documentation: `architecture.md`, `agents/` (this file's reference docs), `research/` (spikes), `security/` (threat models), `retros/`, `issues/`, `ops-checklist.md`.
+- `.agents/` / `.claude/` — Garrison-flavoured slash commands and skills.
+- `.specify/` — spec-kit scaffolding (constitution, scripts, templates).
+
+When in doubt about where a file belongs, look at what the tree implies and follow the pattern. If the pattern doesn't cover your case, ask.
 
 ---
 
