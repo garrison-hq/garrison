@@ -3,3 +3,4 @@
 /cmd/supervisor/migrations/
 coverage.out
 int-coverage.out
+chaos-coverage.out
