@@ -102,85 +102,89 @@ export function EventRow({ event }: Readonly<{ event: ActivityEvent }>) {
   );
 }
 
+// CHAT_MUTATION_KINDS centralises the kind-set so EventDescription's
+// dispatch is a single Set lookup instead of an 8-branch || chain.
+const CHAT_MUTATION_KINDS = new Set([
+  'chat.ticket.created',
+  'chat.ticket.edited',
+  'chat.ticket.transitioned',
+  'chat.agent.paused',
+  'chat.agent.resumed',
+  'chat.agent.spawned',
+  'chat.agent.config_edited',
+  'chat.hiring.proposed',
+]);
+
+function shortId(id: string | null | undefined): string {
+  return id ? id.slice(-8) : '—';
+}
+
 // Inline transition rendering: dept slug at text-2, slash separator
 // at text-4, source column at text-3, arrow at text-4, destination
 // at text-1 (full contrast). Source dim, destination loud.
-function EventDescription({ event }: Readonly<{ event: ActivityEvent }>) {
-  if (event.kind === 'ticket.created') {
-    return <span className="text-text-3">created</span>;
-  }
-  if (event.kind === 'ticket.transitioned') {
-    return (
-      <span className="inline-flex items-center gap-1.5">
-        <span className="text-text-2">{event.department}</span>
-        <span className="text-text-4">/</span>
-        <span className="text-text-3">{event.from}</span>
-        <span className="text-text-4 mx-0.5" aria-hidden>→</span>
-        <span className="text-text-1">{event.to}</span>
-      </span>
-    );
-  }
-  if (event.kind === 'unknown') {
-    return <span className="text-text-3">unknown channel: {event.channel}</span>;
-  }
-  if (event.kind === 'chat.session_deleted') {
-    const sessionShort = event.chatSessionId ? event.chatSessionId.slice(-8) : '—';
+function TicketTransitioned({ from, to, dept }: Readonly<{ from: string; to: string; dept?: string }>) {
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      {dept ? <><span className="text-text-2">{dept}</span><span className="text-text-4">/</span></> : null}
+      <span className="text-text-3">{from}</span>
+      <span className="text-text-4 mx-0.5" aria-hidden>→</span>
+      <span className="text-text-1">{to}</span>
+    </span>
+  );
+}
+
+function describeChatLifecycle(kind: 'chat.session_started' | 'chat.message_sent' | 'chat.session_ended', sessionId: string) {
+  const s = shortId(sessionId);
+  const verb = kind === 'chat.session_started' ? 'started' : kind === 'chat.message_sent' ? 'message sent' : 'ended';
+  return <span className="text-text-3">Chat session <span className="text-text-2 font-mono">{s}</span> {verb}</span>;
+}
+
+function describeChatMutation(event: ActivityEvent): React.ReactNode {
+  if (event.kind === 'chat.ticket.transitioned') {
     return (
       <span className="text-text-3">
-        Chat thread <span className="text-text-2 font-mono">{sessionShort}</span> deleted by operator
+        Chat transitioned <span className="text-text-2 font-mono">{shortId(event.affectedResourceId)}</span>:{' '}
+        <TicketTransitioned from={event.extras.from_column ?? '?'} to={event.extras.to_column ?? '?'} />
       </span>
     );
   }
-  // M5.3 chat lifecycle (carryover from M5.2 retro per FR-462).
-  if (event.kind === 'chat.session_started') {
-    const s = event.chatSessionId ? event.chatSessionId.slice(-8) : '—';
-    return <span className="text-text-3">Chat session <span className="text-text-2 font-mono">{s}</span> started</span>;
-  }
-  if (event.kind === 'chat.message_sent') {
-    const s = event.chatSessionId ? event.chatSessionId.slice(-8) : '—';
-    return <span className="text-text-3">Chat session <span className="text-text-2 font-mono">{s}</span> message sent</span>;
-  }
-  if (event.kind === 'chat.session_ended') {
-    const s = event.chatSessionId ? event.chatSessionId.slice(-8) : '—';
-    return <span className="text-text-3">Chat session <span className="text-text-2 font-mono">{s}</span> ended</span>;
-  }
-  // M5.3 chat-driven mutation event variants — Rule 6 backstop: render
-  // ID-shaped content only, never raw chat text. extras carries
-  // verb-specific extras (from_column / to_column for transitions,
-  // role_slug for agent verbs, etc.).
-  if (
-    event.kind === 'chat.ticket.created' ||
-    event.kind === 'chat.ticket.edited' ||
-    event.kind === 'chat.ticket.transitioned' ||
-    event.kind === 'chat.agent.paused' ||
-    event.kind === 'chat.agent.resumed' ||
-    event.kind === 'chat.agent.spawned' ||
-    event.kind === 'chat.agent.config_edited' ||
-    event.kind === 'chat.hiring.proposed'
-  ) {
+  // Other chat-mutation kinds share a uniform shape: "Chat <verb> <id>".
+  // The kind's tail (e.g. "ticket.created") becomes "ticket created"
+  // verbatim — the verb-set is closed and the wording was approved
+  // during /speckit.clarify.
+  if ('kind' in event && CHAT_MUTATION_KINDS.has(event.kind)) {
     const verb = event.kind.replace('chat.', '').replace('.', ' ');
-    const tail = event.affectedResourceId ? event.affectedResourceId.slice(-8) : '—';
-    if (event.kind === 'chat.ticket.transitioned') {
-      const from = String(event.extras['from_column'] ?? '?');
-      const to = String(event.extras['to_column'] ?? '?');
+    const tail = shortId('affectedResourceId' in event ? event.affectedResourceId : null);
+    return <span className="text-text-3">Chat {verb} <span className="text-text-2 font-mono">{tail}</span></span>;
+  }
+  return null;
+}
+
+function EventDescription({ event }: Readonly<{ event: ActivityEvent }>) {
+  switch (event.kind) {
+    case 'ticket.created':
+      return <span className="text-text-3">created</span>;
+    case 'ticket.transitioned':
+      return <TicketTransitioned dept={event.department} from={event.from} to={event.to} />;
+    case 'unknown':
+      return <span className="text-text-3">unknown channel: {event.channel}</span>;
+    case 'chat.session_deleted':
       return (
         <span className="text-text-3">
-          Chat transitioned <span className="text-text-2 font-mono">{tail}</span>:
-          {' '}<span className="text-text-3">{from}</span>
-          {' '}<span className="text-text-4" aria-hidden>→</span>
-          {' '}<span className="text-text-1">{to}</span>
+          Chat thread <span className="text-text-2 font-mono">{shortId(event.chatSessionId)}</span> deleted by operator
         </span>
       );
+    case 'chat.session_started':
+    case 'chat.message_sent':
+    case 'chat.session_ended':
+      return describeChatLifecycle(event.kind, event.chatSessionId);
+    default: {
+      const chat = describeChatMutation(event);
+      if (chat) return chat;
+      // M4 mutation event variants (ticket.edited / agent.edited /
+      // vault.*) — generic kind description until each gets dedicated
+      // rendering wired in by their respective tasks.
+      return <span className="text-text-3">{event.kind}</span>;
     }
-    return (
-      <span className="text-text-3">
-        Chat {verb} <span className="text-text-2 font-mono">{tail}</span>
-      </span>
-    );
   }
-  // M4 mutation event variants (ticket.edited / agent.edited /
-  // vault.*). Each has dedicated rendering wired in by T011 / T012 /
-  // T013. Until those tasks land, render a generic description that
-  // names the kind so the operator never sees a blank row.
-  return <span className="text-text-3">{event.kind}</span>;
 }

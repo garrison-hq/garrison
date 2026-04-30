@@ -164,5 +164,9 @@ export interface ChatMutationEvent {
   chatMessageId: string;
   affectedResourceId: string;
   affectedResourceType: string;
-  extras: Record<string, unknown>;
+  /** Verb-specific extras as a flat string map. Rule 6 backstop:
+   *  payloads carry only IDs / enum values / role-slugs / column-slugs
+   *  — never raw chat content. Typed string-only so consumers don't
+   *  need defensive String() coercion at every read site. */
+  extras: Record<string, string>;
 }

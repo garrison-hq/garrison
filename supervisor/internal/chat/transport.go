@@ -30,6 +30,12 @@ const (
 // the supervisor coalesces or splits text_delta events.
 const MaxNotifyPayloadBytes = 7000
 
+// pgNotifyExecSQL is the parameterised pg_notify call shared by every
+// chat-namespaced emit helper. Centralised so the literal isn't
+// duplicated across delta / scrub / tool_use / tool_result /
+// assistant_error paths and so the contract stays uniform.
+const pgNotifyExecSQL = `SELECT pg_notify($1, $2)`
+
 // M5.3 chat-namespaced channels for live tool-call observability. The
 // dashboard's useChatStream hook subscribes (via the existing
 // /api/sse/chat producer chain) and renders ToolCallChip per event.
@@ -94,7 +100,7 @@ func emitDeltaImpl(ctx context.Context, pool *pgxpool.Pool, messageID pgtype.UUI
 	if len(encoded) > MaxNotifyPayloadBytes {
 		return fmt.Errorf("chat: delta payload %d bytes exceeds ceiling %d", len(encoded), MaxNotifyPayloadBytes)
 	}
-	if _, err := pool.Exec(ctx, "SELECT pg_notify($1, $2)", ChannelChatAssistantDelta, string(encoded)); err != nil {
+	if _, err := pool.Exec(ctx, pgNotifyExecSQL, ChannelChatAssistantDelta, string(encoded)); err != nil {
 		return fmt.Errorf("chat: pg_notify delta: %w", err)
 	}
 	return nil
@@ -136,7 +142,7 @@ func EmitToolUse(ctx context.Context, pool *pgxpool.Pool, messageID pgtype.UUID,
 			return fmt.Errorf("chat: encode trimmed tool_use: %w", err)
 		}
 	}
-	if _, err := pool.Exec(ctx, "SELECT pg_notify($1, $2)", ChannelChatToolUse, string(encoded)); err != nil {
+	if _, err := pool.Exec(ctx, pgNotifyExecSQL, ChannelChatToolUse, string(encoded)); err != nil {
 		return fmt.Errorf("chat: pg_notify tool_use: %w", err)
 	}
 	return nil
@@ -171,7 +177,7 @@ func EmitToolResult(ctx context.Context, pool *pgxpool.Pool, messageID pgtype.UU
 			return fmt.Errorf("chat: encode trimmed tool_result: %w", err)
 		}
 	}
-	if _, err := pool.Exec(ctx, "SELECT pg_notify($1, $2)", ChannelChatToolResult, string(encoded)); err != nil {
+	if _, err := pool.Exec(ctx, pgNotifyExecSQL, ChannelChatToolResult, string(encoded)); err != nil {
 		return fmt.Errorf("chat: pg_notify tool_result: %w", err)
 	}
 	return nil
@@ -194,7 +200,7 @@ func EmitAssistantError(ctx context.Context, pool *pgxpool.Pool, messageID pgtyp
 	if err != nil {
 		return fmt.Errorf("chat: encode assistant_error: %w", err)
 	}
-	if _, err := pool.Exec(ctx, "SELECT pg_notify($1, $2)", ChannelChatAssistantError, string(encoded)); err != nil {
+	if _, err := pool.Exec(ctx, pgNotifyExecSQL, ChannelChatAssistantError, string(encoded)); err != nil {
 		return fmt.Errorf("chat: pg_notify assistant_error: %w", err)
 	}
 	return nil
@@ -244,7 +250,7 @@ func emitWorkNotify(ctx context.Context, tx pgx.Tx, channel string, body any) er
 	if err != nil {
 		return fmt.Errorf("chat: encode notify body: %w", err)
 	}
-	if _, err := tx.Exec(ctx, "SELECT pg_notify($1, $2)", channel, string(encoded)); err != nil {
+	if _, err := tx.Exec(ctx, pgNotifyExecSQL, channel, string(encoded)); err != nil {
 		return fmt.Errorf("chat: pg_notify %s: %w", channel, err)
 	}
 	return nil

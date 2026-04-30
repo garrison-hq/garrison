@@ -14,6 +14,20 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+// ticketURLPrefix is the dashboard route prefix for ticket detail
+// pages. Centralised so the chat-mutation chip's deep-link target
+// stays consistent across all three ticket verbs (create / edit /
+// transition) and so the M3 dashboard's tickets-router base can
+// shift here in one place if it ever does.
+const ticketURLPrefix = "/tickets/"
+
+// resourceTypeTicket is the affected_resource_type CHECK enum value
+// for ticket-domain verbs. Mirrored from the migration's CHECK
+// constraint; centralised so the three ticket verbs can pass a
+// pointer to this constant rather than allocating a fresh string
+// per call.
+const resourceTypeTicket = "ticket"
+
 // CreateTicketArgs is the JSON-encoded input shape for create_ticket.
 // Field names match the chat-side tool schema; tags drive both
 // json.Unmarshal and the eventual MCP tools/list inputSchema.
@@ -117,7 +131,7 @@ func realCreateTicketHandler(ctx context.Context, deps Deps, raw json.RawMessage
 	return Result{
 		Success:             true,
 		AffectedResourceID:  resourceID,
-		AffectedResourceURL: "/tickets/" + resourceID,
+		AffectedResourceURL: ticketURLPrefix + resourceID,
 		Message:             fmt.Sprintf("Created ticket %s in %s", resourceID, args.DepartmentSlug),
 	}, nil
 }
@@ -158,16 +172,10 @@ func realEditTicketHandler(ctx context.Context, deps Deps, raw json.RawMessage) 
 	defer func() { _ = tx.Rollback(ctx) }()
 	q := store.New(tx)
 
-	if _, err := q.LockTicketForUpdate(ctx, ticketID); err != nil {
-		if isLockNotAvailable(err) {
-			return ticketStateChanged("edit_ticket: another mutation got there first"),
-				writeFailureAudit(ctx, deps, "edit_ticket", args, ErrTicketStateChanged, 2, args.TicketID)
+	if _, lockErr := q.LockTicketForUpdate(ctx, ticketID); lockErr != nil {
+		if r, auditErr, ok := classifyTicketLockErr(ctx, deps, "edit_ticket", args, 2, args.TicketID, lockErr); !ok {
+			return r, auditErr
 		}
-		if errors.Is(err, pgx.ErrNoRows) {
-			return resourceNotFound("edit_ticket: ticket %q not found", args.TicketID),
-				writeFailureAudit(ctx, deps, "edit_ticket", args, ErrResourceNotFound, 2, args.TicketID)
-		}
-		return Result{}, fmt.Errorf("edit_ticket: lock: %w", err)
 	}
 
 	// Fetch the before-state for the audit diff.
@@ -176,23 +184,9 @@ func realEditTicketHandler(ctx context.Context, deps Deps, raw json.RawMessage) 
 		return Result{}, fmt.Errorf("edit_ticket: get before: %w", err)
 	}
 
-	// Resolve final values via Go-side COALESCE semantics — sqlc
-	// generates plain string/[]byte params, so the verb merges
-	// before-state with input.
-	finalObjective := before.Objective
-	if args.Objective != nil {
-		finalObjective = *args.Objective
-	}
-	finalAcceptance := before.AcceptanceCriteria
-	if args.AcceptanceCriteria != nil {
-		finalAcceptance = args.AcceptanceCriteria
-	}
-	finalMetadata := []byte(before.Metadata)
-	if len(args.Metadata) > 0 {
-		finalMetadata, err = json.Marshal(args.Metadata)
-		if err != nil {
-			return validationFailure("edit_ticket: invalid metadata: " + err.Error()), nil
-		}
+	finalObjective, finalAcceptance, finalMetadata, vErr := mergeTicketFields(before, args)
+	if vErr != nil {
+		return *vErr, nil
 	}
 	if err := q.UpdateTicketEditableFields(ctx, store.UpdateTicketEditableFieldsParams{
 		ID:                 ticketID,
@@ -241,7 +235,7 @@ func realEditTicketHandler(ctx context.Context, deps Deps, raw json.RawMessage) 
 	return Result{
 		Success:             true,
 		AffectedResourceID:  resourceID,
-		AffectedResourceURL: "/tickets/" + resourceID,
+		AffectedResourceURL: ticketURLPrefix + resourceID,
 		Message:             "Edited ticket " + resourceID,
 	}, nil
 }
@@ -282,16 +276,10 @@ func realTransitionTicketHandler(ctx context.Context, deps Deps, raw json.RawMes
 	defer func() { _ = tx.Rollback(ctx) }()
 	q := store.New(tx)
 
-	if _, err := q.LockTicketForUpdate(ctx, ticketID); err != nil {
-		if isLockNotAvailable(err) {
-			return ticketStateChanged("transition_ticket: another mutation got there first"),
-				writeFailureAudit(ctx, deps, "transition_ticket", args, ErrTicketStateChanged, 1, args.TicketID)
+	if _, lockErr := q.LockTicketForUpdate(ctx, ticketID); lockErr != nil {
+		if r, auditErr, ok := classifyTicketLockErr(ctx, deps, "transition_ticket", args, 1, args.TicketID, lockErr); !ok {
+			return r, auditErr
 		}
-		if errors.Is(err, pgx.ErrNoRows) {
-			return resourceNotFound("transition_ticket: ticket %q not found", args.TicketID),
-				writeFailureAudit(ctx, deps, "transition_ticket", args, ErrResourceNotFound, 1, args.TicketID)
-		}
-		return Result{}, fmt.Errorf("transition_ticket: lock: %w", err)
 	}
 
 	cur, err := q.GetTicketColumnAndDept(ctx, ticketID)
@@ -320,7 +308,7 @@ func realTransitionTicketHandler(ctx context.Context, deps Deps, raw json.RawMes
 		return Result{
 			Success:             true,
 			AffectedResourceID:  resourceID,
-			AffectedResourceURL: "/tickets/" + resourceID,
+			AffectedResourceURL: ticketURLPrefix + resourceID,
 			Message:             "Ticket " + resourceID + " already in column " + args.ToColumn,
 		}, nil
 	}
@@ -374,7 +362,7 @@ func realTransitionTicketHandler(ctx context.Context, deps Deps, raw json.RawMes
 	return Result{
 		Success:             true,
 		AffectedResourceID:  resourceID,
-		AffectedResourceURL: "/tickets/" + resourceID,
+		AffectedResourceURL: ticketURLPrefix + resourceID,
 		Message:             fmt.Sprintf("Transitioned ticket %s: %s → %s", resourceID, fromColumn, args.ToColumn),
 	}, nil
 }
@@ -411,6 +399,55 @@ func isLockNotAvailable(err error) bool {
 		return pgErr.Code == "55P03"
 	}
 	return false
+}
+
+// classifyTicketLockErr maps the LockTicketForUpdate error onto the
+// shared (concurrency-conflict / not-found / generic) shape that
+// edit_ticket and transition_ticket both need. Returns:
+//   - locked=true: the lock was acquired; the caller proceeds.
+//   - locked=false + result/audit: the lock failed for a known reason
+//     (ErrTicketStateChanged or ErrResourceNotFound); caller returns
+//     the result + audit-write error verbatim.
+//   - locked=false + result.Success=false + result.ErrorKind=="" +
+//     unhandled error: an unexpected pgx error; caller wraps it.
+func classifyTicketLockErr(ctx context.Context, deps Deps, verb string, args any, class int16, ticketIDText string, lockErr error) (Result, error, bool) {
+	if lockErr == nil {
+		return Result{}, nil, true
+	}
+	if isLockNotAvailable(lockErr) {
+		return ticketStateChanged(verb + ": another mutation got there first"),
+			writeFailureAudit(ctx, deps, verb, args, ErrTicketStateChanged, class, ticketIDText), false
+	}
+	if errors.Is(lockErr, pgx.ErrNoRows) {
+		return resourceNotFound("%s: ticket %q not found", verb, ticketIDText),
+			writeFailureAudit(ctx, deps, verb, args, ErrResourceNotFound, class, ticketIDText), false
+	}
+	return Result{}, fmt.Errorf("%s: lock: %w", verb, lockErr), false
+}
+
+// mergeTicketFields applies edit_ticket's Go-side COALESCE merge:
+// nil-pointer args mean "leave unchanged"; populated args overwrite.
+// Returns the resolved final values plus an optional validation
+// failure when args.Metadata fails to JSON-encode.
+func mergeTicketFields(before store.Ticket, args EditTicketArgs) (string, *string, []byte, *Result) {
+	finalObjective := before.Objective
+	if args.Objective != nil {
+		finalObjective = *args.Objective
+	}
+	finalAcceptance := before.AcceptanceCriteria
+	if args.AcceptanceCriteria != nil {
+		finalAcceptance = args.AcceptanceCriteria
+	}
+	finalMetadata := []byte(before.Metadata)
+	if len(args.Metadata) > 0 {
+		raw, err := json.Marshal(args.Metadata)
+		if err != nil {
+			r := validationFailure("edit_ticket: invalid metadata: " + err.Error())
+			return "", nil, nil, &r
+		}
+		finalMetadata = raw
+	}
+	return finalObjective, finalAcceptance, finalMetadata, nil
 }
 
 // stringPtrOrNil returns a *string pointing at s if non-empty, nil

@@ -155,6 +155,99 @@ func (p *ChatPolicy) OnUser(ctx context.Context, e claudeproto.UserEvent) {
 	p.rawEvents = append(p.rawEvents, json.RawMessage(append([]byte(nil), e.Raw...)))
 }
 
+// isToolUseBlockStart returns true if the raw content_block_start event
+// envelope encodes a tool_use content block. Substring detection is
+// safe because claude's wire format places `"type":"tool_use"` first
+// inside the content_block object — the M5 spike + M5.1 retro both
+// pinned this. Two whitespace variants cover prettified outputs.
+func isToolUseBlockStart(raw []byte) bool {
+	return bytes.Contains(raw, []byte(`"content_block":{"type":"tool_use"`)) ||
+		bytes.Contains(raw, []byte(`"content_block": {"type": "tool_use"`))
+}
+
+// handleToolUseBlockStart owns the M5.3 tool_use side-effect set:
+// emit the scrub directive (preamble text is no longer the answer),
+// reset contentBuf, increment the per-turn counter + emit the live
+// tool_use frame, and on counter > ceiling fire the
+// ErrToolCallCeilingReached terminal error. Extracted from
+// OnStreamEvent to keep that switch's cognitive complexity below
+// SonarCloud's threshold.
+func (p *ChatPolicy) handleToolUseBlockStart(ctx context.Context, raw []byte) {
+	seq := p.deltaSeq
+	p.deltaSeq++
+	p.emitScrubIfPossible(ctx, seq)
+	// Drop any preamble text already accumulated for this message —
+	// only the final message's text should commit regardless of
+	// whether the next message_start fires.
+	p.contentBuf.Reset()
+	p.toolCallCount++
+	p.emitToolUseFromRaw(ctx, raw)
+	p.maybeFireToolCallCeiling(ctx)
+}
+
+func (p *ChatPolicy) emitScrubIfPossible(ctx context.Context, seq int) {
+	if p.Pool == nil {
+		return
+	}
+	if err := EmitScrub(ctx, p.Pool, p.MessageID, p.messageBlock, seq); err != nil {
+		p.Logger.Warn("chat: EmitScrub failed", "block", p.messageBlock, "seq", seq, "err", err)
+	}
+}
+
+func (p *ChatPolicy) emitToolUseFromRaw(ctx context.Context, raw []byte) {
+	if p.Pool == nil {
+		return
+	}
+	toolUseID, toolName, args := extractToolUseFromContentBlockStart(raw)
+	if toolUseID == "" {
+		return
+	}
+	if err := EmitToolUse(ctx, p.Pool, p.MessageID, toolUseID, toolName, args); err != nil {
+		p.Logger.Warn("chat: EmitToolUse failed",
+			"tool_use_id", toolUseID, "tool_name", toolName, "err", err)
+	}
+}
+
+func (p *ChatPolicy) maybeFireToolCallCeiling(ctx context.Context) {
+	if p.toolCallCount <= p.ToolCallCeiling || p.ceilingFired {
+		return
+	}
+	p.ceilingFired = true
+	p.bailReason = ChatErrorToolCallCeilingReached
+	p.Logger.Warn("chat: per-turn tool-call ceiling exceeded",
+		"session_id", uuidString(p.SessionID),
+		"message_id", uuidString(p.MessageID),
+		"ceiling", p.ToolCallCeiling,
+		"observed", p.toolCallCount,
+	)
+	if p.Pool == nil {
+		return
+	}
+	if err := EmitAssistantError(ctx, p.Pool, p.MessageID,
+		ChatErrorToolCallCeilingReached,
+		fmt.Sprintf("per-turn tool-call ceiling (%d) exceeded; terminating turn", p.ToolCallCeiling),
+	); err != nil {
+		p.Logger.Warn("chat: EmitAssistantError failed", "err", err)
+	}
+}
+
+// toolUseContentBlockEnvelope is the named-type form of claude's
+// content_block_start wire shape, lifted out of
+// extractToolUseFromContentBlockStart so the parser doesn't carry
+// nested anonymous structs (godre:S8205).
+type toolUseContentBlockEnvelope struct {
+	Event struct {
+		ContentBlock toolUseContentBlock `json:"content_block"`
+	} `json:"event"`
+}
+
+type toolUseContentBlock struct {
+	Type  string          `json:"type"`
+	ID    string          `json:"id"`
+	Name  string          `json:"name"`
+	Input json.RawMessage `json:"input"`
+}
+
 // extractToolUseFromContentBlockStart parses claude's content_block_start
 // event raw bytes to pull out the tool_use id, name, and args. Used by
 // OnStreamEvent to emit the chat-namespaced tool_use SSE frame. Failure
@@ -162,16 +255,7 @@ func (p *ChatPolicy) OnUser(ctx context.Context, e claudeproto.UserEvent) {
 // dashboard misses ONE chip — the next reconnect reads
 // chat_messages.raw_event_envelope and recovers per M5.2 FR-261.
 func extractToolUseFromContentBlockStart(raw []byte) (toolUseID, toolName string, args json.RawMessage) {
-	var env struct {
-		Event struct {
-			ContentBlock struct {
-				Type  string          `json:"type"`
-				ID    string          `json:"id"`
-				Name  string          `json:"name"`
-				Input json.RawMessage `json:"input"`
-			} `json:"content_block"`
-		} `json:"event"`
-	}
+	var env toolUseContentBlockEnvelope
 	if err := json.Unmarshal(raw, &env); err != nil {
 		return "", "", nil
 	}
@@ -213,51 +297,8 @@ func (p *ChatPolicy) OnStreamEvent(ctx context.Context, e claudeproto.StreamEven
 		// extending claudeproto's wire shape — the Raw bytes are the
 		// canonical NDJSON line and `"type":"tool_use"` is unambiguous
 		// at the content_block.type position.
-		if bytes.Contains(e.Raw, []byte(`"content_block":{"type":"tool_use"`)) ||
-			bytes.Contains(e.Raw, []byte(`"content_block": {"type": "tool_use"`)) {
-			seq := p.deltaSeq
-			p.deltaSeq++
-			if p.Pool != nil {
-				if err := EmitScrub(ctx, p.Pool, p.MessageID, p.messageBlock, seq); err != nil {
-					p.Logger.Warn("chat: EmitScrub failed", "block", p.messageBlock, "seq", seq, "err", err)
-				}
-			}
-			// Drop any preamble text already accumulated for this
-			// message — only the final message's text should commit
-			// regardless of whether the next message_start fires.
-			p.contentBuf.Reset()
-
-			// M5.3 per-turn tool-call ceiling tracking + live SSE
-			// emission. Increment first; emit second so the dashboard
-			// renders the chip even on the call that trips the ceiling.
-			p.toolCallCount++
-			if p.Pool != nil {
-				if toolUseID, toolName, args := extractToolUseFromContentBlockStart(e.Raw); toolUseID != "" {
-					if err := EmitToolUse(ctx, p.Pool, p.MessageID, toolUseID, toolName, args); err != nil {
-						p.Logger.Warn("chat: EmitToolUse failed",
-							"tool_use_id", toolUseID, "tool_name", toolName, "err", err)
-					}
-				}
-			}
-			if p.toolCallCount > p.ToolCallCeiling && !p.ceilingFired {
-				p.ceilingFired = true
-				p.bailReason = ChatErrorToolCallCeilingReached
-				p.Logger.Warn("chat: per-turn tool-call ceiling exceeded",
-					"session_id", uuidString(p.SessionID),
-					"message_id", uuidString(p.MessageID),
-					"ceiling", p.ToolCallCeiling,
-					"observed", p.toolCallCount,
-				)
-				if p.Pool != nil {
-					if err := EmitAssistantError(ctx, p.Pool, p.MessageID,
-						ChatErrorToolCallCeilingReached,
-						fmt.Sprintf("per-turn tool-call ceiling (%d) exceeded; terminating turn", p.ToolCallCeiling),
-					); err != nil {
-						p.Logger.Warn("chat: EmitAssistantError failed",
-							"err", err)
-					}
-				}
-			}
+		if isToolUseBlockStart(e.Raw) {
+			p.handleToolUseBlockStart(ctx, e.Raw)
 		}
 	case "content_block_delta":
 		if e.Inner.DeltaType != "text_delta" {

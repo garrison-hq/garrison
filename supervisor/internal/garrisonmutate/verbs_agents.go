@@ -12,6 +12,16 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+// agentURLPrefix is the dashboard route prefix for agent detail
+// pages; centralised so all four agent verbs (pause / resume / spawn
+// / edit_config) emit consistent chip deep-links.
+const agentURLPrefix = "/agents/"
+
+// resourceTypeAgentRole is the affected_resource_type CHECK enum value
+// for agent-domain verbs. Mirrored from the migration's CHECK
+// constraint.
+const resourceTypeAgentRole = "agent_role"
+
 // secretLeakPatterns mirrors M2.3's internal/finalize.scanAndRedactPayload
 // pattern set. Used by edit_agent_config to reject proposed agent_md
 // containing a verbatim secret value (M2.3 Rule 1 carryover into the
@@ -145,7 +155,7 @@ func setAgentStatus(ctx context.Context, deps Deps, verb, roleSlug, target strin
 	return Result{
 		Success:             true,
 		AffectedResourceID:  resourceID,
-		AffectedResourceURL: "/agents/" + resourceID,
+		AffectedResourceURL: agentURLPrefix + resourceID,
 		Message:             fmt.Sprintf("%s: agent %s status=%s", verb, roleSlug, target),
 	}, nil
 }
@@ -231,7 +241,7 @@ func realSpawnAgentHandler(ctx context.Context, deps Deps, raw json.RawMessage) 
 	return Result{
 		Success:             true,
 		AffectedResourceID:  resourceID,
-		AffectedResourceURL: "/agents/" + resourceID,
+		AffectedResourceURL: agentURLPrefix + resourceID,
 		Message:             fmt.Sprintf("spawn_agent: requested %s on ticket %s", args.AgentRoleSlug, args.TicketID),
 	}, nil
 }
@@ -264,32 +274,12 @@ func realEditAgentConfigHandler(ctx context.Context, deps Deps, raw json.RawMess
 		return validationFailure("edit_agent_config: at least one of model / agent_md / palace_wing required"), nil
 	}
 
-	// Pre-tx leak scan — runs BEFORE the transaction opens (FR-421).
-	// On detection: write a separate-tx audit row carrying the redacted
-	// diff and return ErrLeakScanFailed; no agents row mutation lands.
-	if args.AgentMD != nil && len(scanForSecrets(*args.AgentMD)) > 0 {
-		redacted := "[REDACTED]"
-		redactedArgs := EditAgentConfigArgs{
-			AgentRoleSlug: args.AgentRoleSlug,
-			Model:         args.Model,
-			AgentMD:       &redacted,
-			PalaceWing:    args.PalaceWing,
-		}
-		return leakScanFailure("edit_agent_config: proposed agent_md contains a secret-shaped value; verb rejected atomically"),
-			writeFailureAudit(ctx, deps, "edit_agent_config", redactedArgs, ErrLeakScanFailed, 2, args.AgentRoleSlug)
+	if r, auditErr, blocked := runLeakScanGate(ctx, deps, args); blocked {
+		return r, auditErr
 	}
 
-	count, err := store.New(deps.Pool).CountAgentsByRoleSlug(ctx, args.AgentRoleSlug)
-	if err != nil {
-		return Result{}, fmt.Errorf("edit_agent_config: count agents: %w", err)
-	}
-	if count == 0 {
-		return resourceNotFound("edit_agent_config: agent role %q not found", args.AgentRoleSlug),
-			writeFailureAudit(ctx, deps, "edit_agent_config", args, ErrResourceNotFound, 2, args.AgentRoleSlug)
-	}
-	if count > 1 {
-		return validationFailure(fmt.Sprintf("edit_agent_config: role %q is ambiguous (%d matches)", args.AgentRoleSlug, count)),
-			writeFailureAudit(ctx, deps, "edit_agent_config", args, ErrValidationFailed, 2, args.AgentRoleSlug)
+	if r, auditErr, ok := resolveSingleAgent(ctx, deps, "edit_agent_config", args, 2, args.AgentRoleSlug); !ok {
+		return r, auditErr
 	}
 
 	tx, err := deps.Pool.Begin(ctx)
@@ -308,18 +298,7 @@ func realEditAgentConfigHandler(ctx context.Context, deps Deps, raw json.RawMess
 		return Result{}, fmt.Errorf("edit_agent_config: load agent: %w", err)
 	}
 
-	finalModel := full.Model
-	if args.Model != nil {
-		finalModel = *args.Model
-	}
-	finalAgentMD := full.AgentMd
-	if args.AgentMD != nil {
-		finalAgentMD = *args.AgentMD
-	}
-	finalPalaceWing := full.PalaceWing
-	if args.PalaceWing != nil {
-		finalPalaceWing = args.PalaceWing
-	}
+	finalModel, finalAgentMD, finalPalaceWing := mergeAgentConfigFields(full, args)
 
 	if err := q.UpdateAgentConfigFields(ctx, store.UpdateAgentConfigFieldsParams{
 		ID:         agentRow.ID,
@@ -368,7 +347,7 @@ func realEditAgentConfigHandler(ctx context.Context, deps Deps, raw json.RawMess
 	return Result{
 		Success:             true,
 		AffectedResourceID:  resourceID,
-		AffectedResourceURL: "/agents/" + resourceID,
+		AffectedResourceURL: agentURLPrefix + resourceID,
 		Message:             "Edited config for agent " + args.AgentRoleSlug,
 	}, nil
 }
@@ -378,4 +357,61 @@ func init() {
 	handleResumeAgent = realResumeAgentHandler
 	handleSpawnAgent = realSpawnAgentHandler
 	handleEditAgentConfig = realEditAgentConfigHandler
+}
+
+// runLeakScanGate runs the M2.3 Rule 1 leak-scan against the proposed
+// agent_md. On detection, writes a redacted-diff audit row and returns
+// the failure result + blocked=true. Clean inputs return blocked=false.
+func runLeakScanGate(ctx context.Context, deps Deps, args EditAgentConfigArgs) (Result, error, bool) {
+	if args.AgentMD == nil || len(scanForSecrets(*args.AgentMD)) == 0 {
+		return Result{}, nil, false
+	}
+	redacted := "[REDACTED]"
+	redactedArgs := EditAgentConfigArgs{
+		AgentRoleSlug: args.AgentRoleSlug,
+		Model:         args.Model,
+		AgentMD:       &redacted,
+		PalaceWing:    args.PalaceWing,
+	}
+	return leakScanFailure("edit_agent_config: proposed agent_md contains a secret-shaped value; verb rejected atomically"),
+		writeFailureAudit(ctx, deps, "edit_agent_config", redactedArgs, ErrLeakScanFailed, 2, args.AgentRoleSlug), true
+}
+
+// resolveSingleAgent counts agents matching the role_slug + classifies
+// the result against the existence + uniqueness invariants. ok=true
+// means exactly one match; the caller proceeds. ok=false carries a
+// failure result + audit-write error.
+func resolveSingleAgent(ctx context.Context, deps Deps, verb string, args any, class int16, roleSlug string) (Result, error, bool) {
+	count, err := store.New(deps.Pool).CountAgentsByRoleSlug(ctx, roleSlug)
+	if err != nil {
+		return Result{}, fmt.Errorf("%s: count agents: %w", verb, err), false
+	}
+	if count == 0 {
+		return resourceNotFound("%s: agent role %q not found", verb, roleSlug),
+			writeFailureAudit(ctx, deps, verb, args, ErrResourceNotFound, class, roleSlug), false
+	}
+	if count > 1 {
+		return validationFailure(fmt.Sprintf("%s: role %q is ambiguous (%d matches)", verb, roleSlug, count)),
+			writeFailureAudit(ctx, deps, verb, args, ErrValidationFailed, class, roleSlug), false
+	}
+	return Result{}, nil, true
+}
+
+// mergeAgentConfigFields applies edit_agent_config's Go-side COALESCE
+// merge: nil-pointer args mean "leave unchanged"; populated args
+// overwrite the before-state value.
+func mergeAgentConfigFields(before store.Agent, args EditAgentConfigArgs) (string, string, *string) {
+	model := before.Model
+	if args.Model != nil {
+		model = *args.Model
+	}
+	md := before.AgentMd
+	if args.AgentMD != nil {
+		md = *args.AgentMD
+	}
+	wing := before.PalaceWing
+	if args.PalaceWing != nil {
+		wing = args.PalaceWing
+	}
+	return model, md, wing
 }

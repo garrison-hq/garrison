@@ -104,6 +104,21 @@ function pickStringArray(value: unknown): string[] {
   return [];
 }
 
+// pickStringMap coerces a payload value into a flat Record<string,string>.
+// Used for the M5.3 chat-mutation events' `extras` field (Rule 6 backstop:
+// extras carries only enum-shaped values like from_column/to_column,
+// agent_role_slug, etc. — never raw chat content).
+function pickStringMap(value: unknown): Record<string, string> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {};
+  }
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof v === 'string') out[k] = v;
+  }
+  return out;
+}
+
 // parseLiteralChannel handles the literal entries in KNOWN_CHANNELS.
 // Returns null when the row's channel is parameterised — parseChannel
 // then falls through to the regex matchers.
@@ -201,7 +216,7 @@ function chatMutationEvent(
     chatMessageId: pickString(payload.chatMessageId, payload.chat_message_id),
     affectedResourceId: pickString(payload.affectedResourceId, payload.affected_resource_id),
     affectedResourceType: pickString(payload.affectedResourceType, payload.affected_resource_type),
-    extras: pickRecord(payload.extras),
+    extras: pickStringMap(payload.extras),
   } as ActivityEvent;
 }
 
