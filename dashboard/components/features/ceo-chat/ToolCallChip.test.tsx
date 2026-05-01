@@ -101,4 +101,91 @@ describe('ToolCallChip', () => {
     const html = chip({ toolUseId: 'tu_1', toolName: 'postgres.query', args: {} });
     expect(html).toContain('data-testid="toolcall-chip"');
   });
+
+  it('renders ReadChipPreCall with mempalace.search summary', () => {
+    const html = chip({ toolUseId: 'tu_2', toolName: 'mempalace.search', args: {} });
+    expect(html).toContain('searched palace');
+  });
+
+  it('renders ReadChipPostCall with mempalace.search summary', () => {
+    const html = chip({
+      toolUseId: 'tu_2',
+      toolName: 'mempalace.search',
+      args: {},
+      result: { isError: false, payload: { detail: 'hits', is_error: false } },
+    });
+    expect(html).toContain('searched palace');
+    expect(html).toContain('postcall-read');
+  });
+
+  it('renders ReadChip with generic tool name fallback', () => {
+    const html = chip({ toolUseId: 'tu_3', toolName: 'docker.inspect', args: {} });
+    expect(html).toContain('called docker.inspect');
+  });
+
+  it('FailureChip falls back to "failed" when payload has no error_kind or detail', () => {
+    const html = chip({
+      toolUseId: 'tu_4',
+      toolName: 'garrison-mutate.spawn_agent',
+      args: {},
+      result: { isError: true, payload: { is_error: true } },
+    });
+    expect(html).toContain('— failed');
+  });
+
+  it('FailureChip uses detail when error_kind is missing', () => {
+    const html = chip({
+      toolUseId: 'tu_5',
+      toolName: 'postgres.query',
+      args: {},
+      result: { isError: true, payload: { detail: 'connection refused', is_error: true } },
+    });
+    expect(html).toContain('connection refused');
+  });
+
+  it('FailureChip handles non-object payloads gracefully', () => {
+    const html = chip({
+      toolUseId: 'tu_6',
+      toolName: 'postgres.query',
+      args: {},
+      result: { isError: true, payload: 'string-payload' },
+    });
+    expect(html).toContain('— failed');
+  });
+
+  it('MutateChipPostCall renders without a deep-link when no affected_resource_url', () => {
+    const html = chip({
+      toolUseId: 'tu_7',
+      toolName: 'garrison-mutate.edit_ticket',
+      args: {},
+      result: { isError: false, payload: { detail: 'updated', is_error: false } },
+    });
+    expect(html).toContain('postcall-mutate');
+    expect(html).toContain('edit_ticket ✓');
+    expect(html).not.toContain('<a ');
+  });
+
+  it('affectedResourceURL ignores non-string url values', () => {
+    const html = chip({
+      toolUseId: 'tu_8',
+      toolName: 'garrison-mutate.create_ticket',
+      args: {},
+      result: {
+        isError: false,
+        payload: { affected_resource_url: 12345, detail: 'ok', is_error: false },
+      },
+    });
+    expect(html).not.toContain('<a ');
+    expect(html).toContain('create_ticket ✓');
+  });
+
+  it('FailureChip on a non-mutation tool keeps full toolName (no prefix-strip)', () => {
+    const html = chip({
+      toolUseId: 'tu_9',
+      toolName: 'mempalace.search',
+      args: {},
+      result: { isError: true, payload: { error_kind: 'timeout', is_error: true } },
+    });
+    expect(html).toContain('mempalace.search — timeout');
+  });
 });
