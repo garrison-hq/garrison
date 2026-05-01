@@ -70,9 +70,13 @@ VALUES
   ('00000000-0000-0000-0000-0000000a0001',
    '00000000-0000-0000-0000-00000000d001',
    'engineer',
-   '# Engineer (dev-stack seed)' || chr(10) || 'Generalist; picks up unrouted todo tickets.',
+   '# Engineer (dev-stack seed)' || chr(10) || 'Generalist; M2.2 canonical workflow has engineer pick up at in_dev.',
    'claude-opus-4-7',
-   '["todo"]'::jsonb,
+   -- M2.2 retro shifted engineer.listens_for from todo → in_dev. The
+   -- supervisor's dispatcher in cmd/supervisor/main.go routes BOTH
+   -- channels to engineerHandler (back-compat for M1/M2.1 chaos tests),
+   -- so this is informational only — the actual routing is hardcoded.
+   '["in_dev"]'::jsonb,
    '["agent-md", "github-pr-authoring", "linear-ticket-hygiene"]'::jsonb,
    'wing_engineering',
    'active'),

@@ -84,9 +84,19 @@ func realCreateTicketHandler(ctx context.Context, deps Deps, raw json.RawMessage
 		}
 	}
 
+	// CEO-originated tickets default to in_dev — they're CEO-authored
+	// and ready for immediate engineering work. The todo column is for
+	// operator-staged tickets that need triage; landing CEO tickets at
+	// todo silently routes them through the M2.2 back-compat dispatch
+	// to the M1 hello-txt acceptance path (instead of the M2.2.1
+	// finalize tool path) and the engineer exits acceptance_failed.
+	// See A→Z smoke discovery 2026-05-01: CEO chat tickets at todo
+	// never finalize because the engineer's M2.2.1 finalize handler
+	// is wired for in_dev only. Operator can still override the column
+	// explicitly via the column_slug arg.
 	columnSlug := strings.TrimSpace(args.ColumnSlug)
 	if columnSlug == "" {
-		columnSlug = "todo"
+		columnSlug = "in_dev"
 	}
 	ticket, err := q.InsertChatTicket(ctx, store.InsertChatTicketParams{
 		DepartmentID:            deptID,
