@@ -148,7 +148,7 @@ The Supervisor↔Vault (not Agent↔Vault) commitment, the SkillHub-as-target-st
 CREATE TABLE companies (
   id UUID PRIMARY KEY,
   name TEXT NOT NULL,
-  company_md TEXT NOT NULL,      -- CEO's always-in-context document
+  -- Company.md content lives at s3://garrison-company/<companyId>/company.md in the MinIO sidecar (M5.4)
   mission TEXT, vision TEXT
 );
 
@@ -572,7 +572,9 @@ Some milestones carry genuine external unknowns — how a tool actually behaves 
 
 **M4 — Dashboard mutations.** Create tickets in UI, drag between columns, edit agent configs. Everything the operator does daily.
 
-**M5 — CEO chat (summoned).** Conversation panel, summon-per-message pattern. M5.1 ships the read-only backend (server actions, SSE producer, transcript reads, idle/restart sweeps). M5.2 ships the dashboard surface (three-pane layout, message stream, composer, multi-session UX, end/archive/delete affordances). **M5.3 — chat-driven mutations under autonomous-execution posture (no per-call operator approval)**: ships the `garrison-mutate` MCP server with a sealed 8-verb set across tickets/agents/hiring; threat-model amendment lands first per the M2.3 vault-threat-model-first pattern; tool-call chips surface every assistant tool call informatively (no per-call gates); concurrency conflicts resolve via `SELECT ... FOR UPDATE NOWAIT` mapped to `error_kind='ticket_state_changed'`; vault remains opaque to chat (M2.3 Rule 3 carryover). M5.4 ships the "WHAT THE CEO KNOWS" knowledge-base pane.
+**M5 — CEO chat (summoned).** Conversation panel, summon-per-message pattern. M5.1 ships the read-only backend (server actions, SSE producer, transcript reads, idle/restart sweeps). M5.2 ships the dashboard surface (three-pane layout, message stream, composer, multi-session UX, end/archive/delete affordances). **M5.3 — chat-driven mutations under autonomous-execution posture (no per-call operator approval)**: ships the `garrison-mutate` MCP server with a sealed 8-verb set across tickets/agents/hiring; threat-model amendment lands first per the M2.3 vault-threat-model-first pattern; tool-call chips surface every assistant tool call informatively (no per-call gates); concurrency conflicts resolve via `SELECT ... FOR UPDATE NOWAIT` mapped to `error_kind='ticket_state_changed'`; vault remains opaque to chat (M2.3 Rule 3 carryover). M5.4 ships the "WHAT THE CEO KNOWS" knowledge-base pane: tabbed surface for Company.md (MinIO-backed, CEO-editable) + recent palace writes + recent KG facts (read-only via supervisor-side proxy to MemPalace).
+
+> **Deployment topology after M5.4**: four-container Compose stack on `garrison-net` — supervisor + mempalace sidecar + socket-proxy + minio sidecar (digest-pinned, named-volume `garrison-minio-data`, scoped service-account credentials in Infisical, root creds env-on-container only). MinIO is internal-network only; no host port forwarding in production.
 
 **M6 — CEO ticket decomposition + hygiene checks.** CEO writes tickets from conversation. Hygiene dashboard shows thin/missing writes. Rate-limit back-off and cost-based throttling land here (M2.1 observes cost and rate-limit events; M6 acts on them).
 

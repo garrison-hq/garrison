@@ -45,3 +45,37 @@ describe('ARCHITECTURE.md M5.3 amendment', () => {
     expect(source).toContain('Chat ──► garrison-mutate MCP');
   });
 });
+
+describe('ARCHITECTURE.md M5.4 amendment', () => {
+  // Pins the M5.4 substrings per spec ARCH-1 + ARCH-2. Three amendments:
+  // schema-section MinIO reference; M5 build-plan M5.4 sentence;
+  // deployment-topology block listing the 4-container Compose stack.
+  it('removes the documented company_md column and references MinIO instead', () => {
+    const path = resolve(import.meta.dirname, '..', '..', 'ARCHITECTURE.md');
+    const source = readFileSync(path, 'utf-8');
+    expect(source).toContain(
+      's3://garrison-company/<companyId>/company.md in the MinIO sidecar (M5.4)'
+    );
+    // The previously-documented column must NOT appear in the schema
+    // block. (The string still appears elsewhere — in operator config
+    // examples — so we narrow the assertion to the M5.4-amended schema
+    // sentence.)
+    expect(source).not.toContain("company_md TEXT NOT NULL,      -- CEO's always-in-context document");
+  });
+
+  it('contains the M5.4 build-plan sentence with knowledge-base pane shape', () => {
+    const path = resolve(import.meta.dirname, '..', '..', 'ARCHITECTURE.md');
+    const source = readFileSync(path, 'utf-8');
+    expect(source).toContain(
+      'M5.4 ships the "WHAT THE CEO KNOWS" knowledge-base pane: tabbed surface for Company.md (MinIO-backed, CEO-editable) + recent palace writes + recent KG facts (read-only via supervisor-side proxy to MemPalace).'
+    );
+  });
+
+  it('contains the deployment-topology amendment naming MinIO as the 4th container', () => {
+    const path = resolve(import.meta.dirname, '..', '..', 'ARCHITECTURE.md');
+    const source = readFileSync(path, 'utf-8');
+    expect(source).toContain(
+      'four-container Compose stack on `garrison-net` — supervisor + mempalace sidecar + socket-proxy + minio sidecar'
+    );
+  });
+});
