@@ -124,9 +124,10 @@ test.describe('responsive', () => {
       // Topbar strip + composer + message stream stay visible across viewports.
       await expect(page.getByTestId('chat-topbar-strip')).toBeVisible();
 
-      // Right-pane KnowsPanePlaceholder: visible at >=1024px, hidden below.
+      // Right-pane KnowsPane (M5.4 — replaced KnowsPanePlaceholder):
+      // visible at >=1024px, hidden below.
       const knowsHidden = viewport.width < 1024;
-      const knows = page.locator('aside[aria-label="What the CEO knows (placeholder)"]');
+      const knows = page.locator('aside[aria-label="What the CEO knows"]');
       if (knowsHidden) {
         await expect(knows).toBeHidden();
       } else {

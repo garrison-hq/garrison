@@ -92,18 +92,34 @@ func (c *Client) objectKey() string {
 // GetCompanyMD fetches the current Company.md object. Returns
 // (content, etag, nil) on hit; (nil, "", nil) on 404 (FR-624 empty-
 // state); (nil, "", typed error) otherwise.
+//
+// minio-go's GetObject is lazy — it returns a handle without
+// performing the HTTP request; the actual error surfaces on Stat() /
+// Read(). NoSuchKey is checked at every error site below so the
+// FR-624 empty-state path returns (nil, "", nil) cleanly instead of
+// being misclassified as ErrMinIOUnreachable by the catch-all
+// classifier.
 func (c *Client) GetCompanyMD(ctx context.Context) ([]byte, string, error) {
 	obj, err := c.mc.GetObject(ctx, c.bucket, c.objectKey(), minio.GetObjectOptions{})
 	if err != nil {
+		if isNoSuchKey(err) {
+			return nil, "", nil
+		}
 		return nil, "", classifyMinIOErr(err)
 	}
 	defer obj.Close()
 	stat, err := obj.Stat()
 	if err != nil {
+		if isNoSuchKey(err) {
+			return nil, "", nil
+		}
 		return nil, "", classifyMinIOErr(err)
 	}
 	content, err := io.ReadAll(obj)
 	if err != nil {
+		if isNoSuchKey(err) {
+			return nil, "", nil
+		}
 		return nil, "", classifyMinIOErr(err)
 	}
 	return content, stat.ETag, nil
