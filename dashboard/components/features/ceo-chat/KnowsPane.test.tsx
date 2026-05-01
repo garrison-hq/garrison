@@ -14,6 +14,9 @@ vi.mock('@/lib/queries/knowsPane', () => ({
   getRecentPalaceWrites: vi.fn().mockResolvedValue({ writes: [], error: null }),
   getRecentKGFacts: vi.fn().mockResolvedValue({ facts: [], error: null }),
 }));
+vi.mock('next/navigation', () => ({
+  usePathname: () => '/chat/test',
+}));
 
 import { KnowsPane } from './KnowsPane';
 

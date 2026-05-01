@@ -23,7 +23,11 @@ export async function ChatShell({ children }: Readonly<{ children: ReactNode }>)
   const recentThreads = session
     ? await getRecentThreadsForCurrentUser(10).catch(() => [])
     : [];
-  const threads = recentThreads.map((r) => ({ id: r.id, threadNumber: r.threadNumber }));
+  const threads = recentThreads.map((r) => ({
+    id: r.id,
+    threadNumber: r.threadNumber,
+    startedAt: r.startedAt,
+  }));
 
   // (app) layout's <main> is now a flex-col container with min-h-0 and
   // overflow-auto, so flex-1 here resolves cleanly: the shell consumes

@@ -34,7 +34,9 @@
     "next-intl": "^4.9.1",
     "postgres": "^3.4.9",
     "react": "19.2.5",
-    "react-dom": "19.2.5"
+    "react-dom": "19.2.5",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
     "@playwright/test": "1.59.1",

@@ -35,21 +35,34 @@ export function ThreadHeader({
 }: Readonly<ThreadHeaderProps>) {
   return (
     <header
-      className="flex items-center gap-3 border-b border-border-1 bg-surface-1 px-4 py-2 min-w-0"
+      className="flex items-center gap-3 border-b border-border-1 bg-surface-1 px-5 py-2.5 min-w-0"
       data-testid="chat-thread-header"
     >
-      <div className="flex flex-col gap-0.5 min-w-0 flex-1">
-        <h2 className="text-text-1 text-sm font-medium truncate" data-testid="chat-thread-title">
-          {formatThreadTitle(threadNumber)}
-        </h2>
-        <p className="text-text-3 text-[11px] flex items-center gap-2 flex-wrap">
-          <span className="shrink-0">started {formatTimeAgo(startedAt)}</span>
-          <span className="text-text-4 shrink-0">·</span>
-          <span className="font-mono font-tabular shrink-0">{turnCount} turns</span>
-          <span className="text-text-4 shrink-0">·</span>
-          <CostBadge value={totalCostUsd} />
-        </p>
+      {/* M5.4 polish — single-row strip: mark · title · meta · overflow.
+          Matches the screen-overview "Recent transitions" density and
+          screen-ceo's thread-header reference at 40px height. */}
+      <div
+        aria-hidden
+        className="w-5 h-5 shrink-0 rounded font-mono text-[10px] grid place-items-center bg-surface-2 border border-border-1 text-accent"
+      >
+        C
       </div>
+      <h2
+        className="text-text-1 text-[13px] font-medium truncate shrink-0 flex items-center gap-1.5"
+        data-testid="chat-thread-title"
+      >
+        <span>CEO</span>
+        <span className="text-text-4" aria-hidden>·</span>
+        <span className="font-mono">{formatThreadTitle(threadNumber)}</span>
+      </h2>
+      <p className="text-text-3 text-[11px] font-mono font-tabular flex items-center gap-2 truncate min-w-0">
+        <span className="shrink-0">started {formatTimeAgo(startedAt)}</span>
+        <span className="text-text-4 shrink-0">·</span>
+        <span className="shrink-0">{turnCount} turns</span>
+        <span className="text-text-4 shrink-0">·</span>
+        <CostBadge value={totalCostUsd} />
+      </p>
+      <div className="flex-1" />
       <ThreadOverflowMenu sessionId={sessionId} status={status} isArchived={isArchived} />
     </header>
   );

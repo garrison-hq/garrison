@@ -60,19 +60,21 @@ export async function Sidebar() {
         />
       </Link>
 
-      {/* Persistent primary action — operator-driven ticket
+      {/* Persistent secondary action — operator-driven ticket
           creation per FR-025. Plain <a> (not next/link) so the
           navigation bypasses the @panel intercepting route, which
           matches /tickets/<segment> for the ticket-detail drawer
           and would otherwise capture /tickets/new and leave the
-          children slot stale. */}
+          children slot stale. Neutral styling (not the primary
+          accent) so the only saturated lime on the surface is the
+          composer's send button. */}
       <div className="px-3 pb-3">
         <a
           href="/tickets/new"
-          className="flex items-center justify-center gap-1.5 w-full px-3 py-2 rounded bg-accent text-white hover:bg-accent/90 text-[13px] font-medium"
+          className="flex items-center justify-center gap-1.5 w-full px-3 py-1.5 rounded bg-surface-2 hover:bg-surface-3 border border-border-1 hover:border-border-2 text-text-1 text-[12.5px] font-medium transition-colors"
           data-testid="sidebar-new-ticket"
         >
-          <span aria-hidden>+</span>
+          <span aria-hidden className="text-text-3">+</span>
           <span>New ticket</span>
         </a>
       </div>

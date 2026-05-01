@@ -7,15 +7,26 @@ function chip(entry: ToolCallEntry): string {
   return renderToString(<ToolCallChip entry={entry} />);
 }
 
+// Strip HTML tags + comment markers so assertions can match the
+// visible text shape (e.g. "▸ queried · postgres · …") regardless
+// of the per-span markup the chip emits.
+function visibleText(html: string): string {
+  return html
+    .replace(/<!--\s*-->/g, '')
+    .replace(/<[^>]+>/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 describe('ToolCallChip', () => {
-  it('renders ReadChipPreCall for postgres.query without result', () => {
+  it('renders a pre-call read chip with the queried-server result placeholder', () => {
     const html = chip({ toolUseId: 'tu_1', toolName: 'postgres.query', args: {} });
     expect(html).toContain('data-state="precall-read"');
     expect(html).toContain('aria-busy="true"');
-    expect(html).toContain('queried postgres');
+    expect(visibleText(html)).toMatch(/queried\s*postgres\s*·\s*…/);
   });
 
-  it('renders ReadChipPostCall for postgres.query with result', () => {
+  it('renders a post-call read chip with the ok result label', () => {
     const html = chip({
       toolUseId: 'tu_1',
       toolName: 'postgres.query',
@@ -24,9 +35,10 @@ describe('ToolCallChip', () => {
     });
     expect(html).toContain('data-state="postcall-read"');
     expect(html).not.toContain('aria-busy="true"');
+    expect(visibleText(html)).toMatch(/queried\s*postgres\s*·\s*ok/);
   });
 
-  it('renders MutateChipPreCall for garrison-mutate.create_ticket without result', () => {
+  it('renders a pre-call mutation chip with the verb-name target', () => {
     const html = chip({
       toolUseId: 'tu_1',
       toolName: 'garrison-mutate.create_ticket',
@@ -34,10 +46,10 @@ describe('ToolCallChip', () => {
     });
     expect(html).toContain('data-state="precall-mutate"');
     expect(html).toContain('aria-busy="true"');
-    expect(html).toContain('create_ticket'); // verb stripped of namespace prefix
+    expect(visibleText(html)).toMatch(/called\s*create_ticket\s*·\s*…/);
   });
 
-  it('renders MutateChipPostCall for garrison-mutate.create_ticket with result', () => {
+  it('renders a post-call mutation chip with ok result', () => {
     const html = chip({
       toolUseId: 'tu_1',
       toolName: 'garrison-mutate.create_ticket',
@@ -45,10 +57,10 @@ describe('ToolCallChip', () => {
       result: { isError: false, payload: { detail: 'created', is_error: false } },
     });
     expect(html).toContain('data-state="postcall-mutate"');
-    expect(html).toContain('create_ticket ✓');
+    expect(visibleText(html)).toMatch(/called\s*create_ticket\s*·\s*ok/);
   });
 
-  it('renders FailureChip for tool_result.isError=true', () => {
+  it('renders a failure chip with the error_kind as the result token', () => {
     const html = chip({
       toolUseId: 'tu_1',
       toolName: 'garrison-mutate.transition_ticket',
@@ -57,7 +69,7 @@ describe('ToolCallChip', () => {
     });
     expect(html).toContain('data-state="failure"');
     expect(html).toContain('role="alert"');
-    expect(html).toContain('ticket_state_changed');
+    expect(visibleText(html)).toMatch(/called\s*transition_ticket\s*·\s*ticket_state_changed/);
   });
 
   it('mutation post-call chips with affected_resource_url include a deep-link', () => {
@@ -87,7 +99,7 @@ describe('ToolCallChip', () => {
     expect(html).not.toContain('<button');
   });
 
-  it('failure chip has role=alert for screen-reader announcement', () => {
+  it('failure chip on a non-mutation tool has role=alert for screen-reader announcement', () => {
     const html = chip({
       toolUseId: 'tu_1',
       toolName: 'postgres.query',
@@ -102,58 +114,58 @@ describe('ToolCallChip', () => {
     expect(html).toContain('data-testid="toolcall-chip"');
   });
 
-  it('renders ReadChipPreCall with mempalace.search summary', () => {
+  it('renders mempalace pre-call as searched palace', () => {
     const html = chip({ toolUseId: 'tu_2', toolName: 'mempalace.search', args: {} });
-    expect(html).toContain('searched palace');
+    expect(visibleText(html)).toMatch(/searched\s*palace\s*·\s*…/);
   });
 
-  it('renders ReadChipPostCall with mempalace.search summary', () => {
+  it('renders mempalace post-call with ok result', () => {
     const html = chip({
       toolUseId: 'tu_2',
       toolName: 'mempalace.search',
       args: {},
       result: { isError: false, payload: { detail: 'hits', is_error: false } },
     });
-    expect(html).toContain('searched palace');
     expect(html).toContain('postcall-read');
+    expect(visibleText(html)).toMatch(/searched\s*palace\s*·\s*ok/);
   });
 
-  it('renders ReadChip with generic tool name fallback', () => {
+  it('falls back to "called <toolname>" for unknown tool families', () => {
     const html = chip({ toolUseId: 'tu_3', toolName: 'docker.inspect', args: {} });
-    expect(html).toContain('called docker.inspect');
+    expect(visibleText(html)).toMatch(/called\s*docker\.inspect\s*·\s*…/);
   });
 
-  it('FailureChip falls back to "failed" when payload has no error_kind or detail', () => {
+  it('failure chip falls back to "failed" when payload has no error_kind or detail', () => {
     const html = chip({
       toolUseId: 'tu_4',
       toolName: 'garrison-mutate.spawn_agent',
       args: {},
       result: { isError: true, payload: { is_error: true } },
     });
-    expect(html).toContain('— failed');
+    expect(visibleText(html)).toMatch(/spawn_agent\s*·\s*failed/);
   });
 
-  it('FailureChip uses detail when error_kind is missing', () => {
+  it('failure chip uses detail when error_kind is missing', () => {
     const html = chip({
       toolUseId: 'tu_5',
       toolName: 'postgres.query',
       args: {},
       result: { isError: true, payload: { detail: 'connection refused', is_error: true } },
     });
-    expect(html).toContain('connection refused');
+    expect(visibleText(html)).toMatch(/queried\s*postgres\s*·\s*connection refused/);
   });
 
-  it('FailureChip handles non-object payloads gracefully', () => {
+  it('failure chip handles non-object payloads gracefully', () => {
     const html = chip({
       toolUseId: 'tu_6',
       toolName: 'postgres.query',
       args: {},
       result: { isError: true, payload: 'string-payload' },
     });
-    expect(html).toContain('— failed');
+    expect(visibleText(html)).toMatch(/queried\s*postgres\s*·\s*failed/);
   });
 
-  it('MutateChipPostCall renders without a deep-link when no affected_resource_url', () => {
+  it('mutation post-call chips render without a deep-link when no affected_resource_url', () => {
     const html = chip({
       toolUseId: 'tu_7',
       toolName: 'garrison-mutate.edit_ticket',
@@ -161,7 +173,7 @@ describe('ToolCallChip', () => {
       result: { isError: false, payload: { detail: 'updated', is_error: false } },
     });
     expect(html).toContain('postcall-mutate');
-    expect(html).toContain('edit_ticket ✓');
+    expect(visibleText(html)).toMatch(/called\s*edit_ticket\s*·\s*ok/);
     expect(html).not.toContain('<a ');
   });
 
@@ -176,16 +188,16 @@ describe('ToolCallChip', () => {
       },
     });
     expect(html).not.toContain('<a ');
-    expect(html).toContain('create_ticket ✓');
+    expect(visibleText(html)).toMatch(/called\s*create_ticket\s*·\s*ok/);
   });
 
-  it('FailureChip on a non-mutation tool keeps full toolName (no prefix-strip)', () => {
+  it('failure chip on a non-mutation tool surfaces the server-specific verb', () => {
     const html = chip({
       toolUseId: 'tu_9',
       toolName: 'mempalace.search',
       args: {},
       result: { isError: true, payload: { error_kind: 'timeout', is_error: true } },
     });
-    expect(html).toContain('mempalace.search — timeout');
+    expect(visibleText(html)).toMatch(/searched\s*palace\s*·\s*timeout/);
   });
 });

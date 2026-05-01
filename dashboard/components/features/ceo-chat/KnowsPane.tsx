@@ -25,6 +25,9 @@ import { RecentThreadsBlock } from './RecentThreadsBlock';
 
 type Tab = 'company' | 'palace' | 'kg';
 
+// Sentence-case labels per M5.4 polish: the prior all-caps wall
+// (`COMPANY.MD / RECENT PALACE WRITES / KG RECENT FACTS`) read as a
+// banner row instead of a tab strip. Matches the screen-ceo reference.
 const TABS: ReadonlyArray<{ id: Tab; label: string }> = [
   { id: 'company', label: 'Company.md' },
   { id: 'palace', label: 'Recent palace writes' },
@@ -34,6 +37,7 @@ const TABS: ReadonlyArray<{ id: Tab; label: string }> = [
 interface ThreadRow {
   id: string;
   threadNumber: number;
+  startedAt: string;
 }
 
 interface Props {
@@ -51,10 +55,17 @@ export function KnowsPane({ threads }: Readonly<Props>) {
       data-testid="knows-pane"
       data-active-tab={active}
     >
+      {/* Header strip — labels the pane the way screen-overview labels
+          its right rail. Matches the chat thread header's 40px-ish
+          density so the right column doesn't look top-heavy. */}
+      <header className="flex items-center justify-between border-b border-border-1 px-4 py-2.5">
+        <h3 className="text-text-1 text-[12.5px] font-medium">What the CEO knows</h3>
+        <span className="text-text-3 text-[10.5px] font-mono font-tabular">context</span>
+      </header>
       <div
         role="tablist"
         aria-label="Knowledge-base sections"
-        className="flex border-b border-border-1"
+        className="flex border-b border-border-1 px-3"
       >
         {TABS.map((tab) => (
           <button
@@ -64,10 +75,10 @@ export function KnowsPane({ threads }: Readonly<Props>) {
             aria-selected={active === tab.id}
             data-testid={`knows-tab-${tab.id}`}
             className={
-              'flex-1 px-3 py-2 text-[11.5px] uppercase tracking-[0.06em] font-medium border-b-2 transition-colors ' +
+              'px-3 py-2 text-[12px] font-medium transition-colors -mb-px ' +
               (active === tab.id
-                ? 'text-text-1 border-info'
-                : 'text-text-3 border-transparent hover:text-text-2')
+                ? 'text-text-1 border-b-[1.5px] border-accent'
+                : 'text-text-3 border-b-[1.5px] border-transparent hover:text-text-2')
             }
             onClick={() => setActive(tab.id)}
           >
