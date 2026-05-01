@@ -36,7 +36,7 @@ export function RecentPalaceWritesTab() {
   }, [state.loaded]);
 
   useEffect(() => {
-    void fetchOnce();
+    fetchOnce().catch(() => {});
     // Run-on-mount only; subsequent runs come from the Refresh button.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -51,7 +51,9 @@ export function RecentPalaceWritesTab() {
         <button
           type="button"
           className="text-[12px] px-2 py-1 rounded border border-border-1 hover:bg-surface-2 disabled:opacity-50"
-          onClick={() => void fetchOnce()}
+          onClick={() => {
+            fetchOnce().catch(() => {});
+          }}
           disabled={state.isFetching}
           data-testid="palace-refresh"
         >

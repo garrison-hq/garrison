@@ -36,7 +36,7 @@ export function KGRecentFactsTab() {
   }, [state.loaded]);
 
   useEffect(() => {
-    void fetchOnce();
+    fetchOnce().catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -47,7 +47,9 @@ export function KGRecentFactsTab() {
         <button
           type="button"
           className="text-[12px] px-2 py-1 rounded border border-border-1 hover:bg-surface-2 disabled:opacity-50"
-          onClick={() => void fetchOnce()}
+          onClick={() => {
+            fetchOnce().catch(() => {});
+          }}
           disabled={state.isFetching}
           data-testid="kg-refresh"
         >

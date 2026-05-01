@@ -301,13 +301,7 @@ func runDaemon() int {
 		return healthServer.Serve(gctx)
 	})
 
-	// M5.4 — dashboardapi server runs only when wiring succeeded.
-	if dashboardAPIServer != nil {
-		g.Go(func() error {
-			logger.Info("dashboardapi server listening", "addr", fmt.Sprintf("0.0.0.0:%d", cfg.DashboardAPIPort))
-			return dashboardAPIServer.Serve(gctx)
-		})
-	}
+	startDashboardAPIServerIfWired(g, gctx, dashboardAPIServer, cfg, logger)
 
 	// M4 — agents.changed cache invalidator (T014 / FR-100).
 	// The dashboard's editAgent server action emits
@@ -521,6 +515,27 @@ func buildSharedPalaceClient(cfg *config.Config) *mempalace.Client {
 		Timeout:            10 * time.Second,
 		Exec:               dockerexec.RealDockerExec{DockerBin: cfg.DockerBin},
 	}
+}
+
+// startDashboardAPIServerIfWired registers the dashboardapi server's
+// Serve goroutine on the errgroup when buildDashboardAPIServer
+// produced a non-nil server (i.e., not in fake-agent mode and vault
+// is configured). Pulled out of runDaemon to keep its cognitive
+// complexity within Sonar's threshold.
+func startDashboardAPIServerIfWired(
+	g *errgroup.Group,
+	gctx context.Context,
+	srv *dashboardapi.Server,
+	cfg *config.Config,
+	logger *slog.Logger,
+) {
+	if srv == nil {
+		return
+	}
+	g.Go(func() error {
+		logger.Info("dashboardapi server listening", "addr", fmt.Sprintf("0.0.0.0:%d", cfg.DashboardAPIPort))
+		return srv.Serve(gctx)
+	})
 }
 
 // uuidString renders a pgtype.UUID as the canonical 8-4-4-4-12

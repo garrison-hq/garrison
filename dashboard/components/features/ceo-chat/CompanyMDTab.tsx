@@ -17,7 +17,7 @@ import { CompanyMDEditor } from './CompanyMDEditor';
 
 type Mode = 'view' | 'edit';
 
-interface CompanyMDError_State {
+interface CompanyMDErrorState {
   error: CompanyMDError;
   message?: string;
   patternCategory?: string;
@@ -30,8 +30,8 @@ export function CompanyMDTab() {
   const [loaded, setLoaded] = useState<string>('');
   const [etag, setEtag] = useState<string | null>(null);
   const [buffer, setBuffer] = useState<string>('');
-  const [loadError, setLoadError] = useState<CompanyMDError_State | null>(null);
-  const [saveError, setSaveError] = useState<CompanyMDError_State | null>(null);
+  const [loadError, setLoadError] = useState<CompanyMDErrorState | null>(null);
+  const [saveError, setSaveError] = useState<CompanyMDErrorState | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [savedHint, setSavedHint] = useState(false);
   const [confirmingCancel, setConfirmingCancel] = useState(false);
@@ -50,7 +50,7 @@ export function CompanyMDTab() {
   }, []);
 
   useEffect(() => {
-    void reload();
+    reload().catch(() => {});
   }, [reload]);
 
   function startEdit() {
@@ -133,7 +133,9 @@ export function CompanyMDTab() {
             <button
               type="button"
               className="text-[12px] px-2 py-1 rounded bg-info text-white hover:bg-info/90 disabled:opacity-50"
-              onClick={() => void commitSave()}
+              onClick={() => {
+                commitSave().catch(() => {});
+              }}
               disabled={isSaving}
             >
               {isSaving ? 'Saving…' : 'Save'}
@@ -148,16 +150,16 @@ export function CompanyMDTab() {
         ) : null}
 
         {savedHint ? (
-          <p className="text-[12px] text-success" role="status">
-            Saved.
-          </p>
+          <output className="text-[12px] text-success">Saved.</output>
         ) : null}
 
         {saveError ? (
           <ErrorBlock
             state={saveError}
             kind="save"
-            onRefreshAndDiscard={() => void refreshAndDiscard()}
+            onRefreshAndDiscard={() => {
+              refreshAndDiscard().catch(() => {});
+            }}
           />
         ) : null}
 
@@ -174,8 +176,8 @@ export function CompanyMDTab() {
         )}
 
         {confirmingCancel ? (
-          <div
-            role="dialog"
+          <dialog
+            open
             aria-label="Discard unsaved changes?"
             className="border border-border-1 rounded p-3 bg-surface-2"
           >
@@ -196,7 +198,7 @@ export function CompanyMDTab() {
                 Discard
               </button>
             </div>
-          </div>
+          </dialog>
         ) : null}
       </div>
     </section>
@@ -204,12 +206,12 @@ export function CompanyMDTab() {
 }
 
 interface ErrorBlockProps {
-  state: CompanyMDError_State;
-  kind: 'load' | 'save';
-  onRefreshAndDiscard?: () => void;
+  readonly state: CompanyMDErrorState;
+  readonly kind: 'load' | 'save';
+  readonly onRefreshAndDiscard?: () => void;
 }
 
-function ErrorBlock({ state, kind, onRefreshAndDiscard }: ErrorBlockProps) {
+function ErrorBlock({ state, kind, onRefreshAndDiscard }: Readonly<ErrorBlockProps>) {
   const headline = headlineForError(state.error);
   const body = bodyForError(state, kind);
   return (
@@ -260,7 +262,7 @@ function headlineForError(error: CompanyMDError): string {
   }
 }
 
-function bodyForError(state: CompanyMDError_State, kind: 'load' | 'save'): string {
+function bodyForError(state: CompanyMDErrorState, kind: 'load' | 'save'): string {
   const verb = kind === 'load' ? 'load' : 'save';
   switch (state.error) {
     case 'Stale':

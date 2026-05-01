@@ -13,12 +13,12 @@ import { markdown } from '@codemirror/lang-markdown';
 import { oneDark } from '@codemirror/theme-one-dark';
 
 export interface CompanyMDEditorProps {
-  value: string;
-  onChange: (next: string) => void;
-  readOnly: boolean;
+  readonly value: string;
+  readonly onChange: (next: string) => void;
+  readonly readOnly: boolean;
 }
 
-export function CompanyMDEditor({ value, onChange, readOnly }: CompanyMDEditorProps) {
+export function CompanyMDEditor({ value, onChange, readOnly }: Readonly<CompanyMDEditorProps>) {
   return (
     <div data-testid="company-md-editor" data-readonly={readOnly ? 'true' : 'false'}>
       <CodeMirror
