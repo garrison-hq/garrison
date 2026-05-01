@@ -10,7 +10,7 @@ WORKDIR /app
 
 # Install deps first to keep this layer cacheable across source edits.
 COPY package.json bun.lock ./
-RUN bun install --frozen-lockfile
+RUN bun install --frozen-lockfile --ignore-scripts
 
 # Copy build inputs only — explicit list keeps secrets, .env files,
 # .git, IDE state, and anything else a recursive copy would sweep
