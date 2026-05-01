@@ -14,8 +14,12 @@ const SESSION_COOKIE = 'better-auth.session_token';
 const DEFAULT_LIMIT = 30;
 
 function supervisorURL(path: string): string {
-  const base =
-    process.env.DASHBOARD_SUPERVISOR_API_URL ?? 'http://garrison-supervisor:8081';
+  const base = process.env.DASHBOARD_SUPERVISOR_API_URL;
+  if (!base) {
+    throw new Error(
+      'DASHBOARD_SUPERVISOR_API_URL is not set. Configure it in docker-compose.yml or .env (see dashboard/.env.example).',
+    );
+  }
   return `${base}${path}`;
 }
 
