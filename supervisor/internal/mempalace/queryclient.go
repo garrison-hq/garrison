@@ -319,47 +319,38 @@ func parseListDrawersResponse(stdout []byte) ([]DrawerEntry, error) {
 func drawersToEntries(items []listDrawersItem) []DrawerEntry {
 	out := make([]DrawerEntry, 0, len(items))
 	for _, it := range items {
-		id := it.ID
-		if id == "" {
-			id = it.DrawerID
-		}
-		wing := it.WingName
-		if wing == "" {
-			wing = it.Wing
-		}
-		room := it.RoomName
-		if room == "" {
-			room = it.Room
-		}
-		name := it.DrawerName
-		if name == "" {
-			name = it.Name
-		}
-		body := it.Preview
-		if body == "" {
-			body = it.ContentPreview
-		}
-		if body == "" {
-			body = it.Content
-		}
-		if body == "" {
-			body = it.Body
-		}
-		written := it.WrittenAt
-		if written.IsZero() {
-			written = it.CreatedAt
-		}
-		out = append(out, DrawerEntry{
-			ID:                  id,
-			DrawerName:          name,
-			RoomName:            room,
-			WingName:            wing,
-			SourceAgentRoleSlug: it.SourceAgentRoleSlug,
-			WrittenAt:           written,
-			BodyPreview:         body,
-		})
+		out = append(out, drawerItemToEntry(it))
 	}
 	return out
+}
+
+// drawerItemToEntry collapses the multi-name fallback chains
+// (id/drawer_id, wing/wing_name, …, content/preview/body) into a single
+// DrawerEntry. MemPalace 3.x has shipped several payload-shape variants;
+// the fallback order pins the most-recent canonical name first.
+func drawerItemToEntry(it listDrawersItem) DrawerEntry {
+	written := it.WrittenAt
+	if written.IsZero() {
+		written = it.CreatedAt
+	}
+	return DrawerEntry{
+		ID:                  firstNonEmpty(it.ID, it.DrawerID),
+		DrawerName:          firstNonEmpty(it.DrawerName, it.Name),
+		RoomName:            firstNonEmpty(it.RoomName, it.Room),
+		WingName:            firstNonEmpty(it.WingName, it.Wing),
+		SourceAgentRoleSlug: it.SourceAgentRoleSlug,
+		WrittenAt:           written,
+		BodyPreview:         firstNonEmpty(it.Preview, it.ContentPreview, it.Content, it.Body),
+	}
+}
+
+func firstNonEmpty(candidates ...string) string {
+	for _, c := range candidates {
+		if c != "" {
+			return c
+		}
+	}
+	return ""
 }
 
 // parseKGTimelineResponse consumes the newline-delimited JSON-RPC

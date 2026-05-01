@@ -18,6 +18,23 @@ interface State {
   lastError: KnowsPaneError | null;
 }
 
+// Error-kind → user-facing copy. Lifted out of JSX so the render path
+// stays a single conditional rather than a chain of nested ternaries.
+const ERROR_COPY: Record<KnowsPaneError, { title: string; body: string }> = {
+  AuthExpired: {
+    title: 'Your session expired',
+    body: 'Sign in again to load recent KG facts.',
+  },
+  NetworkError: {
+    title: 'Network error',
+    body: 'Could not reach the supervisor. Try Refresh.',
+  },
+  MempalaceUnreachable: {
+    title: 'MemPalace unreachable',
+    body: 'The supervisor could not reach the palace sidecar. Try Refresh.',
+  },
+};
+
 export function KGRecentFactsTab() {
   const [state, setState] = useState<State>({
     loaded: [],
@@ -65,28 +82,8 @@ export function KGRecentFactsTab() {
             data-error-kind={state.lastError}
             className="border border-err/40 bg-err/10 rounded px-3 py-2 text-[12px]"
           >
-            {state.lastError === 'AuthExpired' ? (
-              <>
-                <p className="text-err font-medium">Your session expired</p>
-                <p className="text-text-2">
-                  Sign in again to load recent KG facts.
-                </p>
-              </>
-            ) : state.lastError === 'NetworkError' ? (
-              <>
-                <p className="text-err font-medium">Network error</p>
-                <p className="text-text-2">
-                  Could not reach the supervisor. Try Refresh.
-                </p>
-              </>
-            ) : (
-              <>
-                <p className="text-err font-medium">MemPalace unreachable</p>
-                <p className="text-text-2">
-                  The supervisor could not reach the palace sidecar. Try Refresh.
-                </p>
-              </>
-            )}
+            <p className="text-err font-medium">{ERROR_COPY[state.lastError].title}</p>
+            <p className="text-text-2">{ERROR_COPY[state.lastError].body}</p>
           </div>
         ) : null}
 

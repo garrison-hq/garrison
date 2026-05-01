@@ -252,31 +252,7 @@ func runDaemon() int {
 		CustomerID: cfg.CustomerID(),
 	}
 
-	engineerHandler := func(ctx context.Context, eventID pgtype.UUID) error {
-		return spawn.Spawn(ctx, spawnDeps, eventID, "engineer")
-	}
-	qaEngineerHandler := func(ctx context.Context, eventID pgtype.UUID) error {
-		return spawn.Spawn(ctx, spawnDeps, eventID, "qa-engineer")
-	}
-	// M2.2 canonical: engineer listens_for shifted from `todo` to
-	// `in_dev` per Session 2026-04-23. The M1/M2.1 back-compat dispatch
-	// (`created.engineering.todo` → engineer) is OFF in production:
-	// `todo` is a real operator triage/backlog column with no auto-spawn
-	// (M5.4 retro 2026-05-01 — auto-spawn made `todo` unusable as a
-	// staging column because the M1 hello-txt acceptance path always
-	// failed). It's restored under GARRISON_M21_BACKCOMPAT_DISPATCH=1
-	// for the M1/M2.1 chaos+integration tests that pin the original
-	// todo-spawn contract; that env var is set only by test_helpers_test.go.
-	dispatchHandlers := map[string]events.Handler{
-		EngineeringInDevChannel:     engineerHandler,
-		EngineeringTodoInDevChannel: engineerHandler,
-		EngineeringQABounceChannel:  engineerHandler,
-		EngineeringQAReviewChannel:  qaEngineerHandler,
-	}
-	if os.Getenv("GARRISON_M21_BACKCOMPAT_DISPATCH") == "1" {
-		dispatchHandlers[EngineeringTicketChannel] = engineerHandler
-	}
-	dispatcher := events.NewDispatcher(dispatchHandlers)
+	dispatcher := buildDispatcher(spawnDeps)
 
 	healthServer := health.NewServer(cfg, state, pool)
 
@@ -542,6 +518,31 @@ func buildSharedPalaceClient(cfg *config.Config) *mempalace.Client {
 		Timeout:            10 * time.Second,
 		Exec:               dockerexec.RealDockerExec{DockerBin: cfg.DockerBin},
 	}
+}
+
+// buildDispatcher composes the channel→handler map for events.Dispatcher.
+// M2.2 canonical channels are always wired; the M1/M2.1 back-compat
+// `created.engineering.todo` channel is restored under
+// GARRISON_M21_BACKCOMPAT_DISPATCH=1 so the chaos+integration test suite
+// can keep pinning the original todo-spawn contract while production
+// keeps `todo` as a real operator triage column.
+func buildDispatcher(spawnDeps spawn.Deps) *events.Dispatcher {
+	engineerHandler := func(ctx context.Context, eventID pgtype.UUID) error {
+		return spawn.Spawn(ctx, spawnDeps, eventID, "engineer")
+	}
+	qaEngineerHandler := func(ctx context.Context, eventID pgtype.UUID) error {
+		return spawn.Spawn(ctx, spawnDeps, eventID, "qa-engineer")
+	}
+	handlers := map[string]events.Handler{
+		EngineeringInDevChannel:     engineerHandler,
+		EngineeringTodoInDevChannel: engineerHandler,
+		EngineeringQABounceChannel:  engineerHandler,
+		EngineeringQAReviewChannel:  qaEngineerHandler,
+	}
+	if os.Getenv("GARRISON_M21_BACKCOMPAT_DISPATCH") == "1" {
+		handlers[EngineeringTicketChannel] = engineerHandler
+	}
+	return events.NewDispatcher(handlers)
 }
 
 // chatInternalDatabaseURL returns the chat-container-side full-perms
