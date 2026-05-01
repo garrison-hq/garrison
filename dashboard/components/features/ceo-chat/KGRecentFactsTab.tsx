@@ -36,9 +36,12 @@ const ERROR_COPY: Record<KnowsPaneError, { title: string; body: string }> = {
 };
 
 export function KGRecentFactsTab() {
+  // See RecentPalaceWritesTab — isFetching starts false so the SSR
+  // Refresh button matches the client first paint. useEffect flips it
+  // to true post-hydration.
   const [state, setState] = useState<State>({
     loaded: [],
-    isFetching: true,
+    isFetching: false,
     lastError: null,
   });
 

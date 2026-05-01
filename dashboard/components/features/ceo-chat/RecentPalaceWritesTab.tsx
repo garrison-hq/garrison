@@ -36,9 +36,17 @@ const ERROR_COPY: Record<KnowsPaneError, { title: string; body: string }> = {
 };
 
 export function RecentPalaceWritesTab() {
+  // M5.4 retro: isFetching starts false so the SSR-rendered Refresh
+  // button (disabled={null}) matches the client's first paint. The
+  // useEffect below flips it true the moment fetchOnce runs, AFTER
+  // hydration completes. With isFetching=true as the initial value we
+  // observed a hydration mismatch — React 19 / Next.js 16 hydrate the
+  // KnowsPane's display:none tabs lazily, and by the time the hidden
+  // subtree was hydrated isFetching had already settled to false on
+  // the live tree, leaving the SSR HTML stale.
   const [state, setState] = useState<State>({
     loaded: [],
-    isFetching: true,
+    isFetching: false,
     lastError: null,
   });
 

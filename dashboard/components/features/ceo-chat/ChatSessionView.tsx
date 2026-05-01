@@ -65,6 +65,11 @@ export function ChatSessionView({
   const router = useRouter();
   const stream = useChatStream(sessionId);
   const [refocusKey, setRefocusKey] = useState(0);
+  // Bumped on every successful operator send so MessageStream can
+  // force-scroll to the new message; without this, an operator who
+  // was reading older turns sees a "↓ N new" pill on the assistant
+  // terminal instead of being moved to their own outgoing message.
+  const [scrollSignal, setScrollSignal] = useState(0);
   // palaceAgeMs starts from the server-rendered initial value and gets
   // refreshed client-side on each terminal commit. router.refresh()
   // alone doesn't propagate quickly enough in practice — the chip
@@ -165,6 +170,7 @@ export function ChatSessionView({
             ) : null
           }
           modelBadge={modelBadge}
+          scrollSignal={scrollSignal}
         />
       )}
       <Composer
@@ -174,7 +180,10 @@ export function ChatSessionView({
         latestErrorKind={latestErrorKind}
         palaceAgeMs={livePalaceAgeMs}
         refocusKey={refocusKey}
-        onSent={() => router.refresh()}
+        onSent={() => {
+          setScrollSignal((s) => s + 1);
+          router.refresh();
+        }}
       />
     </>
   );
