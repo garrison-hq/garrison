@@ -24,7 +24,7 @@ const (
 	// Pinned by digest (matches docker-compose.yml + the dashboard
 	// Playwright job's Pre-pull step in .github/workflows/ci.yml).
 	// Per spike §F1.
-	testMinIOImage      = "minio/minio@sha256:69b2ec208575b69597784255eec6fa6a2985ee9e1a47f4411a51f7f5fdd193a9"
+	testMinIOImage      = "minio/minio@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e"
 	testMinIORootUser   = "spike-user"
 	testMinIORootPasswd = "spike-password-123"
 	testCompanyID       = "00000000-0000-0000-0000-000000000001"

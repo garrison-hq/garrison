@@ -108,7 +108,7 @@ services:
   # are env-on-container only; supervisor uses a scoped service account
   # whose creds live in Infisical (see ops-checklist M5.4 section).
   minio:
-    image: minio/minio@sha256:69b2ec208575b69597784255eec6fa6a2985ee9e1a47f4411a51f7f5fdd193a9
+    image: minio/minio@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e
     container_name: garrison-minio
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:?MINIO_ROOT_USER required}

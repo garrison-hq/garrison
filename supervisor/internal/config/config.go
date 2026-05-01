@@ -448,7 +448,16 @@ func Load() (*Config, error) {
 		}
 	}
 
-	// M5.4 — MinIO sidecar + dashboard-facing HTTP server.
+	// M5.4 — MinIO sidecar + dashboard-facing HTTP server. Gated on
+	// vault availability: when GARRISON_INFISICAL_ADDR is unset
+	// (M2.1/M2.2 chaos test environments) the supervisor skips the
+	// dashboardapi + objstore wiring entirely, so requiring MinIO env
+	// vars there would block tests that pre-date M5.4 from running.
+	// Mirrors the buildObjstoreClient graceful-degrade path in
+	// cmd/supervisor/main.go.
+	if cfg.infisicalAddr == "" {
+		return cfg, nil
+	}
 	cfg.MinIOEndpoint = os.Getenv("GARRISON_MINIO_ENDPOINT")
 	if cfg.MinIOEndpoint == "" {
 		return nil, fmt.Errorf("config: GARRISON_MINIO_ENDPOINT is required (e.g. garrison-minio:9000)")
