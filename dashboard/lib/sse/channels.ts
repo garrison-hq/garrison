@@ -37,6 +37,20 @@ export const KNOWN_CHANNELS = [
   'work.ticket.edited',
   'work.agent.edited',
   'work.chat.session_deleted',
+  // M5.3 chat-driven mutation channels (chat-namespaced; FR-460 + FR-481).
+  'work.chat.ticket.created',
+  'work.chat.ticket.edited',
+  'work.chat.ticket.transitioned',
+  'work.chat.agent.paused',
+  'work.chat.agent.resumed',
+  'work.chat.agent.spawned',
+  'work.chat.agent.config_edited',
+  'work.chat.hiring.proposed',
+  // M5.3 closes the M5.2 retro carryover (FR-462) — the M5.1 chat
+  // lifecycle channels gain EventRow rendering.
+  'work.chat.session_started',
+  'work.chat.message_sent',
+  'work.chat.session_ended',
 ] as const;
 export type KnownChannel = (typeof KNOWN_CHANNELS)[number];
 
@@ -90,6 +104,21 @@ function pickStringArray(value: unknown): string[] {
   return [];
 }
 
+// pickStringMap coerces a payload value into a flat Record<string,string>.
+// Used for the M5.3 chat-mutation events' `extras` field (Rule 6 backstop:
+// extras carries only enum-shaped values like from_column/to_column,
+// agent_role_slug, etc. — never raw chat content).
+function pickStringMap(value: unknown): Record<string, string> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {};
+  }
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof v === 'string') out[k] = v;
+  }
+  return out;
+}
+
 // parseLiteralChannel handles the literal entries in KNOWN_CHANNELS.
 // Returns null when the row's channel is parameterised — parseChannel
 // then falls through to the regex matchers.
@@ -126,9 +155,69 @@ function parseLiteralChannel(
         chatSessionId: pickString(payload.chat_session_id, payload.chatSessionId),
         actorUserId: pickString(payload.actor_user_id, payload.actorUserId),
       };
+    // M5.3 chat-driven mutation channels (FR-461 + FR-463 — IDs only).
+    case 'work.chat.ticket.created':
+      return chatMutationEvent('chat.ticket.created', row.id, at, payload);
+    case 'work.chat.ticket.edited':
+      return chatMutationEvent('chat.ticket.edited', row.id, at, payload);
+    case 'work.chat.ticket.transitioned':
+      return chatMutationEvent('chat.ticket.transitioned', row.id, at, payload);
+    case 'work.chat.agent.paused':
+      return chatMutationEvent('chat.agent.paused', row.id, at, payload);
+    case 'work.chat.agent.resumed':
+      return chatMutationEvent('chat.agent.resumed', row.id, at, payload);
+    case 'work.chat.agent.spawned':
+      return chatMutationEvent('chat.agent.spawned', row.id, at, payload);
+    case 'work.chat.agent.config_edited':
+      return chatMutationEvent('chat.agent.config_edited', row.id, at, payload);
+    case 'work.chat.hiring.proposed':
+      return chatMutationEvent('chat.hiring.proposed', row.id, at, payload);
+    // M5.3 closes the M5.2 retro carryover for chat lifecycle channels.
+    case 'work.chat.session_started':
+      return {
+        kind: 'chat.session_started',
+        eventId: row.id, at,
+        chatSessionId: pickString(payload.chat_session_id, payload.chatSessionId),
+      };
+    case 'work.chat.message_sent':
+      return {
+        kind: 'chat.message_sent',
+        eventId: row.id, at,
+        chatSessionId: pickString(payload.chat_session_id, payload.chatSessionId),
+        chatMessageId: pickString(payload.chat_message_id, payload.chatMessageId),
+      };
+    case 'work.chat.session_ended':
+      return {
+        kind: 'chat.session_ended',
+        eventId: row.id, at,
+        chatSessionId: pickString(payload.chat_session_id, payload.chatSessionId),
+      };
     default:
       return null;
   }
+}
+
+// chatMutationEvent constructs the M5.3 chat-mutation ActivityEvent
+// shape from the pg_notify payload. All mutation channels share the
+// same payload shape (per Rule 6 backstop): chat_session_id,
+// chat_message_id, verb, optional affected_resource_id +
+// affected_resource_type, optional extras as a flat string map.
+function chatMutationEvent(
+  kind: ActivityEvent['kind'],
+  eventId: string,
+  at: string,
+  payload: Record<string, unknown>,
+): ActivityEvent {
+  return {
+    kind,
+    eventId,
+    at,
+    chatSessionId: pickString(payload.chatSessionId, payload.chat_session_id),
+    chatMessageId: pickString(payload.chatMessageId, payload.chat_message_id),
+    affectedResourceId: pickString(payload.affectedResourceId, payload.affected_resource_id),
+    affectedResourceType: pickString(payload.affectedResourceType, payload.affected_resource_type),
+    extras: pickStringMap(payload.extras),
+  } as ActivityEvent;
 }
 
 export function parseChannel(row: OutboxRow): ActivityEvent {

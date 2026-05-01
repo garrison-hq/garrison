@@ -122,4 +122,47 @@ describe('MessageBubble', () => {
     expect(v).toContain('garrison-cursor');
     expect(v).toContain('hello');
   });
+
+  // M5.3 — tool-call chips render after the text content when toolCalls
+  // is non-empty. The chip-list block is M5.3-new (FR-451).
+  it('renders the toolcall-chip-list when toolCalls is non-empty', () => {
+    const html = renderToString(
+      <MessageBubble
+        role="assistant"
+        status="completed"
+        content="result text"
+        toolCalls={[
+          { toolUseId: 'tu_1', toolName: 'postgres.query', args: {} },
+          { toolUseId: 'tu_2', toolName: 'garrison-mutate.create_ticket', args: {} },
+        ]}
+      />,
+    );
+    expect(html).toContain('toolcall-chip-list');
+    // Both chips render.
+    expect((html.match(/data-testid="toolcall-chip"/g) ?? []).length).toBe(2);
+  });
+
+  it('omits the chip-list block on operator messages even with toolCalls', () => {
+    const html = renderToString(
+      <MessageBubble
+        role="operator"
+        status="completed"
+        content="hi"
+        toolCalls={[{ toolUseId: 'tu_x', toolName: 'postgres.query', args: {} }]}
+      />,
+    );
+    expect(html).not.toContain('toolcall-chip-list');
+  });
+
+  it('omits the chip-list block when toolCalls is an empty array', () => {
+    const html = renderToString(
+      <MessageBubble
+        role="assistant"
+        status="completed"
+        content="hi"
+        toolCalls={[]}
+      />,
+    );
+    expect(html).not.toContain('toolcall-chip-list');
+  });
 });

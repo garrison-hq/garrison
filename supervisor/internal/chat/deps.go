@@ -100,6 +100,13 @@ type Deps struct {
 	// rule 6. Reused from spawn.TerminalWriteGrace at construction.
 	TerminalWriteGrace time.Duration
 
+	// ToolCallCeiling caps the per-turn tool_use count
+	// (chat-threat-model.md Rule 4). When exceeded, the supervisor
+	// emits ErrorToolCallCeilingReached + terminates the turn. Default
+	// 50 if unset; configurable via GARRISON_CHAT_MAX_TOOL_CALLS_PER_TURN
+	// at the cmd/supervisor wiring layer.
+	ToolCallCeiling int
+
 	// ShutdownSignalGrace bounds the SIGTERM-to-SIGKILL escalation
 	// window for the chat docker subprocess. AGENTS.md concurrency
 	// rule 7. Reused from spawn.ShutdownSignalGrace.

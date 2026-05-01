@@ -26,3 +26,22 @@ describe('ARCHITECTURE.md M5 amendment', () => {
     }
   });
 });
+
+describe('ARCHITECTURE.md M5.3 amendment', () => {
+  // Pins the M5.3 substrings per FR-500 + FR-501. Substring-match so
+  // future edits to other parts of the architecture doc don't break
+  // the test from line drift.
+  it('contains the M5.3 autonomous-execution posture substring', () => {
+    const path = resolve(import.meta.dirname, '..', '..', 'ARCHITECTURE.md');
+    const source = readFileSync(path, 'utf-8');
+    expect(source).toContain(
+      'M5.3 — chat-driven mutations under autonomous-execution posture (no per-call operator approval)'
+    );
+  });
+
+  it('contains the chat → garrison-mutate diagram substring', () => {
+    const path = resolve(import.meta.dirname, '..', '..', 'ARCHITECTURE.md');
+    const source = readFileSync(path, 'utf-8');
+    expect(source).toContain('Chat ──► garrison-mutate MCP');
+  });
+});

@@ -101,6 +101,7 @@ Supervisor ──► Agent container (spawn)      ✓  env-var injection only (v
 Agent      ──► Postgres (via pgmcp)         ✓  read-only, garrison_agent_ro role
 Agent      ──► MemPalace (via MCP)          ✓  read + write, wing-scoped
 Agent      ──► finalize_ticket MCP          ✓  single tool, transactional, only commit path
+Chat ──► garrison-mutate MCP                ✓  sealed 8-verb set, transactional per call, autonomous-execution posture (M5.3)
 Agent      ──► Vault                        ✗  FORBIDDEN — vault is opaque to agents
                                                  (Rule 3: mcpconfig.CheckExtraServers blocks
                                                   any agent.mcp_config referencing the vault)
@@ -571,7 +572,7 @@ Some milestones carry genuine external unknowns — how a tool actually behaves 
 
 **M4 — Dashboard mutations.** Create tickets in UI, drag between columns, edit agent configs. Everything the operator does daily.
 
-**M5 — CEO chat (summoned).** Conversation panel, summon-per-message pattern. M5.1 ships the read-only backend (server actions, SSE producer, transcript reads, idle/restart sweeps). M5.2 ships the dashboard surface (three-pane layout, message stream, composer, multi-session UX, end/archive/delete affordances). M5.3 adds chat-driven mutations behind a threat-model amendment. M5.4 ships the "WHAT THE CEO KNOWS" knowledge-base pane.
+**M5 — CEO chat (summoned).** Conversation panel, summon-per-message pattern. M5.1 ships the read-only backend (server actions, SSE producer, transcript reads, idle/restart sweeps). M5.2 ships the dashboard surface (three-pane layout, message stream, composer, multi-session UX, end/archive/delete affordances). **M5.3 — chat-driven mutations under autonomous-execution posture (no per-call operator approval)**: ships the `garrison-mutate` MCP server with a sealed 8-verb set across tickets/agents/hiring; threat-model amendment lands first per the M2.3 vault-threat-model-first pattern; tool-call chips surface every assistant tool call informatively (no per-call gates); concurrency conflicts resolve via `SELECT ... FOR UPDATE NOWAIT` mapped to `error_kind='ticket_state_changed'`; vault remains opaque to chat (M2.3 Rule 3 carryover). M5.4 ships the "WHAT THE CEO KNOWS" knowledge-base pane.
 
 **M6 — CEO ticket decomposition + hygiene checks.** CEO writes tickets from conversation. Hygiene dashboard shows thin/missing writes. Rate-limit back-off and cost-based throttling land here (M2.1 observes cost and rate-limit events; M6 acts on them).
 

@@ -14,6 +14,7 @@ sql:
       - ../migrations/20260427000013_m4_agents_updated_at.sql
       - ../migrations/20260428000015_m5_1_chat_backend.sql
       - ../migrations/20260429000016_m5_2_chat_archive_and_cascade.sql
+      - ../migrations/20260430000000_m5_3_chat_driven_mutations.sql
     gen:
       go:
         package: store

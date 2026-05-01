@@ -48,7 +48,17 @@ const (
 	// Shutdown / restart path
 	ErrorSupervisorShutdown ErrorKind = "supervisor_shutdown"
 	ErrorSupervisorRestart  ErrorKind = "supervisor_restart"
+
+	// M5.3 chat-policy / chat-driven-mutation runtime errors. The
+	// ceiling-reached value mirrors garrisonmutate.ErrToolCallCeilingReached
+	// so the chat_messages.error_kind and the chat_mutation_audit.outcome
+	// CHECK constraint stay in lock-step.
+	ErrorToolCallCeilingReached ErrorKind = "tool_call_ceiling_reached"
 )
+
+// ChatErrorToolCallCeilingReached is the alias used by the policy /
+// transport for emitting the M5.3 ceiling SSE error frame.
+const ChatErrorToolCallCeilingReached = ErrorToolCallCeilingReached
 
 // BuildMCPErrorKind composes the mcp_<server>_<status> form for the
 // MCP-health bail path (FR-031). server is the MCP server name from

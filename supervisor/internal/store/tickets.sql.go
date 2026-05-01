@@ -12,7 +12,7 @@ import (
 )
 
 const getTicketByID = `-- name: GetTicketByID :one
-SELECT id, department_id, objective, created_at, column_slug, acceptance_criteria, metadata, origin FROM tickets WHERE id = $1
+SELECT id, department_id, objective, created_at, column_slug, acceptance_criteria, metadata, origin, created_via_chat_session_id FROM tickets WHERE id = $1
 `
 
 func (q *Queries) GetTicketByID(ctx context.Context, id pgtype.UUID) (Ticket, error) {
@@ -27,6 +27,77 @@ func (q *Queries) GetTicketByID(ctx context.Context, id pgtype.UUID) (Ticket, er
 		&i.AcceptanceCriteria,
 		&i.Metadata,
 		&i.Origin,
+		&i.CreatedViaChatSessionID,
+	)
+	return i, err
+}
+
+const getTicketColumnAndDept = `-- name: GetTicketColumnAndDept :one
+SELECT column_slug, department_id FROM tickets WHERE id = $1
+`
+
+type GetTicketColumnAndDeptRow struct {
+	ColumnSlug   string
+	DepartmentID pgtype.UUID
+}
+
+// Pre-transition snapshot used by transition_ticket: returns the
+// current column_slug + department_id so the verb can compute
+// from_column for the audit row + ticket_transitions row.
+func (q *Queries) GetTicketColumnAndDept(ctx context.Context, id pgtype.UUID) (GetTicketColumnAndDeptRow, error) {
+	row := q.db.QueryRow(ctx, getTicketColumnAndDept, id)
+	var i GetTicketColumnAndDeptRow
+	err := row.Scan(&i.ColumnSlug, &i.DepartmentID)
+	return i, err
+}
+
+const insertChatTicket = `-- name: InsertChatTicket :one
+INSERT INTO tickets (
+    department_id, objective, acceptance_criteria, column_slug,
+    metadata, origin, created_via_chat_session_id
+)
+VALUES ($1, $2, $3, $4, $5, 'ceo_chat', $6)
+RETURNING id, department_id, objective, created_at, column_slug, acceptance_criteria, metadata, origin, created_via_chat_session_id
+`
+
+type InsertChatTicketParams struct {
+	DepartmentID            pgtype.UUID
+	Objective               string
+	AcceptanceCriteria      *string
+	ColumnSlug              string
+	Metadata                []byte
+	CreatedViaChatSessionID pgtype.UUID
+}
+
+// M5.3 garrison-mutate.create_ticket. Writes a ticket row with
+// origin='ceo_chat' and the FK back to the originating chat session
+// so forensic queries can join chat_session→tickets without
+// needing chat_mutation_audit. Caller is the garrison-mutate verb's
+// transaction; the audit row INSERT runs in the same tx.
+// column_slug + metadata use NULLABLE sentinel inputs so the verb can
+// pass NULL to mean "use default"; the verb resolves "todo" / "{}"
+// before calling rather than relying on COALESCE-on-cast SQL that
+// confuses sqlc's parameter-name inference.
+func (q *Queries) InsertChatTicket(ctx context.Context, arg InsertChatTicketParams) (Ticket, error) {
+	row := q.db.QueryRow(ctx, insertChatTicket,
+		arg.DepartmentID,
+		arg.Objective,
+		arg.AcceptanceCriteria,
+		arg.ColumnSlug,
+		arg.Metadata,
+		arg.CreatedViaChatSessionID,
+	)
+	var i Ticket
+	err := row.Scan(
+		&i.ID,
+		&i.DepartmentID,
+		&i.Objective,
+		&i.CreatedAt,
+		&i.ColumnSlug,
+		&i.AcceptanceCriteria,
+		&i.Metadata,
+		&i.Origin,
+		&i.CreatedViaChatSessionID,
 	)
 	return i, err
 }
@@ -34,7 +105,7 @@ func (q *Queries) GetTicketByID(ctx context.Context, id pgtype.UUID) (Ticket, er
 const insertTicket = `-- name: InsertTicket :one
 INSERT INTO tickets (department_id, objective)
 VALUES ($1, $2)
-RETURNING id, department_id, objective, created_at, column_slug, acceptance_criteria, metadata, origin
+RETURNING id, department_id, objective, created_at, column_slug, acceptance_criteria, metadata, origin, created_via_chat_session_id
 `
 
 type InsertTicketParams struct {
@@ -54,6 +125,7 @@ func (q *Queries) InsertTicket(ctx context.Context, arg InsertTicketParams) (Tic
 		&i.AcceptanceCriteria,
 		&i.Metadata,
 		&i.Origin,
+		&i.CreatedViaChatSessionID,
 	)
 	return i, err
 }
@@ -78,6 +150,34 @@ func (q *Queries) InsertTicketTransition(ctx context.Context, arg InsertTicketTr
 		arg.ToColumn,
 		arg.TriggeredByAgentInstanceID,
 	)
+	var id pgtype.UUID
+	err := row.Scan(&id)
+	return id, err
+}
+
+const lockTicketForUpdate = `-- name: LockTicketForUpdate :one
+SELECT id FROM tickets WHERE id = $1 FOR UPDATE NOWAIT
+`
+
+// M5.3 concurrent-mutation conflict resolution per chat-threat-model.md
+// Rule 4 + plan §4.3. SELECT ... FOR UPDATE NOWAIT returns immediately
+// with PostgreSQL error 55P03 (lock_not_available) if another tx holds
+// the row lock. The verb maps that error to ErrTicketStateChanged.
+func (q *Queries) LockTicketForUpdate(ctx context.Context, id pgtype.UUID) (pgtype.UUID, error) {
+	row := q.db.QueryRow(ctx, lockTicketForUpdate, id)
+	err := row.Scan(&id)
+	return id, err
+}
+
+const selectDepartmentIDBySlug = `-- name: SelectDepartmentIDBySlug :one
+SELECT id FROM departments WHERE slug = $1
+`
+
+// garrison-mutate verbs accept department_slug from the chat assistant;
+// internal queries use department_id (UUID). Resolves the slug→id
+// before INSERT/UPDATE; returns no rows if the slug doesn't exist.
+func (q *Queries) SelectDepartmentIDBySlug(ctx context.Context, slug string) (pgtype.UUID, error) {
+	row := q.db.QueryRow(ctx, selectDepartmentIDBySlug, slug)
 	var id pgtype.UUID
 	err := row.Scan(&id)
 	return id, err
@@ -110,5 +210,34 @@ type UpdateTicketColumnSlugParams struct {
 
 func (q *Queries) UpdateTicketColumnSlug(ctx context.Context, arg UpdateTicketColumnSlugParams) error {
 	_, err := q.db.Exec(ctx, updateTicketColumnSlug, arg.ID, arg.ColumnSlug)
+	return err
+}
+
+const updateTicketEditableFields = `-- name: UpdateTicketEditableFields :exec
+UPDATE tickets
+   SET objective = $1,
+       acceptance_criteria = $2,
+       metadata = $3
+ WHERE id = $4
+`
+
+type UpdateTicketEditableFieldsParams struct {
+	Objective          string
+	AcceptanceCriteria *string
+	Metadata           []byte
+	ID                 pgtype.UUID
+}
+
+// garrison-mutate.edit_ticket: partial update of operator-editable
+// fields. The verb resolves COALESCE semantics on the Go side: it
+// reads the before-state, merges with the args, and passes the
+// final values here. metadata is JSONB; the Go side handles merge.
+func (q *Queries) UpdateTicketEditableFields(ctx context.Context, arg UpdateTicketEditableFieldsParams) error {
+	_, err := q.db.Exec(ctx, updateTicketEditableFields,
+		arg.Objective,
+		arg.AcceptanceCriteria,
+		arg.Metadata,
+		arg.ID,
+	)
 	return err
 }

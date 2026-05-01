@@ -195,4 +195,92 @@ describe('ChatStreamMachine', () => {
     ChatStreamMachine.terminal(store, JSON.stringify({ status: 'completed', content: 'x' }));
     expect(store.terminals.size).toBe(0);
   });
+
+  // M5.3 tool-call observability tests (FR-450 / FR-451 / FR-447).
+  it('useChatStream surfaces tool_use variants', () => {
+    const store = emptyStore();
+    ChatStreamMachine.toolUse(
+      store,
+      JSON.stringify({
+        message_id: 'm-1',
+        tool_use_id: 'tu_1',
+        tool_name: 'garrison-mutate.create_ticket',
+        args: { objective: 'Fix kanban drag' },
+      }),
+    );
+    const list = store.toolCalls.get('m-1');
+    expect(list).toHaveLength(1);
+    expect(list?.[0].toolUseId).toBe('tu_1');
+    expect(list?.[0].toolName).toBe('garrison-mutate.create_ticket');
+    expect(list?.[0].result).toBeUndefined();
+  });
+
+  it('useChatStream surfaces tool_result variants', () => {
+    const store = emptyStore();
+    ChatStreamMachine.toolUse(
+      store,
+      JSON.stringify({
+        message_id: 'm-1',
+        tool_use_id: 'tu_1',
+        tool_name: 'garrison-mutate.create_ticket',
+      }),
+    );
+    ChatStreamMachine.toolResult(
+      store,
+      JSON.stringify({
+        message_id: 'm-1',
+        tool_use_id: 'tu_1',
+        is_error: false,
+        result: { detail: 'created', is_error: false },
+      }),
+    );
+    const list = store.toolCalls.get('m-1');
+    expect(list?.[0].result).toBeDefined();
+    expect(list?.[0].result?.isError).toBe(false);
+  });
+
+  it('useChatStream dedupes tool_use by toolUseId on reconnect', () => {
+    const store = emptyStore();
+    const payload = JSON.stringify({
+      message_id: 'm-1',
+      tool_use_id: 'tu_dup',
+      tool_name: 'postgres.query',
+    });
+    ChatStreamMachine.toolUse(store, payload);
+    ChatStreamMachine.toolUse(store, payload); // replay simulates reconnect
+    expect(store.toolCalls.get('m-1')).toHaveLength(1);
+  });
+
+  it('useChatStream preserves tool-call arrival order within a message', () => {
+    const store = emptyStore();
+    ChatStreamMachine.toolUse(store, JSON.stringify({ message_id: 'm-1', tool_use_id: 'a', tool_name: 'postgres.query' }));
+    ChatStreamMachine.toolUse(store, JSON.stringify({ message_id: 'm-1', tool_use_id: 'b', tool_name: 'mempalace.search' }));
+    ChatStreamMachine.toolUse(store, JSON.stringify({ message_id: 'm-1', tool_use_id: 'c', tool_name: 'garrison-mutate.create_ticket' }));
+    const list = store.toolCalls.get('m-1') ?? [];
+    expect(list.map((e) => e.toolUseId)).toEqual(['a', 'b', 'c']);
+  });
+
+  it('toolResult ignores frames for messages with no prior tool_use', () => {
+    const store = emptyStore();
+    ChatStreamMachine.toolResult(
+      store,
+      JSON.stringify({ message_id: 'm-1', tool_use_id: 'tu_orphan', is_error: false }),
+    );
+    expect(store.toolCalls.size).toBe(0);
+  });
+
+  it('assistantError surfaces error_kind into lastError', () => {
+    const store = emptyStore();
+    ChatStreamMachine.assistantError(
+      store,
+      JSON.stringify({ message_id: 'm-1', error_kind: 'tool_call_ceiling_reached' }),
+    );
+    expect(store.lastError).toBe('tool_call_ceiling_reached');
+  });
+
+  it('rejects malformed tool_use JSON without throwing', () => {
+    const store = emptyStore();
+    ChatStreamMachine.toolUse(store, '<not json>');
+    expect(store.toolCalls.size).toBe(0);
+  });
 });

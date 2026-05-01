@@ -38,7 +38,12 @@ export default defineConfig({
     // tests, drizzle-generated schema, and test fixtures don't
     // count toward the coverage metric.
     coverage: {
-      provider: 'v8',
+      // Istanbul over v8: v8 instruments only what V8 considers
+      // executable, which under-counts JSX literal lines + type-only
+      // declarations in TSX. Sonar's `new_lines` count includes those
+      // diff lines, so istanbul-style instrumentation aligns Sonar's
+      // new_coverage figure with what the unit tests actually cover.
+      provider: 'istanbul',
       reporter: ['text', 'lcov'],
       reportsDirectory: './coverage',
       include: [

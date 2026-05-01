@@ -77,6 +77,12 @@ jobs:
           go-version-file: supervisor/go.mod
           cache-dependency-path: supervisor/go.sum
       - run: make test-chaos
+      - name: Upload chaos coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: chaos-coverage
+          path: supervisor/chaos-coverage.out
+          if-no-files-found: error
 
   build:
     name: build (static binary)
@@ -263,7 +269,7 @@ jobs:
     # number. dashboard-test-integration is included so the
     # browser-side V8 coverage (Path B, M4 retro) is read alongside
     # the supervisor + vitest lcov.
-    needs: [test-unit, test-integration, dashboard-test-unit, dashboard-test-integration]
+    needs: [test-unit, test-integration, test-chaos, dashboard-test-unit, dashboard-test-integration]
     steps:
       # fetch-depth 0 gives Sonar full git history so blame-based
       # new-code detection and authorship work correctly.
@@ -282,6 +288,11 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: integration-coverage
+          path: supervisor
+      - name: Download chaos coverage
+        uses: actions/download-artifact@v4
+        with:
+          name: chaos-coverage
           path: supervisor
       - name: Download dashboard coverage
         uses: actions/download-artifact@v4

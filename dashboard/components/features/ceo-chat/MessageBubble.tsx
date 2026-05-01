@@ -8,6 +8,8 @@
 
 import type { ReactNode } from 'react';
 import { formatPerMessageCost, formatModelBadge } from './format';
+import { ToolCallChip } from './ToolCallChip';
+import type { ToolCallEntry } from '@/lib/sse/chatStream';
 
 interface MessageBubbleProps {
   role: 'operator' | 'assistant';
@@ -20,6 +22,9 @@ interface MessageBubbleProps {
   /** True while this assistant turn is streaming a delta buffer; the
    *  bubble shows the cursor. */
   streaming?: boolean;
+  /** M5.3 inline tool-call chips — rendered after the text content
+   *  in arrival order. Empty list = no chips. */
+  toolCalls?: ToolCallEntry[];
   /** Optional inline error variant — when assistant row's errorKind
    *  is non-null the bubble renders an error block (T011 wires the
    *  CHAT_ERROR_DISPLAY table). For now this prop is reserved. */
@@ -33,6 +38,7 @@ export function MessageBubble({
   costUsd,
   modelBadge,
   streaming = false,
+  toolCalls,
   errorBlock,
 }: Readonly<MessageBubbleProps>) {
   const isOperator = role === 'operator';
@@ -93,6 +99,13 @@ export function MessageBubble({
             </>
           )}
         </div>
+        {!isOperator && toolCalls && toolCalls.length > 0 ? (
+          <div className="mt-2 flex flex-wrap gap-1" data-testid="toolcall-chip-list">
+            {toolCalls.map((entry) => (
+              <ToolCallChip key={entry.toolUseId} entry={entry} />
+            ))}
+          </div>
+        ) : null}
         {isOperator || costUsd === undefined ? null : (
           <footer className="mt-1 text-text-3 text-[10px] font-mono font-tabular text-right" data-testid="chat-message-cost">
             {formatPerMessageCost(costUsd) ?? ''}
