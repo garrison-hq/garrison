@@ -120,7 +120,11 @@ function splitToolName(toolName: string): SplitToolName {
 
   // mcp__<server>__<tool> → choose the verb by server (read tools have
   // server-specific phrasing). Strip the prefix to get a clean target.
-  const mcpMatch = /^mcp__([^_]+(?:-[^_]+)*)__(.+)$/.exec(toolName);
+  // [^_]+ is greedy and matches hyphens fine on its own; an earlier
+  // draft used `[^_]+(?:-[^_]+)*` which Sonar (S5852) flagged as
+  // backtrack-vulnerable polynomial regex without adding any matches
+  // [^_]+ doesn't already accept.
+  const mcpMatch = /^mcp__([^_]+)__(.+)$/.exec(toolName);
   if (mcpMatch) {
     const server = mcpMatch[1];
     const tool = mcpMatch[2];
