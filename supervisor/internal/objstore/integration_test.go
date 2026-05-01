@@ -44,9 +44,17 @@ func startMinIO(t *testing.T) (*objstore.Client, testcontainers.Container) {
 			"MINIO_ROOT_USER":     testMinIORootUser,
 			"MINIO_ROOT_PASSWORD": testMinIORootPasswd,
 		},
-		WaitingFor: wait.ForHTTP("/minio/health/live").
-			WithPort("9000/tcp").
-			WithStartupTimeout(60 * time.Second),
+		// /minio/health/live returns 200 before the API surface is
+		// ready (BucketExists then returns "Server not initialized
+		// yet"). Wait for the canonical "API: http://..." log line
+		// the server emits AFTER init completes — observed in CI
+		// run #4 timing-of-readiness flake.
+		WaitingFor: wait.ForAll(
+			wait.ForLog("API:").WithStartupTimeout(60*time.Second),
+			wait.ForHTTP("/minio/health/live").
+				WithPort("9000/tcp").
+				WithStartupTimeout(60*time.Second),
+		),
 	}
 	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: req,
