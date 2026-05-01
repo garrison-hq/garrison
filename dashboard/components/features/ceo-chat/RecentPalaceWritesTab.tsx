@@ -69,10 +69,28 @@ export function RecentPalaceWritesTab() {
             data-error-kind={state.lastError}
             className="border border-err/40 bg-err/10 rounded px-3 py-2 text-[12px]"
           >
-            <p className="text-err font-medium">MemPalace unreachable</p>
-            <p className="text-text-2">
-              The supervisor could not reach the palace sidecar. Try Refresh.
-            </p>
+            {state.lastError === 'AuthExpired' ? (
+              <>
+                <p className="text-err font-medium">Your session expired</p>
+                <p className="text-text-2">
+                  Sign in again to load recent palace writes.
+                </p>
+              </>
+            ) : state.lastError === 'NetworkError' ? (
+              <>
+                <p className="text-err font-medium">Network error</p>
+                <p className="text-text-2">
+                  Could not reach the supervisor. Try Refresh.
+                </p>
+              </>
+            ) : (
+              <>
+                <p className="text-err font-medium">MemPalace unreachable</p>
+                <p className="text-text-2">
+                  The supervisor could not reach the palace sidecar. Try Refresh.
+                </p>
+              </>
+            )}
           </div>
         ) : null}
 

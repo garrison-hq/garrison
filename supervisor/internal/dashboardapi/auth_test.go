@@ -138,6 +138,51 @@ func TestSQLSessionValidator_ClassifiesNoRowsAsAuthExpired(t *testing.T) {
 	}
 }
 
+// TestAuthMiddleware_StripsBetterAuthHMACSignature — better-auth signs
+// every issued cookie as `<token>.<hmac>`. The DB stores only the bare
+// `<token>` half. The middleware MUST strip everything after the first
+// dot before passing to the validator; otherwise every real browser
+// session 401s.
+func TestAuthMiddleware_StripsBetterAuthHMACSignature(t *testing.T) {
+	const bareToken = "8DKqCAb5j99ibY7jgjIg01k31YNawwsX"
+	var seenToken string
+	validator := fakeValidatorRecorder{
+		userID: "user-123",
+		recorder: func(token string) {
+			seenToken = token
+		},
+	}
+	mw := newAuthMiddleware(validator, nil)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/objstore/company-md", nil)
+	req.AddCookie(&http.Cookie{Name: SessionCookieName, Value: bareToken + ".fakehmacsuffix"})
+
+	mw(echoHandler(t)).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("status=%d; want 200", rec.Code)
+	}
+	if seenToken != bareToken {
+		t.Errorf("validator saw token=%q; want bare %q (signature stripped)", seenToken, bareToken)
+	}
+}
+
+// fakeValidatorRecorder captures the token argument so we can assert
+// that the middleware strips the HMAC signature before passing to
+// ValidateCookie.
+type fakeValidatorRecorder struct {
+	userID   UserID
+	recorder func(token string)
+}
+
+func (f fakeValidatorRecorder) ValidateCookie(_ context.Context, token string) (UserID, error) {
+	if f.recorder != nil {
+		f.recorder(token)
+	}
+	return f.userID, nil
+}
+
 // TestSQLSessionValidator_WrapsOtherErrors — non-ErrNoRows errors from
 // the row query surface as wrapped non-ErrAuthExpired errors so the
 // middleware writes 500 InternalError instead of 401.
