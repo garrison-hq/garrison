@@ -12,11 +12,16 @@
 // doesn't dirty the URL. Inactive tabs stay mounted (display:none) so
 // each tab's local state (e.g. CompanyMDTab edit buffer, palace
 // loaded list) persists across switches.
+//
+// The lower-right region is the recent-threads block (formerly the
+// left-sidebar ThreadHistorySubnav at M5.2). ChatShell is the only
+// caller; it fetches the seed list server-side and passes it here.
 
 import { useState } from 'react';
 import { CompanyMDTab } from './CompanyMDTab';
 import { RecentPalaceWritesTab } from './RecentPalaceWritesTab';
 import { KGRecentFactsTab } from './KGRecentFactsTab';
+import { RecentThreadsBlock } from './RecentThreadsBlock';
 
 type Tab = 'company' | 'palace' | 'kg';
 
@@ -26,7 +31,16 @@ const TABS: ReadonlyArray<{ id: Tab; label: string }> = [
   { id: 'kg', label: 'KG recent facts' },
 ];
 
-export function KnowsPane() {
+interface ThreadRow {
+  id: string;
+  threadNumber: number;
+}
+
+interface Props {
+  threads: ThreadRow[];
+}
+
+export function KnowsPane({ threads }: Readonly<Props>) {
   const [active, setActive] = useState<Tab>('company');
 
   return (
@@ -74,6 +88,8 @@ export function KnowsPane() {
           <KGRecentFactsTab />
         </div>
       </div>
+
+      <RecentThreadsBlock threads={threads} />
     </aside>
   );
 }

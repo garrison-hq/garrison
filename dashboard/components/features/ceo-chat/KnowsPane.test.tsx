@@ -21,7 +21,7 @@ describe('KnowsPane', () => {
   afterEach(() => cleanup());
 
   it('TestKnowsPane_RendersThreeTabs', () => {
-    render(<KnowsPane />);
+    render(<KnowsPane threads={[]} />);
     expect(screen.getByTestId('knows-tab-company')).toBeTruthy();
     expect(screen.getByTestId('knows-tab-palace')).toBeTruthy();
     expect(screen.getByTestId('knows-tab-kg')).toBeTruthy();
@@ -33,14 +33,14 @@ describe('KnowsPane', () => {
   });
 
   it('TestKnowsPane_DefaultsToCompanyMDActive', () => {
-    render(<KnowsPane />);
+    render(<KnowsPane threads={[]} />);
     const pane = screen.getByTestId('knows-pane');
     expect(pane.getAttribute('data-active-tab')).toBe('company');
     expect(screen.getByTestId('knows-tab-company').getAttribute('aria-selected')).toBe('true');
   });
 
   it('TestKnowsPane_SwitchesTabsOnClick', () => {
-    render(<KnowsPane />);
+    render(<KnowsPane threads={[]} />);
     fireEvent.click(screen.getByTestId('knows-tab-palace'));
     const pane = screen.getByTestId('knows-pane');
     expect(pane.getAttribute('data-active-tab')).toBe('palace');
