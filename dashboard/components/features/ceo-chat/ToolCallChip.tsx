@@ -19,7 +19,21 @@ import Link from 'next/link';
 import type { ToolCallEntry } from '@/lib/sse/chatStream';
 import { Chip } from '@/components/ui/Chip';
 
-const MUTATION_TOOL_PREFIX = 'garrison-mutate.';
+// Claude's MCP tool-name wire format is `mcp__<server>__<verb>`
+// (double-underscore separators). Earlier the chip renderer pinned
+// `garrison-mutate.<verb>` from a pre-MCP draft of the spec; live
+// traffic against claude shows the `mcp__garrison-mutate__<verb>`
+// shape, so the renderer accepts both — old tests may still emit
+// the legacy form, and operators who hit the verbs via a non-MCP
+// path would too.
+const MUTATION_TOOL_PREFIXES = ['mcp__garrison-mutate__', 'garrison-mutate.'] as const;
+
+function matchMutationPrefix(toolName: string): string | null {
+  for (const p of MUTATION_TOOL_PREFIXES) {
+    if (toolName.startsWith(p)) return p;
+  }
+  return null;
+}
 
 interface Props {
   /** ToolCallEntry from useChatStream's toolCalls map. */
@@ -27,7 +41,7 @@ interface Props {
 }
 
 export function ToolCallChip({ entry }: Readonly<Props>) {
-  const isMutation = entry.toolName.startsWith(MUTATION_TOOL_PREFIX);
+  const isMutation = matchMutationPrefix(entry.toolName) !== null;
   const isFailure = entry.result?.isError === true;
   const isPreCall = entry.result === undefined;
 
@@ -43,9 +57,8 @@ export function ToolCallChip({ entry }: Readonly<Props>) {
 // Helpers — kept local so the rendering stays single-file per plan D7.
 
 function shortVerbName(toolName: string): string {
-  return toolName.startsWith(MUTATION_TOOL_PREFIX)
-    ? toolName.slice(MUTATION_TOOL_PREFIX.length)
-    : toolName;
+  const prefix = matchMutationPrefix(toolName);
+  return prefix ? toolName.slice(prefix.length) : toolName;
 }
 
 function affectedResourceURL(args: unknown): string | null {
@@ -66,6 +79,35 @@ function readToolSummary(toolName: string): string {
   if (toolName === 'postgres.query') return 'queried postgres';
   if (toolName === 'mempalace.search') return 'searched palace';
   return `called ${toolName}`;
+}
+
+// extractFailureDetail produces a short, operator-readable label for a
+// failed tool call. The supervisor's EmitToolResult wraps tr.Detail
+// (which itself is the JSON-stringified MCP envelope from the verb)
+// inside `{detail, is_error}`. So payload.detail is usually a JSON
+// STRING (not an object), e.g. `{"success":false,"error_kind":"validation_failed",...}`.
+// Try the cheap object lookups first; if detail is a JSON string,
+// re-parse it and pull error_kind / message; fall back to the raw
+// string (truncated) or 'failed'.
+function extractFailureDetail(payload: unknown): string {
+  if (typeof payload !== 'object' || payload === null) return 'failed';
+  const obj = payload as Record<string, unknown>;
+  const ek = obj['error_kind'];
+  if (typeof ek === 'string') return ek;
+  const d = obj['detail'];
+  if (typeof d !== 'string') return 'failed';
+  if (d.trimStart().startsWith('{')) {
+    try {
+      const parsed = JSON.parse(d) as Record<string, unknown>;
+      const innerKind = parsed['error_kind'];
+      if (typeof innerKind === 'string') return innerKind;
+      const innerMsg = parsed['message'];
+      if (typeof innerMsg === 'string') return innerMsg;
+    } catch {
+      // detail is opaque; fall through to the truncated raw form below
+    }
+  }
+  return d.length > 80 ? `${d.slice(0, 77)}…` : d;
 }
 
 // --- read tool variants (low emphasis) ---
@@ -143,17 +185,7 @@ function MutateChipPostCall({ entry }: Readonly<Props>) {
 // --- failure variant (M5.2 error palette) ---
 
 function FailureChip({ entry, isMutation }: Readonly<{ entry: ToolCallEntry; isMutation: boolean }>) {
-  const detail = (() => {
-    const payload = entry.result?.payload;
-    if (typeof payload === 'object' && payload !== null) {
-      const obj = payload as Record<string, unknown>;
-      const ek = obj['error_kind'];
-      if (typeof ek === 'string') return ek;
-      const d = obj['detail'];
-      if (typeof d === 'string') return d;
-    }
-    return 'failed';
-  })();
+  const detail = extractFailureDetail(entry.result?.payload);
   const label = `${isMutation ? shortVerbName(entry.toolName) : entry.toolName} — ${detail}`;
   return (
     <span
