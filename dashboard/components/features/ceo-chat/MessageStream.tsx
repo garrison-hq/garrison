@@ -22,6 +22,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { MessageBubble } from './MessageBubble';
 import { useStickyBottom } from './useStickyBottom';
 import { useChatStream } from '@/lib/sse/chatStream';
+import { reconstructToolCallsFromEnvelope } from '@/lib/sse/replay';
 
 interface ServerMessage {
   id: string;
@@ -142,7 +143,15 @@ export function MessageStream({
     return [...messages].sort((a, b) => a.turnIndex - b.turnIndex).map((m) => {
       const terminal = stream.terminals.get(m.id);
       const partial = stream.partialDeltas.get(m.id);
-      const toolCalls = stream.toolCalls.get(m.id) ?? [];
+      // Live SSE wins for in-flight messages; for committed messages
+      // (page reload, scroll-back) the live map is empty, so fall back
+      // to reconstructing from the persisted raw_event_envelope per
+      // M5.2 FR-261. Without the fallback the chips disappear on
+      // refresh — caught live during M5.4 retro.
+      const liveToolCalls = stream.toolCalls.get(m.id);
+      const toolCalls = liveToolCalls && liveToolCalls.length > 0
+        ? liveToolCalls
+        : reconstructToolCallsFromEnvelope(m.rawEventEnvelope);
       const mergedContent = terminal?.content ?? m.content ?? partial ?? null;
       const mergedStatus = terminal?.status ?? m.status;
       const isInFlight = m.role === 'assistant' && terminal === undefined &&
