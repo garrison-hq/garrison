@@ -44,6 +44,13 @@ var allEnvVars = []string{
 	"GARRISON_INFISICAL_PROJECT_ID",
 	"GARRISON_INFISICAL_ENVIRONMENT",
 	"GARRISON_CUSTOMER_ID",
+	// M5.4 additions
+	"GARRISON_MINIO_ENDPOINT",
+	"GARRISON_MINIO_BUCKET",
+	"GARRISON_MINIO_USE_TLS",
+	"GARRISON_MINIO_ACCESS_KEY_PATH",
+	"GARRISON_MINIO_SECRET_KEY_PATH",
+	"GARRISON_DASHBOARD_API_PORT",
 }
 
 // clearAll unsets every GARRISON_* env var the config package reads, so a test
@@ -148,6 +155,10 @@ func realAgentEnv(t *testing.T) {
 	t.Setenv("GARRISON_INFISICAL_CLIENT_ID", "test-client-id")
 	t.Setenv("GARRISON_INFISICAL_CLIENT_SECRET", "test-client-secret")
 	t.Setenv("GARRISON_CUSTOMER_ID", "00000000-0000-0000-0000-000000000001")
+	// M5.4: MinIO sidecar.
+	t.Setenv("GARRISON_MINIO_ENDPOINT", "garrison-minio:9000")
+	t.Setenv("GARRISON_MINIO_ACCESS_KEY_PATH", "/operator/MINIO_ACCESS_KEY")
+	t.Setenv("GARRISON_MINIO_SECRET_KEY_PATH", "/operator/MINIO_SECRET_KEY")
 
 	// Build an isolated $PATH containing fake claude + docker binaries so
 	// exec.LookPath succeeds without depending on the host having either
@@ -449,6 +460,10 @@ func TestM22AgentMempalaceDSNComposition(t *testing.T) {
 	t.Setenv("GARRISON_INFISICAL_CLIENT_ID", "test-id")
 	t.Setenv("GARRISON_INFISICAL_CLIENT_SECRET", "test-secret")
 	t.Setenv("GARRISON_CUSTOMER_ID", "00000000-0000-0000-0000-000000000001")
+	// M5.4: MinIO sidecar.
+	t.Setenv("GARRISON_MINIO_ENDPOINT", "garrison-minio:9000")
+	t.Setenv("GARRISON_MINIO_ACCESS_KEY_PATH", "/operator/MINIO_ACCESS_KEY")
+	t.Setenv("GARRISON_MINIO_SECRET_KEY_PATH", "/operator/MINIO_SECRET_KEY")
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -707,5 +722,78 @@ func TestLoadConfigCustomerIDFromEnvOverride(t *testing.T) {
 	gotStr := got.String()
 	if gotStr != rawUUID {
 		t.Errorf("CustomerID() = %q; want %q", gotStr, rawUUID)
+	}
+}
+
+// ----------------------------------------------------------------------------
+// M5.4 — MinIO sidecar + dashboard-facing HTTP server config.
+// ----------------------------------------------------------------------------
+
+func TestLoadM5_4_RejectsMissingMinIOEndpoint(t *testing.T) {
+	realAgentEnv(t)
+	t.Setenv("GARRISON_MINIO_ENDPOINT", "")
+	if _, err := config.Load(); err == nil || !strings.Contains(err.Error(), "GARRISON_MINIO_ENDPOINT") {
+		t.Errorf("expected MinIO endpoint required error; got %v", err)
+	}
+}
+
+func TestLoadM5_4_RejectsMissingAccessKeyPath(t *testing.T) {
+	realAgentEnv(t)
+	t.Setenv("GARRISON_MINIO_ACCESS_KEY_PATH", "")
+	if _, err := config.Load(); err == nil || !strings.Contains(err.Error(), "GARRISON_MINIO_ACCESS_KEY_PATH") {
+		t.Errorf("expected access-key-path required error; got %v", err)
+	}
+}
+
+func TestLoadM5_4_RejectsMissingSecretKeyPath(t *testing.T) {
+	realAgentEnv(t)
+	t.Setenv("GARRISON_MINIO_SECRET_KEY_PATH", "")
+	if _, err := config.Load(); err == nil || !strings.Contains(err.Error(), "GARRISON_MINIO_SECRET_KEY_PATH") {
+		t.Errorf("expected secret-key-path required error; got %v", err)
+	}
+}
+
+func TestLoadM5_4_DefaultsBucket(t *testing.T) {
+	realAgentEnv(t)
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load(): %v", err)
+	}
+	if cfg.MinIOBucket != config.DefaultMinIOBucket {
+		t.Errorf("MinIOBucket = %q; want %q", cfg.MinIOBucket, config.DefaultMinIOBucket)
+	}
+}
+
+func TestLoadM5_4_DefaultsUseTLSFalse(t *testing.T) {
+	realAgentEnv(t)
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load(): %v", err)
+	}
+	if cfg.MinIOUseTLS {
+		t.Errorf("MinIOUseTLS = true; want false")
+	}
+}
+
+func TestLoadM5_4_DefaultsDashboardAPIPort(t *testing.T) {
+	realAgentEnv(t)
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load(): %v", err)
+	}
+	if cfg.DashboardAPIPort != config.DefaultDashboardAPIPort {
+		t.Errorf("DashboardAPIPort = %d; want %d", cfg.DashboardAPIPort, config.DefaultDashboardAPIPort)
+	}
+}
+
+func TestLoadM5_4_AcceptsExplicitDashboardAPIPort(t *testing.T) {
+	realAgentEnv(t)
+	t.Setenv("GARRISON_DASHBOARD_API_PORT", "9090")
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load(): %v", err)
+	}
+	if cfg.DashboardAPIPort != 9090 {
+		t.Errorf("DashboardAPIPort = %d; want 9090", cfg.DashboardAPIPort)
 	}
 }
