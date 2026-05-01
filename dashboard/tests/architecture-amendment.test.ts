@@ -13,16 +13,18 @@ describe('ARCHITECTURE.md M5 amendment', () => {
   it('TestArchitectureLineEnumeratesM5Submilestones', () => {
     const path = resolve(import.meta.dirname, '..', '..', 'ARCHITECTURE.md');
     const source = readFileSync(path, 'utf-8');
-    // Locate the M5 entry by its leading bold marker.
-    const m5Idx = source.indexOf('**M5 — CEO chat');
-    expect(m5Idx).toBeGreaterThan(-1);
-    // Take a window covering the rest of the paragraph (until the
-    // next blank-line break).
-    const tail = source.slice(m5Idx);
-    const paragraphEnd = tail.indexOf('\n\n');
-    const paragraph = paragraphEnd === -1 ? tail : tail.slice(0, paragraphEnd);
-    for (const submilestone of ['M5.1', 'M5.2', 'M5.3', 'M5.4']) {
-      expect(paragraph).toContain(submilestone);
+    // M5 entry must exist, and each submilestone must have its own
+    // entry. Post-M5.4 the doc was restructured from one bundled M5
+    // paragraph to one per submilestone, so the assertion checks the
+    // file as a whole rather than slicing a single paragraph.
+    expect(source).toContain('**M5 — CEO chat');
+    for (const submilestone of [
+      '**M5.1 — Chat backend',
+      '**M5.2 — Chat dashboard surface',
+      '**M5.3 — Chat-driven mutations',
+      '**M5.4 — "WHAT THE CEO KNOWS"',
+    ]) {
+      expect(source).toContain(submilestone);
     }
   });
 });
@@ -34,8 +36,11 @@ describe('ARCHITECTURE.md M5.3 amendment', () => {
   it('contains the M5.3 autonomous-execution posture substring', () => {
     const path = resolve(import.meta.dirname, '..', '..', 'ARCHITECTURE.md');
     const source = readFileSync(path, 'utf-8');
+    // Post-M5.3 ship: language was edited from plan-form to ship-form.
+    // The shipped paragraph keeps the autonomous-execution posture
+    // claim; the substring just tracks the canonical wording.
     expect(source).toContain(
-      'M5.3 — chat-driven mutations under autonomous-execution posture (no per-call operator approval)'
+      'M5.3 — Chat-driven mutations under autonomous-execution posture'
     );
   });
 
@@ -66,9 +71,15 @@ describe('ARCHITECTURE.md M5.4 amendment', () => {
   it('contains the M5.4 build-plan sentence with knowledge-base pane shape', () => {
     const path = resolve(import.meta.dirname, '..', '..', 'ARCHITECTURE.md');
     const source = readFileSync(path, 'utf-8');
-    expect(source).toContain(
-      'M5.4 ships the "WHAT THE CEO KNOWS" knowledge-base pane: tabbed surface for Company.md (MinIO-backed, CEO-editable) + recent palace writes + recent KG facts (read-only via supervisor-side proxy to MemPalace).'
-    );
+    // Post-M5.4 ship: language was edited from plan-form to ship-form.
+    // The shipped paragraph keeps the three-tab knowledge-base shape
+    // (Company.md MinIO-backed, recent palace writes, KG recent facts);
+    // the substrings track the canonical entry header + each tab.
+    expect(source).toContain('**M5.4 — "WHAT THE CEO KNOWS" knowledge-base pane.**');
+    expect(source).toContain('Company.md');
+    expect(source).toContain('MinIO-backed');
+    expect(source).toContain('Recent palace writes');
+    expect(source).toContain('KG recent facts');
   });
 
   it('contains the deployment-topology amendment naming MinIO as the 4th container', () => {

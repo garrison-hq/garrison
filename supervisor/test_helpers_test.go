@@ -104,6 +104,11 @@ func startSupervisor(t *testing.T, opts supervisorOpts) (int, *exec.Cmd) {
 	env := append(os.Environ(),
 		"GARRISON_DATABASE_URL="+url,
 		fmt.Sprintf("GARRISON_HEALTH_PORT=%d", port),
+		// M5.4 retro: re-enable the M1/M2.1 back-compat dispatch on
+		// `created.engineering.todo` so chaos+integration tests that
+		// pin the original todo-spawn contract still run. Production
+		// keeps this off — `todo` is the operator triage/backlog column.
+		"GARRISON_M21_BACKCOMPAT_DISPATCH=1",
 	)
 	if opts.FakeAgentCmd != "" {
 		env = append(env, "GARRISON_FAKE_AGENT_CMD="+opts.FakeAgentCmd)

@@ -258,28 +258,25 @@ func runDaemon() int {
 	qaEngineerHandler := func(ctx context.Context, eventID pgtype.UUID) error {
 		return spawn.Spawn(ctx, spawnDeps, eventID, "qa-engineer")
 	}
-	dispatcher := events.NewDispatcher(map[string]events.Handler{
-		// M2.2 canonical: engineer listens_for shifted from `todo` to
-		// `in_dev` per Session 2026-04-23. Earlier revisions also wired
-		// EngineeringTicketChannel (`created.engineering.todo`) to
-		// engineerHandler for M1/M2.1 chaos-test back-compat — that
-		// dispatch is dropped here (caught live during the M5.4 A→Z
-		// smoke 2026-05-01: operator-created tickets at `todo` were
-		// auto-spawning the engineer, which then ran the M1 hello-txt
-		// acceptance path and exited `acceptance_failed`, making
-		// `todo` unusable as a real triage / backlog column).
-		//
-		// `todo` is now a true operator-staging column with NO
-		// auto-dispatch. Tickets sit there until an operator (or QA
-		// rejection bounce, or future automated triage) moves them to
-		// `in_dev`. M1/M2.1 chaos tests that depend on the back-compat
-		// dispatch are tracked-not-fixed for follow-up — they need to
-		// migrate to inserting at `in_dev` directly.
+	// M2.2 canonical: engineer listens_for shifted from `todo` to
+	// `in_dev` per Session 2026-04-23. The M1/M2.1 back-compat dispatch
+	// (`created.engineering.todo` → engineer) is OFF in production:
+	// `todo` is a real operator triage/backlog column with no auto-spawn
+	// (M5.4 retro 2026-05-01 — auto-spawn made `todo` unusable as a
+	// staging column because the M1 hello-txt acceptance path always
+	// failed). It's restored under GARRISON_M21_BACKCOMPAT_DISPATCH=1
+	// for the M1/M2.1 chaos+integration tests that pin the original
+	// todo-spawn contract; that env var is set only by test_helpers_test.go.
+	dispatchHandlers := map[string]events.Handler{
 		EngineeringInDevChannel:     engineerHandler,
 		EngineeringTodoInDevChannel: engineerHandler,
 		EngineeringQABounceChannel:  engineerHandler,
 		EngineeringQAReviewChannel:  qaEngineerHandler,
-	})
+	}
+	if os.Getenv("GARRISON_M21_BACKCOMPAT_DISPATCH") == "1" {
+		dispatchHandlers[EngineeringTicketChannel] = engineerHandler
+	}
+	dispatcher := events.NewDispatcher(dispatchHandlers)
 
 	healthServer := health.NewServer(cfg, state, pool)
 

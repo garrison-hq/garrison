@@ -86,6 +86,7 @@ describe('lib/queries/kanban', () => {
     // Done tickets are now included so the operator sees the full
     // department state on the kanban (M5.4 retro live-stack
     // discovery — operator-reported "ticket disappears when done").
-    expect(tickets.map((t) => t.objective)).toEqual(['newest', 'middle', 'closed', 'oldest']);
+    // Order is created_at DESC: now → 30m ago → 1h ago → 2h ago.
+    expect(tickets.map((t) => t.objective)).toEqual(['newest', 'closed', 'middle', 'oldest']);
   });
 });
