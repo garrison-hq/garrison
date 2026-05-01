@@ -13,11 +13,13 @@ import (
 	"github.com/garrison-hq/garrison/supervisor/internal/agents"
 	"github.com/garrison-hq/garrison/supervisor/internal/chat"
 	"github.com/garrison-hq/garrison/supervisor/internal/config"
+	"github.com/garrison-hq/garrison/supervisor/internal/dashboardapi"
 	"github.com/garrison-hq/garrison/supervisor/internal/dockerexec"
 	"github.com/garrison-hq/garrison/supervisor/internal/events"
 	"github.com/garrison-hq/garrison/supervisor/internal/health"
 	"github.com/garrison-hq/garrison/supervisor/internal/hygiene"
 	"github.com/garrison-hq/garrison/supervisor/internal/mempalace"
+	"github.com/garrison-hq/garrison/supervisor/internal/objstore"
 	"github.com/garrison-hq/garrison/supervisor/internal/pgdb"
 	"github.com/garrison-hq/garrison/supervisor/internal/spawn"
 	"github.com/garrison-hq/garrison/supervisor/internal/store"
@@ -267,6 +269,17 @@ func runDaemon() int {
 
 	healthServer := health.NewServer(cfg, state, pool)
 
+	// M5.4 — objstore client + dashboardapi server. Both are gated on
+	// vault availability: in fake-agent mode or when GARRISON_INFISICAL_ADDR
+	// is unset (M2.1/M2.2 chaos-test path), the supervisor skips this
+	// surface entirely. In production (vault configured), MinIO bootstrap
+	// is fail-closed: an unreachable MinIO at boot causes ExitFailure.
+	objstoreClient, exitCode := buildObjstoreClient(ctx, cfg, vaultClient, logger)
+	if exitCode != ExitOK {
+		return exitCode
+	}
+	dashboardAPIServer := buildDashboardAPIServer(cfg, pool, objstoreClient, sharedPalaceClient, logger)
+
 	g, gctx := errgroup.WithContext(ctx)
 
 	g.Go(func() error {
@@ -287,6 +300,14 @@ func runDaemon() int {
 		logger.Info("health server listening", "addr", fmt.Sprintf("0.0.0.0:%d", cfg.HealthPort))
 		return healthServer.Serve(gctx)
 	})
+
+	// M5.4 — dashboardapi server runs only when wiring succeeded.
+	if dashboardAPIServer != nil {
+		g.Go(func() error {
+			logger.Info("dashboardapi server listening", "addr", fmt.Sprintf("0.0.0.0:%d", cfg.DashboardAPIPort))
+			return dashboardAPIServer.Serve(gctx)
+		})
+	}
 
 	// M4 — agents.changed cache invalidator (T014 / FR-100).
 	// The dashboard's editAgent server action emits
@@ -500,6 +521,152 @@ func buildSharedPalaceClient(cfg *config.Config) *mempalace.Client {
 		Timeout:            10 * time.Second,
 		Exec:               dockerexec.RealDockerExec{DockerBin: cfg.DockerBin},
 	}
+}
+
+// uuidString renders a pgtype.UUID as the canonical 8-4-4-4-12
+// hyphen-separated form used across the codebase (see existing
+// buildVaultClient site).
+func uuidString(u pgtype.UUID) string {
+	return fmt.Sprintf("%x-%x-%x-%x-%x",
+		u.Bytes[0:4], u.Bytes[4:6], u.Bytes[6:8], u.Bytes[8:10], u.Bytes[10:16])
+}
+
+// buildObjstoreClient fetches the scoped MinIO credentials from
+// Infisical and constructs an objstore.Client + runs BootstrapBucket.
+// M2.2 mempalace-bootstrap parallel: fail-closed at boot — an
+// unreachable MinIO causes ExitFailure.
+//
+// Returns (nil, ExitOK) when M5.4 is gracefully skipped: fake-agent
+// mode or vault disabled (no Infisical address). This preserves
+// M2.1/M2.2 chaos-test compatibility — those tests run without
+// Infisical.
+func buildObjstoreClient(ctx context.Context, cfg *config.Config, vaultClient vault.Fetcher, logger *slog.Logger) (*objstore.Client, int) {
+	if cfg.UseFakeAgent || vaultClient == nil {
+		logger.Info("objstore: skipping M5.4 wiring (fake-agent or vault unavailable)")
+		return nil, ExitOK
+	}
+
+	// Fetch the two scoped MinIO secrets in one Fetch call. The vault
+	// client writes vault_access_log rows per M2.3 Rule 4; failures
+	// short-circuit (fail-closed at boot).
+	const (
+		envAccessKey = "MINIO_ACCESS_KEY"
+		envSecretKey = "MINIO_SECRET_KEY"
+	)
+	grants := []vault.GrantRow{
+		{EnvVarName: envAccessKey, SecretPath: cfg.MinIOAccessKeyPath},
+		{EnvVarName: envSecretKey, SecretPath: cfg.MinIOSecretKeyPath},
+	}
+	secrets, err := vaultClient.Fetch(ctx, grants)
+	if err != nil {
+		logger.Error("objstore: vault fetch for MinIO credentials failed; aborting startup", "err", err)
+		return nil, ExitFailure
+	}
+	defer func() {
+		for _, sv := range secrets {
+			sv.Zero()
+		}
+	}()
+
+	accessSV, ok := secrets[envAccessKey]
+	if !ok {
+		logger.Error("objstore: vault returned no value for MinIO access key")
+		return nil, ExitFailure
+	}
+	secretSV, ok := secrets[envSecretKey]
+	if !ok {
+		logger.Error("objstore: vault returned no value for MinIO secret key")
+		return nil, ExitFailure
+	}
+
+	// UnsafeBytes is one of the two production call sites M2.3 documents
+	// as legitimate (the other is internal/spawn env injection).
+	client, err := objstore.New(objstore.Config{
+		Endpoint:  cfg.MinIOEndpoint,
+		UseTLS:    cfg.MinIOUseTLS,
+		AccessKey: string(accessSV.UnsafeBytes()),
+		SecretKey: string(secretSV.UnsafeBytes()),
+		Bucket:    cfg.MinIOBucket,
+		CompanyID: uuidString(cfg.CustomerID()),
+	}, logger)
+	if err != nil {
+		logger.Error("objstore: client construction failed", "err", err)
+		return nil, ExitFailure
+	}
+
+	// Bootstrap is fail-closed (mirrors M2.2 mempalace-bootstrap).
+	bootstrapCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if err := client.BootstrapBucket(bootstrapCtx); err != nil {
+		logger.Error("objstore: bootstrap failed; aborting startup",
+			"err", err, "endpoint", cfg.MinIOEndpoint, "bucket", cfg.MinIOBucket)
+		return nil, ExitFailure
+	}
+
+	return client, ExitOK
+}
+
+// buildDashboardAPIServer wires the dashboardapi.Server with the route
+// set + auth middleware. Returns nil when objstore wiring was skipped
+// (M2.1/M2.2 chaos test path) — runDaemon's caller adapts.
+func buildDashboardAPIServer(
+	cfg *config.Config,
+	pool *pgxpool.Pool,
+	objstoreClient *objstore.Client,
+	sharedPalaceClient *mempalace.Client,
+	logger *slog.Logger,
+) *dashboardapi.Server {
+	if objstoreClient == nil {
+		return nil
+	}
+
+	// QueryClient: reuses the M2.2 dockerexec wiring from sharedPalaceClient
+	// (which is also gated on the same not-fake-and-not-disabled path; in
+	// production with vault, both are non-nil).
+	var queryClient *mempalace.QueryClient
+	if sharedPalaceClient != nil {
+		queryClient = mempalace.NewQueryClient(
+			sharedPalaceClient.Exec,
+			sharedPalaceClient.MempalaceContainer,
+			sharedPalaceClient.PalacePath,
+			logger,
+		)
+		queryClient.DockerHost = sharedPalaceClient.DockerHost
+	}
+
+	// SessionValidator: closure over pool.QueryRow against the dashboard's
+	// better-auth `sessions` table. Cookie value is the `token` column;
+	// supervisor connects as schema owner and already has SELECT (per
+	// T001 reality-adjustment, no GRANT migration needed).
+	sessionRowQuery := dashboardapi.SessionRowQuery(
+		func(ctx context.Context, token string) (string, time.Time, error) {
+			var userID pgtype.UUID
+			var expiresAt time.Time
+			err := pool.QueryRow(ctx,
+				`SELECT user_id, expires_at FROM sessions WHERE token = $1`,
+				token,
+			).Scan(&userID, &expiresAt)
+			if err != nil {
+				return "", time.Time{}, err
+			}
+			return uuidString(userID), expiresAt, nil
+		},
+	)
+	validator := dashboardapi.NewSQLSessionValidator(sessionRowQuery, time.Now)
+
+	deps := dashboardapi.Deps{
+		Objstore:         objstoreClient,
+		Mempalace:        queryClient,
+		SessionValidator: validator,
+		Logger:           logger,
+		CompanyID:        uuidString(cfg.CustomerID()),
+	}
+	srv := dashboardapi.NewServer(cfg, deps)
+	if err := srv.RegisterDefaultRoutes(deps); err != nil {
+		logger.Error("dashboardapi: route registration failed", "err", err)
+		return nil
+	}
+	return srv
 }
 
 // buildVaultClient constructs the M2.3 vault.Fetcher when the Infisical
