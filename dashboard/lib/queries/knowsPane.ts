@@ -1,7 +1,12 @@
+'use server';
+
 // M5.4 read-side queries for the knows-pane. Mirror of
 // lib/actions/companyMD.ts shape but for the read-only mempalace
-// proxies (recent-writes + recent-kg). Server-only; runs inside Server
-// Components / Server Actions, never on the client.
+// proxies (recent-writes + recent-kg). Marked 'use server' so the
+// `next/headers.cookies()` import is allowed and so Client Components
+// (RecentPalaceWritesTab, KGRecentFactsTab) calling these functions
+// resolve through the Server Action transport rather than bundling
+// the supervisor-side fetch into the client bundle.
 
 import { cookies } from 'next/headers';
 
