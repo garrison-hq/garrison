@@ -8,12 +8,18 @@ import { TicketInlineEditor } from '@/components/features/ticket-inline-edit/Tic
 
 export const dynamic = 'force-dynamic';
 
+// UUID guard — Next 16's static `tickets/new/page.tsx` should take
+// priority but the [id] dynamic catches any non-UUID slug if a
+// future static peer page slips. Skip the DB call and 404 cleanly.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export default async function TicketDetailPage({
   params,
 }: Readonly<{
   params: Promise<{ id: string }>;
 }>) {
   const { id } = await params;
+  if (!UUID_RE.test(id)) notFound();
   const detail = await fetchTicketDetail(id);
   if (!detail) {
     notFound();

@@ -22,12 +22,25 @@ import { TicketDetailPanel } from '@/components/features/ticket-detail/TicketDet
 
 export const dynamic = 'force-dynamic';
 
+// UUID-shape guard for the intercepting route. Next 16's `[id]`
+// dynamic segment matches ANY non-empty path component including
+// non-UUID strings like "new" (the create form path) — so without
+// this guard, navigating to /tickets/new triggers
+// fetchTicketDetail("new") → PostgresError("invalid input syntax
+// for type uuid"). The static `tickets/new/page.tsx` takes priority
+// for full-page renders, but the @panel intercepting slot still
+// matches the dynamic [id] for any non-UUID segment. Falling through
+// to notFound() lets Next render the parent layout's children
+// (the actual /tickets/new page) in the panel slot.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export default async function InterceptedTicketPage({
   params,
 }: Readonly<{
   params: Promise<{ id: string }>;
 }>) {
   const { id } = await params;
+  if (!UUID_RE.test(id)) notFound();
   const detail = await fetchTicketDetail(id);
   if (!detail) notFound();
   return (

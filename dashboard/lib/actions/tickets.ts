@@ -100,7 +100,15 @@ export async function createTicket(params: CreateTicketParams): Promise<{ ticket
   }
 
   const deptId = await resolveDeptId(params.deptSlug);
-  const targetColumn = params.targetColumn ?? 'todo';
+  // Default to in_dev so the supervisor's M2.2.1 finalize path
+  // fires when the engineer is auto-dispatched. Operator-staged
+  // tickets at `todo` get woken via the M2.2 back-compat dispatch
+  // but run the M1 hello-txt acceptance path → acceptance_failed
+  // (caught live during M5.4 ship A→Z smoke). Operator can still
+  // override via the form's column picker (TicketCreateForm passes
+  // params.targetColumn explicitly when the operator selects a
+  // non-default column).
+  const targetColumn = params.targetColumn ?? 'in_dev';
 
   const ticketId = await appDb.transaction(async (tx) => {
     const tx2 = tx as unknown as MutationTx;
