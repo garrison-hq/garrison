@@ -362,6 +362,12 @@ func runDaemon() int {
 		ShutdownSignalGrace:  spawn.ShutdownSignalGrace,
 		ClaudeBinInContainer: "/usr/local/bin/claude",
 		DefaultModel:         cfg.ChatDefaultModel,
+		// M5.3 garrison-mutate full-perms DSN for the chat container.
+		// Falls back to cfg.DatabaseURL (the supervisor's host-side DSN);
+		// operator overrides via GARRISON_CHAT_INTERNAL_DATABASE_URL when
+		// the chat container is on a different network alias than the
+		// supervisor (the dev/compose case).
+		ChatInternalDatabaseURL: chatInternalDatabaseURL(cfg),
 	}
 	if err := chat.RunRestartSweep(ctx, chatDeps); err != nil {
 		logger.Warn("chat: restart sweep failed; continuing", "err", err)
@@ -500,11 +506,21 @@ func resolveSupervisorBin(logger *slog.Logger) string {
 
 // buildSharedPalaceClient constructs the M2.2.1 T011 palace client
 // shared across the hygiene listener and the finalize atomic writer.
-// Returns nil for the fake-agent and bootstrap-disabled paths so callers
-// can hold a pointer unconditionally and rely on WriteFinalize's
-// nil-guard to skip the atomic write.
+// Returns nil only for the fake-agent path so callers can hold a
+// pointer unconditionally and rely on WriteFinalize's nil-guard to
+// skip the atomic write when there's truly no palace.
+//
+// DisablePalaceBootstrap is intentionally NOT a reason to nil this
+// out: the flag means "skip the one-time bootstrap subprocess",
+// not "disable all palace operations". The dev stack +
+// M2.1/M2.2 chaos tests set DisablePalaceBootstrap=1 but the
+// mempalace container is still up and reachable; an in-flight
+// finalize_ticket call needs to write to it at commit time. Earlier
+// revisions returned nil here, which left finalize tool_uses with
+// `deps.Palace is nil; skipping atomic write` and tickets stuck at
+// in_dev with the `finalize: no palace client wired` error chain.
 func buildSharedPalaceClient(cfg *config.Config) *mempalace.Client {
-	if cfg.UseFakeAgent || cfg.DisablePalaceBootstrap {
+	if cfg.UseFakeAgent {
 		return nil
 	}
 	return &mempalace.Client{
@@ -515,6 +531,19 @@ func buildSharedPalaceClient(cfg *config.Config) *mempalace.Client {
 		Timeout:            10 * time.Second,
 		Exec:               dockerexec.RealDockerExec{DockerBin: cfg.DockerBin},
 	}
+}
+
+// chatInternalDatabaseURL returns the chat-container-side full-perms
+// Postgres DSN passed to the M5.3 garrison-mutate MCP entry.
+// GARRISON_CHAT_INTERNAL_DATABASE_URL overrides; falls back to the
+// supervisor's host-side cfg.DatabaseURL when unset (production
+// compose where the chat container reaches the same DSN by network
+// alias).
+func chatInternalDatabaseURL(cfg *config.Config) string {
+	if v := os.Getenv("GARRISON_CHAT_INTERNAL_DATABASE_URL"); v != "" {
+		return v
+	}
+	return cfg.DatabaseURL
 }
 
 // startDashboardAPIServerIfWired registers the dashboardapi server's

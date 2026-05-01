@@ -105,6 +105,12 @@ done
 echo "==> [3/7] applying goose migrations from ./migrations"
 goose -dir migrations postgres "${GOOSE_DSN}" up
 
+# Workspace dirs the supervisor uses as cmd.Dir for spawned agents.
+# cmd.Start ENOENTs without them. Department slugs in
+# departments.workspace_path map 1:1 to subdirectories; the dev-stack
+# seed pins them at /tmp/garrison-dev/<slug>.
+mkdir -p /tmp/garrison-dev/engineering /tmp/garrison-dev/qa-engineer /tmp/garrison-dev/docs
+
 echo "==> [4/7] seeding M2-arc data + flipping dashboard roles to LOGIN"
 docker exec -i "${CONTAINER_NAME}" psql -U postgres -d garrison -v ON_ERROR_STOP=1 \
   < scripts/dev-stack-seed.sql >/dev/null

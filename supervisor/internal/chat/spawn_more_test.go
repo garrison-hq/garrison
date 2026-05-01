@@ -18,7 +18,7 @@ func TestWriteChatMCPConfig_RejectsInvalidMessageID(t *testing.T) {
 	deps := Deps{
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
-	_, err := writeChatMCPConfig(deps, pgtype.UUID{Valid: false}, "/usr/bin/supervisor", "postgres://x", MempalaceWiring{})
+	_, err := writeChatMCPConfig(deps, pgtype.UUID{Valid: true, Bytes: [16]byte{9}}, pgtype.UUID{Valid: false}, "/usr/bin/supervisor", "postgres://x", MempalaceWiring{})
 	if err == nil || !strings.Contains(err.Error(), "invalid messageID") {
 		t.Errorf("expected invalid-messageID error; got %v", err)
 	}
@@ -32,7 +32,8 @@ func TestWriteChatMCPConfig_RejectsMissingMCPConfigDir(t *testing.T) {
 		// MCPConfigDir intentionally empty
 	}
 	id := pgtype.UUID{Valid: true, Bytes: [16]byte{1, 2, 3, 4}}
-	_, err := writeChatMCPConfig(deps, id, "/usr/bin/supervisor", "postgres://x", MempalaceWiring{
+	sid := pgtype.UUID{Valid: true, Bytes: [16]byte{9, 9, 9}}
+	_, err := writeChatMCPConfig(deps, sid, id, "/usr/bin/supervisor", "postgres://x", MempalaceWiring{
 		DockerBin:          "/usr/bin/docker",
 		MempalaceContainer: "garrison-mempalace",
 		PalacePath:         "/palace",
@@ -52,7 +53,8 @@ func TestWriteChatMCPConfig_HappyPath(t *testing.T) {
 		MCPConfigDir: dir,
 	}
 	id := pgtype.UUID{Valid: true, Bytes: [16]byte{0xa, 0xb, 0xc, 0xd}}
-	path, err := writeChatMCPConfig(deps, id, "/usr/bin/supervisor", "postgres://x", MempalaceWiring{
+	sid := pgtype.UUID{Valid: true, Bytes: [16]byte{9, 9, 9}}
+	path, err := writeChatMCPConfig(deps, sid, id, "/usr/bin/supervisor", "postgres://x", MempalaceWiring{
 		DockerBin:          "/usr/bin/docker",
 		MempalaceContainer: "garrison-mempalace",
 		PalacePath:         "/palace",
