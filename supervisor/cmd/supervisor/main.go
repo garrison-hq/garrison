@@ -52,11 +52,17 @@ const (
 // for any test harness that still references it.
 const EngineeringTicketChannel = "work.ticket.created.engineering.todo"
 
-// M2.2 channel constants — the supervisor registers these two handlers
-// per Session 2026-04-23 and FR-227/FR-228.
+// M2.2 channel constants — the supervisor registers these handlers
+// per Session 2026-04-23 and FR-227/FR-228. The two `transitioned.*.in_dev`
+// channels were added during M5.4 retro after dropping the M1/M2.1 back-compat
+// dispatch on `created.engineering.todo`: with `todo` now a real backlog
+// column, the engineer needs to spawn on transitions INTO `in_dev`
+// (operator drag from todo, or QA bounce-back from qa_review).
 const (
-	EngineeringInDevChannel    = "work.ticket.created.engineering.in_dev"
-	EngineeringQAReviewChannel = "work.ticket.transitioned.engineering.in_dev.qa_review"
+	EngineeringInDevChannel     = "work.ticket.created.engineering.in_dev"
+	EngineeringTodoInDevChannel = "work.ticket.transitioned.engineering.todo.in_dev"
+	EngineeringQABounceChannel  = "work.ticket.transitioned.engineering.qa_review.in_dev"
+	EngineeringQAReviewChannel  = "work.ticket.transitioned.engineering.in_dev.qa_review"
 )
 
 const usage = `Usage: supervisor [FLAGS] | mcp-postgres | mcp finalize | mcp garrison-mutate
@@ -269,8 +275,10 @@ func runDaemon() int {
 		// `in_dev`. M1/M2.1 chaos tests that depend on the back-compat
 		// dispatch are tracked-not-fixed for follow-up — they need to
 		// migrate to inserting at `in_dev` directly.
-		EngineeringInDevChannel:    engineerHandler,
-		EngineeringQAReviewChannel: qaEngineerHandler,
+		EngineeringInDevChannel:     engineerHandler,
+		EngineeringTodoInDevChannel: engineerHandler,
+		EngineeringQABounceChannel:  engineerHandler,
+		EngineeringQAReviewChannel:  qaEngineerHandler,
 	})
 
 	healthServer := health.NewServer(cfg, state, pool)
