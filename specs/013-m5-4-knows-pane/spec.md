@@ -5,6 +5,16 @@
 **Status**: Draft
 **Input**: see [`specs/_context/m5-4-context.md`](../_context/m5-4-context.md) and [`docs/research/m5-4-spike-minio.md`](../../docs/research/m5-4-spike-minio.md). This spec is the thin layer above the context — structure for /speckit.clarify and /garrison-plan, not re-derivation of the binding decisions the context already made.
 
+## Clarifications
+
+### Session 2026-05-01
+
+- Q: Editor library for the Company.md surface (CodeMirror v6 via wrapper, raw v6 packages, or react-simple-code-editor + prismjs)? → A: `@uiw/react-codemirror` + `@codemirror/lang-markdown` (React wrapper around CodeMirror v6; batteries-included; ~80 KB gzipped).
+- Q: Auth-expiry mid-edit behaviour for Company.md `Save`? → A: Server returns typed `AuthExpired` error; the editor preserves the unsaved buffer and surfaces an inline "session expired; sign in again to save" notice with a sign-in link that returns to `/chat` post-auth. No auto-redirect (which would lose the buffer).
+- Q: Refresh-button UX for palace-writes + KG-facts tabs during in-flight fetch? → A: Keep the prior list visible at 60% opacity, disable the `Refresh` button, show an inline spinner next to it. Matches M3 list-refresh precedent (`/agents`, `/tickets` lists).
+- Q: Next.js mechanism for Company.md read + save (Server Actions, mixed RSC + Action, or HTTP API routes)? → A: Server Actions for both — `getCompanyMD()` + `saveCompanyMD(content, ifMatchEtag)` in `lib/actions/companyMD.ts`. Matches M3/M4/M5.2 dashboard-internal precedent.
+- Q: Where does Company.md read/save physically happen — dashboard or supervisor-proxy? → A: Supervisor-side HTTP proxy (`GET /api/objstore/company-md`, `PUT /api/objstore/company-md`); the dashboard Server Actions are thin wrappers calling the proxy. Symmetric with the MemPalace proxy (FR-680..686) — only the supervisor process holds Infisical-scoped MinIO creds; no Node MinIO SDK dependency on the dashboard side.
+
 ## User scenarios & testing
 
 ### User story 1 — operator reads Company.md in the chat right pane (priority: P1)
@@ -92,14 +102,14 @@ The spec uses the same FR-NNN convention as M5.1–M5.3. M5.4 reserves FR-600 �
 
 - **FR-620**: Company.md is stored as a single object in a MinIO bucket named `garrison-company`. The object key is `<companyId>/company.md`, where `<companyId>` is the UUID of the row in the existing `companies` table. Single-company today (one row); the key shape is forward-compatible with multi-company.
 - **FR-621**: The `companies.company_md TEXT NOT NULL` column documented in ARCHITECTURE.md (line 151) is NOT added to the schema. M5.4 amends ARCHITECTURE.md to remove that column from the documented schema and reference the MinIO object instead.
-- **FR-622**: The dashboard reads Company.md via a Server Action (e.g. `getCompanyMD`) that calls into a new `lib/objstore/` MinIO client wrapping the `minio-go/v7` SDK. The Server Action returns `{ content: string, etag: string }` to the client component.
+- **FR-622**: The dashboard reads + saves Company.md via Next.js **Server Actions** in `lib/actions/companyMD.ts` — `getCompanyMD()` and `saveCompanyMD(content, ifMatchEtag)` (clarified Session 2026-05-01; matches M3/M4/M5.2 dashboard-internal precedent). The Server Actions are **thin wrappers around supervisor-side HTTP endpoints** (FR-688..691) — the dashboard process never imports a MinIO SDK and never holds MinIO credentials; only the supervisor talks to MinIO. `getCompanyMD()` returns `{ content: string, etag: string }` to the client component; `saveCompanyMD()` returns `{ content: string, etag: string }` on success or a typed error (`Stale | LeakScanFailed | TooLarge | AuthExpired | MinIOUnreachable`) on rejection.
 - **FR-623**: The MinIO client uses **scoped service-account credentials** fetched from Infisical at startup, not the MinIO root credentials. See FR-660.
 - **FR-624**: If the requested object does not exist, the Server Action returns `{ content: '', etag: null }` and the editor renders an empty-state inviting the operator to create the document.
 - **FR-625**: If MinIO returns a non-404 error (network failure, auth failure, etc.), the Server Action returns `{ error: 'MinIOUnreachable' | 'MinIOAuthFailed' | 'MinIOUnknown' }`. The editor renders a typed error block; the rest of the dashboard remains functional (FR-605 carryover).
 
 ### Company.md edit path (FR-640 → FR-659)
 
-- **FR-640**: The editor is a syntax-highlighted Markdown surface. Implementation uses CodeMirror 6 (`@uiw/react-codemirror` + `@codemirror/lang-markdown`, or the underlying CodeMirror v6 packages directly — /garrison-plan picks the exact import set). Same component instance is used for both read and edit modes; mode switches via `readOnly: boolean`.
+- **FR-640**: The editor is a syntax-highlighted Markdown surface. Implementation uses **CodeMirror v6 via `@uiw/react-codemirror` + `@codemirror/lang-markdown`** (clarified Session 2026-05-01). Same component instance is used for both read and edit modes; mode switches via `readOnly: boolean`.
 - **FR-641**: Clicking `Edit` sets the editor to `readOnly: false`, focuses the textarea, and exposes `Save` + `Cancel` buttons. The buffer is initialised from the most recently fetched content; the read-time ETag is captured for use in the `If-Match` header at save time.
 - **FR-642**: Clicking `Save` invokes a `saveCompanyMD(content, ifMatchEtag)` Server Action that:
   - Validates content size ≤ 64 KB; rejects with typed `TooLarge` error if not.
@@ -110,6 +120,10 @@ The spec uses the same FR-NNN convention as M5.1–M5.3. M5.4 reserves FR-600 �
 - **FR-644**: On `LeakScanFailed` error the editor surfaces "Save rejected: a value matching `<pattern category>` was detected in the content. Remove it before saving." The unsaved buffer is preserved.
 - **FR-645**: On `TooLarge` error the editor surfaces "Company.md is capped at 64 KB; current size is N KB." The unsaved buffer is preserved.
 - **FR-646**: Clicking `Cancel` flips the editor back to `readOnly: true` with the originally-loaded content; the unsaved buffer is dropped. If unsaved changes exist, a confirm dialog gates the discard.
+- **FR-647**: If the operator's better-auth session has expired by the time `Save` is clicked, the Server Action rejects with a typed `AuthExpired` error (clarified Session 2026-05-01). The editor:
+  - Stays in editable mode, the unsaved buffer is **preserved** (no redirect that would discard it).
+  - Surfaces an inline notice ("Your session expired — sign in again to save your changes.") with a sign-in link that routes through `/login?next=/chat` so the operator returns to `/chat` post-auth and can re-click `Save`.
+  - The supervisor / dashboard logs the failed save attempt at info level (event-shape only — no body bytes, no scan-result detail).
 
 ### MinIO container (FR-660 → FR-679)
 
@@ -117,7 +131,7 @@ The spec uses the same FR-NNN convention as M5.1–M5.3. M5.4 reserves FR-600 �
 - **FR-661**: MinIO data is stored in a Docker named volume `garrison-minio-data`, mounted into the container at `/data`. No host bind mounts.
 - **FR-662**: The MinIO root credentials (`MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD`) are passed as environment variables to the MinIO container itself — they live in the operator's deploy environment / `.env` file and never leave the host. They are not stored in Infisical.
 - **FR-663**: A scoped MinIO service account is created post-deploy via the operator running `mc admin user svcacct add` (ops checklist step). The access key + secret key from that service account are stored in Infisical under a new path (e.g. `/companies/<companyId>/minio` with keys `MINIO_ACCESS_KEY` + `MINIO_SECRET_KEY`).
-- **FR-664**: The supervisor (and the dashboard, via Server Actions) fetches the scoped access key + secret from Infisical at startup using the existing `internal/vault.Client` path. The fetch writes a `vault_access_log` row inside the spawn / startup tx (M2.3 Rule 4 carryover, fail-closed on INSERT failure).
+- **FR-664**: The supervisor fetches the scoped access key + secret from Infisical at startup using the existing `internal/vault.Client` path. The fetch writes a `vault_access_log` row inside the startup tx (M2.3 Rule 4 carryover, fail-closed on INSERT failure). **The dashboard process never reads MinIO credentials** (clarified Session 2026-05-01) — Company.md flows through the supervisor's HTTP proxy (FR-668..671) instead, keeping the dashboard out of the MinIO credential surface entirely.
 - **FR-665**: The supervisor runs a startup probe (under `internal/objstore/`) that:
   - Reads the scoped credentials from Infisical via `vault.Client`.
   - Constructs a MinIO client.
@@ -127,6 +141,17 @@ The spec uses the same FR-NNN convention as M5.1–M5.3. M5.4 reserves FR-600 �
   - Returns a non-nil error if MinIO is unreachable; the supervisor exits with `ExitFailure` per AGENTS.md fail-closed pattern.
 - **FR-666**: The MinIO container does NOT have a Docker-level healthcheck baked into the compose service; the supervisor's startup probe (FR-665) is the actual readiness signal. /garrison-plan may add a Compose-level `healthcheck` if there's a downstream `depends_on: condition: service_healthy` need.
 - **FR-667**: The MinIO API port (9000) is internal to `garrison-net` only; no host port forwarding in production. The development compose layer may forward ports `9000` + `9001` (admin console) for local debugging — that is a `dev` profile concern, not in the production shape.
+
+#### Supervisor-side objstore HTTP proxy (FR-668 → FR-671)
+
+Symmetric with the MemPalace proxy (FR-680..687). Keeps the dashboard process out of MinIO's credential surface — only the supervisor talks to MinIO.
+
+- **FR-668**: The supervisor exposes two new HTTP endpoints for the dashboard:
+  - `GET /api/objstore/company-md` — returns `{ content: string, etag: string }` for the current Company.md object. Returns `{ content: '', etag: null }` (HTTP 200) if the object does not yet exist (empty-state UX path).
+  - `PUT /api/objstore/company-md` — accepts `Content-Type: text/markdown` body + `If-Match: <etag>` header. On success returns `{ content: string, etag: string }` (echoing the body + the new ETag from MinIO). On rejection returns a typed error response with `{ error: 'Stale' | 'LeakScanFailed' | 'TooLarge' | 'AuthExpired' | 'MinIOUnreachable', message?: string, pattern_category?: string }` and an appropriate HTTP status (412 / 422 / 413 / 401 / 503).
+- **FR-669**: The supervisor proxy authenticates inbound requests via the existing dashboard ↔ supervisor auth path (dashboard role + better-auth session). Anonymous access is rejected with HTTP 401 (`AuthExpired`).
+- **FR-670**: The PUT endpoint runs the leak-scan (FR-642 third bullet) + size-cap (FR-642 first bullet) **before** the MinIO PUT. Server-side enforcement is the source of truth; the dashboard Server Action calls into this endpoint and surfaces the typed errors back to the client without doing its own scan or size-check.
+- **FR-671**: The objstore proxy logs each request shape (verb + outcome + ETag-before / ETag-after) at info level. **Body bytes are NEVER logged** (SEC-5 carryover) — the leak-scan reject log line names the matched pattern *category* but not the matched substring (Rule 1 carryover from FR-642).
 
 ### MemPalace read transport (FR-680 → FR-699)
 
@@ -139,6 +164,12 @@ The spec uses the same FR-NNN convention as M5.1–M5.3. M5.4 reserves FR-600 �
 - **FR-684**: If the MemPalace sidecar returns an error or is unreachable, the proxy returns a typed error response `{ error: 'MempalaceUnreachable' | 'MempalaceUnknown' }` with a 503 status. The dashboard renders the typed error block (user story 3 / 4 acceptance #4).
 - **FR-685**: Default `limit` is 30 if the dashboard does not supply one; the proxy clamps `limit` to ≤ 100 to bound the response size.
 - **FR-686**: The proxy does NOT introduce any new MemPalace write paths. The dashboard cannot write palace drawers or KG triples through M5.4 surfaces; those remain agent-side.
+- **FR-687**: The `Recent palace writes` and `KG recent facts` tabs each expose a `Refresh` button that re-fetches their respective endpoint. While a fetch is in flight (clarified Session 2026-05-01):
+  - The previously rendered list stays visible at 60% opacity (`opacity: 0.6` or equivalent design-token).
+  - The `Refresh` button is `disabled` for the duration of the request.
+  - An inline spinner renders next to the button (M3 `/agents`, `/tickets` list-refresh precedent — same affordance shape).
+  - On success, the list swaps to the new data and full opacity returns.
+  - On error, the prior list stays visible at full opacity and the typed error block (FR-684 / acceptance scenarios #4) renders inline above the list.
 
 ## Non-functional requirements
 
@@ -205,7 +236,7 @@ The retro flags both additions per AGENTS.md ("New dependencies must also be fla
 
 After full reading of binding inputs, the only genuine ambiguity is:
 
-- **C1**: Editor library — operator confirmed CodeMirror with Markdown syntax highlighting; this spec records that decision. /speckit.clarify can override if a lighter dep is preferred (e.g. `react-simple-code-editor` + `prismjs`); spec defaults to CodeMirror.
+- *(Resolved Session 2026-05-01 — see Clarifications)*
 
 Items the context did NOT pre-decide that this spec resolved with stated rationale (do NOT re-clarify):
 
