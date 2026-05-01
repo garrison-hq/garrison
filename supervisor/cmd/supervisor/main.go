@@ -635,19 +635,22 @@ func buildDashboardAPIServer(
 		return nil
 	}
 
-	// QueryClient: reuses the M2.2 dockerexec wiring from sharedPalaceClient
-	// (which is also gated on the same not-fake-and-not-disabled path; in
-	// production with vault, both are non-nil).
-	var queryClient *mempalace.QueryClient
-	if sharedPalaceClient != nil {
-		queryClient = mempalace.NewQueryClient(
-			sharedPalaceClient.Exec,
-			sharedPalaceClient.MempalaceContainer,
-			sharedPalaceClient.PalacePath,
-			logger,
-		)
-		queryClient.DockerHost = sharedPalaceClient.DockerHost
-	}
+	// QueryClient: built directly from cfg so it lights up even when
+	// `sharedPalaceClient` is nil (GARRISON_DISABLE_PALACE_BOOTSTRAP=1
+	// path used by M2.1/M2.2 chaos tests + the dev stack). The
+	// QueryClient only needs the docker-exec config + a reachable
+	// mempalace container — it does NOT depend on bootstrap output.
+	// Earlier revisions tied creation to sharedPalaceClient, which made
+	// the /api/mempalace/recent-writes + /recent-kg routes 404 in any
+	// environment that skipped bootstrap.
+	queryClient := mempalace.NewQueryClient(
+		dockerexec.RealDockerExec{DockerBin: cfg.DockerBin},
+		cfg.MempalaceContainer,
+		cfg.PalacePath,
+		logger,
+	)
+	queryClient.DockerHost = cfg.DockerHost
+	_ = sharedPalaceClient // retained as a parameter for future wiring; see comment above
 
 	// SessionValidator: closure over pool.QueryRow against the dashboard's
 	// better-auth `sessions` table. Cookie value is the `token` column;

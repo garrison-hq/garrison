@@ -222,21 +222,28 @@ func TestObjstoreHandler_PutRejectsStale(t *testing.T) {
 	}
 }
 
-// TestObjstoreHandler_PutRequiresIfMatch — request without If-Match
-// header → 400, no underlying client call.
-func TestObjstoreHandler_PutRequiresIfMatch(t *testing.T) {
-	fake := &fakeObjstore{}
+// TestObjstoreHandler_PutForwardsEmptyIfMatch — FR-624 first-save:
+// the dashboard's saveCompanyMD Server Action sends If-Match: ” on
+// the first save against an empty-state load. The handler MUST pass
+// the empty string through to objstore.Client.PutCompanyMD (which
+// handles the empty-vs-missing combination correctly) instead of
+// rejecting at the handler layer with 400 MissingIfMatch.
+func TestObjstoreHandler_PutForwardsEmptyIfMatch(t *testing.T) {
+	fake := &fakeObjstore{putETag: `"first-etag"`}
 	h := newObjstoreHandler(fake, nil)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPut, "/api/objstore/company-md", bytes.NewReader([]byte("body")))
-	// Deliberately no If-Match header.
+	req := httptest.NewRequest(http.MethodPut, "/api/objstore/company-md", bytes.NewReader([]byte("# v1")))
+	// Deliberately no If-Match header — first-save signal.
 	h.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("status=%d; want 400", rec.Code)
+	if rec.Code != http.StatusOK {
+		t.Errorf("status=%d; want 200; body=%s", rec.Code, rec.Body.String())
 	}
-	if fake.wasPutCalled {
-		t.Errorf("PutCompanyMD must not be called when If-Match is absent")
+	if !fake.wasPutCalled {
+		t.Errorf("PutCompanyMD must be called even with empty If-Match")
+	}
+	if fake.putIfMatch != "" {
+		t.Errorf("forwarded If-Match=%q; want empty string (FR-624)", fake.putIfMatch)
 	}
 }

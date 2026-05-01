@@ -240,23 +240,32 @@ func buildKGTimelineRequest() []byte {
 
 // listDrawersItem mirrors the JSON shape MemPalace embeds in
 // content[0].text for the list_drawers tool. Tolerant of MemPalace
-// version drift: accepts `id` or `drawer_id`, `body` or `content` or
-// `body_preview`, `wing` or `wing_name`, `room` or `room_name`, `name`
-// or `drawer_name`, `created_at` or `written_at`.
+// version drift: accepts `id` or `drawer_id`, body via `body` or
+// `content` or `body_preview` or `content_preview` (3.3.2 uses the
+// last), `wing` or `wing_name`, `room` or `room_name`, `name` or
+// `drawer_name`, `created_at` or `written_at`.
+//
+// Note on timestamps: MemPalace 3.3.2's mempalace_list_drawers does
+// NOT return a created/written timestamp at all. WrittenAt remains
+// zero-time for those rows; the dashboard renders nothing or a
+// placeholder. Reaching for a per-drawer timestamp would require a
+// follow-up mempalace_get_drawer call per id (O(N) round-trips) —
+// out of scope for the M5.4 list view; tracked-not-fixed.
 type listDrawersItem struct {
-	ID         string    `json:"id"`
-	DrawerID   string    `json:"drawer_id"`
-	Wing       string    `json:"wing"`
-	WingName   string    `json:"wing_name"`
-	Room       string    `json:"room"`
-	RoomName   string    `json:"room_name"`
-	Name       string    `json:"name"`
-	DrawerName string    `json:"drawer_name"`
-	Body       string    `json:"body"`
-	Content    string    `json:"content"`
-	Preview    string    `json:"body_preview"`
-	CreatedAt  time.Time `json:"created_at"`
-	WrittenAt  time.Time `json:"written_at"`
+	ID             string    `json:"id"`
+	DrawerID       string    `json:"drawer_id"`
+	Wing           string    `json:"wing"`
+	WingName       string    `json:"wing_name"`
+	Room           string    `json:"room"`
+	RoomName       string    `json:"room_name"`
+	Name           string    `json:"name"`
+	DrawerName     string    `json:"drawer_name"`
+	Body           string    `json:"body"`
+	Content        string    `json:"content"`
+	Preview        string    `json:"body_preview"`
+	ContentPreview string    `json:"content_preview"`
+	CreatedAt      time.Time `json:"created_at"`
+	WrittenAt      time.Time `json:"written_at"`
 	// Optional: M2.2 convention encodes the source agent in the wing
 	// name (`wing_<role>`); when MemPalace surfaces the role explicitly
 	// we honor it here.
@@ -328,6 +337,9 @@ func drawersToEntries(items []listDrawersItem) []DrawerEntry {
 		}
 		body := it.Preview
 		if body == "" {
+			body = it.ContentPreview
+		}
+		if body == "" {
 			body = it.Content
 		}
 		if body == "" {
@@ -352,8 +364,9 @@ func drawersToEntries(items []listDrawersItem) []DrawerEntry {
 
 // parseKGTimelineResponse consumes the newline-delimited JSON-RPC
 // responses and extracts the KG triple list. Tolerant of wrapper-object
-// `{triples: [...]}` / `{facts: [...]}` (M2.2 live-run finding
-// 2026-04-23: 3.3.2 keys it `facts`) or flat-array text payloads.
+// `{timeline: [...]}` (MemPalace 3.3.2 — verified live), `{triples: [...]}`,
+// or `{facts: [...]}` (M2.2 live-run finding 2026-04-23 against kg_query),
+// or flat-array text payloads.
 func parseKGTimelineResponse(stdout []byte) ([]KGTriple, error) {
 	text, err := extractToolCallPayload(stdout)
 	if err != nil {
@@ -364,10 +377,14 @@ func parseKGTimelineResponse(stdout []byte) ([]KGTriple, error) {
 	}
 
 	var wrapper struct {
-		Triples []kgTimelineItem `json:"triples"`
-		Facts   []kgTimelineItem `json:"facts"`
+		Timeline []kgTimelineItem `json:"timeline"`
+		Triples  []kgTimelineItem `json:"triples"`
+		Facts    []kgTimelineItem `json:"facts"`
 	}
 	if err := json.Unmarshal([]byte(text), &wrapper); err == nil {
+		if wrapper.Timeline != nil {
+			return timelineToTriples(wrapper.Timeline), nil
+		}
 		if wrapper.Triples != nil {
 			return timelineToTriples(wrapper.Triples), nil
 		}
@@ -389,8 +406,17 @@ func timelineToTriples(items []kgTimelineItem) []KGTriple {
 		if written.IsZero() {
 			written = it.ValidFrom
 		}
+		// MemPalace 3.3.2's kg_timeline doesn't return a per-triple id.
+		// Synthesise a stable composite key so React's list keying
+		// doesn't collide on repeated (subject, predicate, object)
+		// pairs that differ only by valid_from. Format chosen so it's
+		// stable across pages-of-results: subject|predicate|object|valid_from.
+		id := it.ID
+		if id == "" {
+			id = it.Subject + "|" + it.Predicate + "|" + it.Object + "|" + written.Format(time.RFC3339)
+		}
 		out = append(out, KGTriple{
-			ID:                  it.ID,
+			ID:                  id,
 			Subject:             it.Subject,
 			Predicate:           it.Predicate,
 			Object:              it.Object,

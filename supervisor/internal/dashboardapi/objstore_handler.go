@@ -84,11 +84,18 @@ func handleObjstoreGet(w http.ResponseWriter, r *http.Request, client ObjstoreCl
 }
 
 func handleObjstorePut(w http.ResponseWriter, r *http.Request, client ObjstoreClient, logger *slog.Logger) {
+	// If-Match is forwarded as-is to objstore.Client.PutCompanyMD, which
+	// handles all three cases:
+	//   - empty If-Match + object missing → FR-624 first-save (creates the
+	//     object; dashboard sends '' on the empty-state Save click).
+	//   - empty If-Match + object exists  → ErrStale (rejects: another
+	//     window created the object since the empty-state load).
+	//   - non-empty If-Match               → standard ETag pre-check.
+	// Earlier revisions of this handler rejected empty If-Match with
+	// 400 MissingIfMatch; that broke the FR-624 path because the dashboard's
+	// saveCompanyMD Server Action sends '' for the first save. Removing
+	// the check moves the gate to objstore.Client where it belongs.
 	ifMatch := r.Header.Get("If-Match")
-	if ifMatch == "" {
-		writeErrorResponse(w, http.StatusBadRequest, "MissingIfMatch", "If-Match header required", "", logger)
-		return
-	}
 
 	// Bound the read to MaxCompanyMDBytes + 1 so Content-Length spoofing
 	// doesn't lead the supervisor into reading an unbounded body. The

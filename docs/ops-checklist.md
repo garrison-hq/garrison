@@ -685,8 +685,14 @@ Post-deploy:
      --secret-key "$(openssl rand -hex 24)"
    ```
    Capture the printed access-key + secret-key pair.
-2. Populate Infisical at the configured paths (e.g.
-   `/operator/MINIO_ACCESS_KEY` and `/operator/MINIO_SECRET_KEY`) with
+2. Populate Infisical at the configured paths. The path **must include
+   the customer-id UUID prefix** matching `cfg.CustomerID()` —
+   Infisical's vault layout is `/<customerId>/<role>/<env_var>` per
+   the M2.3 convention. So if `companies.id` is
+   `00000000-0000-0000-0000-000000000001`, the configured paths are
+   `/00000000-0000-0000-0000-000000000001/operator/MINIO_ACCESS_KEY`
+   and `/00000000-0000-0000-0000-000000000001/operator/MINIO_SECRET_KEY`.
+   Populate the values with
    the scoped service-account credentials from step 1.
 3. Restart the supervisor (`docker compose restart supervisor`). Watch
    logs for:
