@@ -8,7 +8,7 @@
 // Requires jsdom (added as dev-dep alongside @testing-library/react)
 // because useChatStream uses useEffect and a real EventSource binding.
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { act, renderHook } from '@testing-library/react';
 import {
   __resetChatStreamCache,
@@ -251,9 +251,63 @@ describe('useChatStream hook', () => {
     // idle-grace; the cached store keeps the last state until grace
     // expires. We don't time-travel here; just check the source closed.
     expect(lastEventSource!.readyState).toBe(2);
-    // The result reference still points at the last render's snapshot,
-    // which captured the live state — we don't assert state change post-
-    // unmount because the hook's unmount happens after force().
     void result;
+  });
+
+  // M5.3 — backoff-timer reconnect lifecycle. After an error event the
+  // hook schedules a reconnect via setTimeout(connect, computedBackoff).
+  // Driving the fake timer to fire calls connect() again — this
+  // exercises the reconnect path + the clearBackoffTimer + connect
+  // re-entry branches.
+  it('fires reconnect after backoff schedule expires', async () => {
+    vi.useFakeTimers();
+    try {
+      const firstSource = (() => {
+        const r = renderHook(() => useChatStream('sess-11'));
+        return { rendered: r, src: lastEventSource! };
+      })();
+      act(() => {
+        firstSource.src.fireOpen();
+      });
+      // Trigger an error → schedules reconnect.
+      act(() => {
+        firstSource.src.fireError();
+      });
+      expect(firstSource.rendered.result.current.state).toBe('backoff');
+      // The factory should mint a fresh source after the backoff fires.
+      const sourceCountBefore = lastEventSource;
+      act(() => {
+        vi.advanceTimersByTime(200);
+      });
+      // After backoff, the hook re-enters connect() which calls
+      // makeEventSource → new fake source assigned to lastEventSource.
+      expect(lastEventSource).not.toBe(sourceCountBefore);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // Unmounting during backoff state should clear the pending timer
+  // (clearBackoffTimer's body — lines we want covered).
+  it('unmount during backoff clears the pending reconnect timer', () => {
+    vi.useFakeTimers();
+    try {
+      const { unmount } = renderHook(() => useChatStream('sess-12'));
+      act(() => {
+        lastEventSource!.fireOpen();
+      });
+      act(() => {
+        lastEventSource!.fireError();
+      });
+      // Unmount while backoff timer is pending → cleanup runs
+      // closeAndStop → clearBackoffTimer with non-null timer.
+      unmount();
+      // No error thrown == coverage of the clearTimeout branch.
+      vi.advanceTimersByTime(5_000);
+      // Original source closed.
+      expect(lastEventSource!.readyState).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
