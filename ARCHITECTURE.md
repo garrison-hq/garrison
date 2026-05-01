@@ -570,9 +570,17 @@ Some milestones carry genuine external unknowns — how a tool actually behaves 
 
 **M3 — Dashboard read-only.** ✅ Shipped 2026-04-26. Retro: `docs/retros/m3.md`. Next.js 16 + React 19 app reading from Postgres across two roles (`garrison_dashboard_app` for operational reads, `garrison_dashboard_ro` for vault sub-views). Eight surfaces: org overview, department Kanban, ticket detail, hygiene table, vault list/audit/role-secret-matrix, agents registry, operator-invite admin. Activity feed driven by a singleton SSE listener (LISTEN on `work.ticket.created` + parameterised `work.ticket.transitioned.<dept>.<from>.<to>`, plus `event_outbox` poll fallback for finalize/lifecycle events that aren't `pg_notify`'d). better-auth (drizzle adapter, email/password) gates every route; the first-run `/setup` wizard 404s once any user exists; thereafter operators join via atomic invite redemption (`UPDATE … WHERE redeemed_at IS NULL … RETURNING id`, MVCC-serialised). Read-only-first forces you to actually watch the system behave for a few days before giving yourself (and agents) the ability to change state — which is when you catch the "oh, the event payload shape is wrong" class of bugs cheaply. **Notes carried forward from M2 — surfaced, not fixed in M3**: (a) the cost-telemetry blind spot (`agent_instances.total_cost_usd` reads $0.00 on clean finalizes) is now visible in ticket detail with an explicit caveat icon — fix is the supervisor signal-handling change tracked at `docs/issues/cost-telemetry-blind-spot.md`; (b) workspace-sandbox-escape ("artifact claimed vs artifact on disk") is a hygiene-status row in the dashboard's hygiene table — fix lands as Docker-per-agent post-M3, tracked at `docs/issues/agent-workspace-sandboxing.md`. Locked-deps streak deliberately broken on the dashboard side (13 direct + ~150 transitive new TS/JS deps); each justified in the M3 retro under "Dependencies added outside the locked list".
 
-**M4 — Dashboard mutations.** Create tickets in UI, drag between columns, edit agent configs. Everything the operator does daily.
+**M4 — Dashboard mutations.** ✅ Shipped 2026-04-27. Retro: `docs/retros/m4.md`. Server-Action mutations for create/edit/transition tickets and edit-agent-config across model / agent.md / listens_for / palace_wing / status. Per-vault-row grants on the dashboard ML side; `secret_metadata` row + `vault_access_log` audit row in the same transaction as every vault write. New `agents.changed` `pg_notify` channel + supervisor-side cache invalidator so config edits propagate to the next spawn without a restart. Operator-invites + theme writes also land here.
 
-**M5 — CEO chat (summoned).** Conversation panel, summon-per-message pattern. M5.1 ships the read-only backend (server actions, SSE producer, transcript reads, idle/restart sweeps). M5.2 ships the dashboard surface (three-pane layout, message stream, composer, multi-session UX, end/archive/delete affordances). **M5.3 — chat-driven mutations under autonomous-execution posture (no per-call operator approval)**: ships the `garrison-mutate` MCP server with a sealed 8-verb set across tickets/agents/hiring; threat-model amendment lands first per the M2.3 vault-threat-model-first pattern; tool-call chips surface every assistant tool call informatively (no per-call gates); concurrency conflicts resolve via `SELECT ... FOR UPDATE NOWAIT` mapped to `error_kind='ticket_state_changed'`; vault remains opaque to chat (M2.3 Rule 3 carryover). M5.4 ships the "WHAT THE CEO KNOWS" knowledge-base pane: tabbed surface for Company.md (MinIO-backed, CEO-editable) + recent palace writes + recent KG facts (read-only via supervisor-side proxy to MemPalace).
+**M5 — CEO chat (summoned).** ✅ Shipped 2026-04-28 → 2026-05-01 across four sub-milestones. The arc closes M5; M6 (CEO ticket decomposition + memory hygiene dashboard) starts from this substrate.
+
+**M5.1 — Chat backend (read-only).** ✅ Shipped 2026-04-28. Retro: `docs/retros/m5-1.md`. Per-message ephemeral `garrison-claude:m5` container spawned by the supervisor's chat worker; OAuth token fetched from Infisical at `/operator/CLAUDE_CODE_OAUTH_TOKEN`; SSE producer for turn-by-turn streaming on `/api/sse/chat`; restart + idle sweeps reconcile orphaned `chat_sessions` rows on supervisor boot.
+
+**M5.2 — Chat dashboard surface.** ✅ Shipped 2026-04-29. Retro: `docs/retros/m5-2.md`. Three-pane layout (sidebar / center message stream + composer / right-pane KnowsPane placeholder), multi-session UX with archive + delete affordances, idle-pill chip indicating live session status, sidebar entry between Activity and Hygiene, `/chat/all` full-thread-list view + `/chat/<uuid>` active-session view. New `work.chat.session_deleted` `pg_notify` channel; `chat_messages` FK shifts to `ON DELETE CASCADE` so session delete reaps message rows.
+
+**M5.3 — Chat-driven mutations under autonomous-execution posture.** ✅ Shipped 2026-04-30. Retro: `docs/retros/m5-3.md`. In-tree `internal/garrisonmutate` MCP server exposing a sealed 8-verb set (`create_ticket`, `edit_ticket`, `transition_ticket`, `pause_agent`, `resume_agent`, `spawn_agent`, `edit_agent_config`, `propose_hire`); per-turn tool-call ceiling (default 50, env-tunable) emits an `assistant_error` SSE frame with `bailReason` set when exceeded; tool-use SSE frames flow informatively to the dashboard with no per-call operator gate; concurrency conflicts resolve via `SELECT ... FOR UPDATE NOWAIT` mapped to a typed `ticket_state_changed` error; vault remains opaque to chat per M2.3 Rule 3 carryover. Threat-model amendment landed first at `docs/security/chat-threat-model.md` per the M2.3 vault-threat-model-first pattern.
+
+**M5.4 — "WHAT THE CEO KNOWS" knowledge-base pane.** ✅ Shipped 2026-05-01. Retro: `docs/retros/m5-4.md`. Replaces M5.2's right-pane placeholder with a tabbed `KnowsPane`: Company.md (CEO-editable, MinIO-backed, CodeMirror v6 + lang-markdown editor, ETag-based optimistic concurrency, leak-scan + 64 KB size cap server-side) + Recent palace writes (read-only `mempalace_list_drawers` proxy with refresh + greyed-prior-list-during-fetch UX) + KG recent facts (read-only `mempalace_kg_timeline` proxy with optional source-ticket deep-links). New 4th container (MinIO single-node, digest-pinned, internal-network only, named volume `garrison-minio-data`); new supervisor packages `internal/objstore/` (MinIO wrapper) and `internal/dashboardapi/` (HTTP server on port 8081 with cookie-forward auth against the better-auth `sessions` table); shared `internal/leakscan/` extracted from `internal/finalize`. Two new dependencies: `github.com/minio/minio-go/v7` (Go) and `@uiw/react-codemirror` + `@codemirror/lang-markdown` (TS); both flagged in retro.
 
 > **Deployment topology after M5.4**: four-container Compose stack on `garrison-net` — supervisor + mempalace sidecar + socket-proxy + minio sidecar (digest-pinned, named-volume `garrison-minio-data`, scoped service-account credentials in Infisical, root creds env-on-container only). MinIO is internal-network only; no host port forwarding in production.
 
@@ -611,56 +619,7 @@ Specs are produced with `specify-cli` (with Garrison-flavored `/garrison-*` slas
 
 The project is at `github.com/garrison-hq/garrison`. The specs are the primary contribution — more valuable than the code itself, because the code can be regenerated from good specs in a weekend, but the specs encode the architectural thinking that's hard to reproduce.
 
-**Repo layout:**
-```
-garrison/
-├── specs/                                 # specify-cli output, one dir per milestone
-│   ├── m1-event-bus/                      # M1 (un-numbered, predates 00N scheme)
-│   ├── 003-m2-1-claude-invocation/
-│   ├── 004-m2-2-mempalace/
-│   ├── 005-m2-2-1-finalize-ticket/
-│   ├── 006-m2-2-2-compliance-calibration/
-│   ├── 007-m2-3-infisical-vault/
-│   └── _context/                          # filenames mix dots/hyphens (historical)
-│       ├── m1-context.md
-│       ├── m2.1-context.md
-│       ├── m2.2-context.md
-│       ├── m2-2-1-context.md
-│       ├── m2.2.2-context.md
-│       └── m2.3-context.md
-├── docs/
-│   ├── architecture-reconciliation-2026-04-24.md   # frozen decision-provenance snapshot
-│   ├── mcp-registry-candidates.md         # M8 input: MCPJungle commitment
-│   ├── skill-registry-candidates.md       # M7 input: SkillHub commitment
-│   ├── ops-checklist.md                   # post-migrate and post-deploy steps
-│   ├── getting-started.md
-│   ├── research/m2-spike.md               # spike outputs feeding later milestones
-│   ├── security/vault-threat-model.md
-│   ├── forensics/
-│   │   └── pgmcp-three-bug-chain.md       # post-M2.2.2 root-cause investigation
-│   ├── issues/
-│   │   ├── agent-workspace-sandboxing.md  # Docker-per-agent fix planned post-M3
-│   │   └── cost-telemetry-blind-spot.md   # supervisor signal-handling fix
-│   └── retros/                            # m1, m1-retro-addendum, m2-1, m2-2,
-│                                          # m2-2-1, m2-2-2, m2-2-x-compliance-retro, m2-3
-├── supervisor/                            # Go binary
-│   ├── internal/                          # 19 packages (claudeproto, mcpconfig, pgmcp,
-│   │                                      # agents, spawn/, mempalace, hygiene, finalize,
-│   │                                      # vault, config, store, events, pgdb, recovery,
-│   │                                      # health, concurrency, testdb, ...)
-│   └── tools/vaultlog/                    # M2.3 custom go vet analyzer
-├── dashboard/                             # Next.js 16 app (M3 — shipped 2026-04-26)
-├── migrations/                            # SQL, consumed by both Go (sqlc) and TS (Drizzle)
-│   └── seed/                              # engineer.md, qa-engineer.md (embedded via
-│                                          # +embed-agent-md markers into M2.2 / M2.2.2 migrations)
-├── experiment-results/                    # exploratory matrices, not production
-├── examples/                              # toy company YAML, example agent.md files
-├── ARCHITECTURE.md                        # this file
-├── RATIONALE.md
-├── AGENTS.md
-├── CONTRIBUTING.md
-└── README.md
-```
+**Repo layout:** see [`docs/agents/repository-layout.md`](docs/agents/repository-layout.md) for the canonical annotated tree (current through M5.4). The README also carries a top-level summary.
 
 Real operator configs (`company.md`, `agents/*`, workspaces) live outside the repo. Example configs in `examples/` use a fictitious company so the public repo is clonable and runnable without containing operator-specific data.
 
