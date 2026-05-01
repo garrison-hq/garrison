@@ -74,6 +74,7 @@ describe('EventRow', () => {
       eventId: 'e-4',
       at: '2026-04-30T12:00:03Z',
       chatSessionId: 'aaaaaaaa11111111',
+      actorUserId: 'op-1',
     });
     expect(screen.getByText(/Chat thread/)).toBeTruthy();
     expect(screen.getByText(/deleted by operator/)).toBeTruthy();
