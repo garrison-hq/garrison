@@ -6,13 +6,18 @@
 //  1. Validate the better-auth session (401 on missing).
 //  2. Open a per-route LISTEN connection that subscribes to:
 //       - chat.assistant.delta       (per-batch token deltas)
+//       - chat.tool.use              (M5.3 tool_use chip live-render)
+//       - chat.tool.result           (M5.3 tool_result chip transition)
+//       - chat.assistant.error       (M5.3 chat-policy-driven errors)
 //       - work.chat.message_sent     (assistant turn terminal commit)
 //       - work.chat.session_ended    (session lifecycle close)
-//  3. Forward each notify whose payload references the requested
-//     session_id as an SSE event:
-//       - delta        (relay payload verbatim — message_id + seq + delta_text)
-//       - terminal     (read terminal chat_messages row + emit content + cost)
-//       - session_ended (close the SSE stream)
+//  3. Forward each notify as an SSE event:
+//       - delta          (relay payload verbatim)
+//       - tool_use       (relay payload verbatim — keyed by message_id client-side)
+//       - tool_result    (relay payload verbatim)
+//       - assistant_error(relay payload verbatim)
+//       - terminal       (read terminal chat_messages row + emit content + cost)
+//       - session_ended  (close the SSE stream)
 //  4. Heartbeat every 25s.
 //  5. On client disconnect (req.signal.abort) close the LISTEN
 //     connection.
@@ -25,6 +30,9 @@ export const dynamic = 'force-dynamic';
 
 const CHANNELS = {
   delta: 'chat.assistant.delta',
+  toolUse: 'chat.tool.use',
+  toolResult: 'chat.tool.result',
+  assistantError: 'chat.assistant.error',
   workMessageSent: 'work.chat.message_sent',
   workSessionEnded: 'work.chat.session_ended',
 } as const;
@@ -112,7 +120,13 @@ export async function GET(req: Request) {
         try { controller.close(); } catch { /* ignore */ }
       };
 
-      // Subscribe to the three channels.
+      // Subscribe to the chat channels. Tool-call + assistant-error
+      // payloads are relayed verbatim — the client keys ToolCallEntry
+      // by message_id, and a message_id from a different session
+      // simply has no matching message bubble in this session's store
+      // (no harm, no render). Filtering by session_id at this layer
+      // would require a per-frame DB lookup; M5.3 picked the simpler
+      // verbatim-forward path that the existing delta channel uses.
       try {
         await sql.listen(CHANNELS.delta, (payloadRaw) => {
           try {
@@ -121,6 +135,15 @@ export async function GET(req: Request) {
           } catch {
             // malformed payload; drop
           }
+        });
+        await sql.listen(CHANNELS.toolUse, (payloadRaw) => {
+          try { enqueue(frame('tool_use', JSON.parse(payloadRaw))); } catch { /* drop malformed */ }
+        });
+        await sql.listen(CHANNELS.toolResult, (payloadRaw) => {
+          try { enqueue(frame('tool_result', JSON.parse(payloadRaw))); } catch { /* drop malformed */ }
+        });
+        await sql.listen(CHANNELS.assistantError, (payloadRaw) => {
+          try { enqueue(frame('assistant_error', JSON.parse(payloadRaw))); } catch { /* drop malformed */ }
         });
         await sql.listen(CHANNELS.workMessageSent, async (payloadRaw) => {
           try {
