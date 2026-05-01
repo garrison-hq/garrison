@@ -6,7 +6,7 @@
 //
 // Per resolved Q2 the global Topbar.tsx is NOT modified — chat affords
 // itself to its own strip. The strip lives at the top of the center
-// pane so the right-pane KnowsPanePlaceholder isn't pushed below it.
+// pane so the right-pane KnowsPane isn't pushed below it.
 
 import { useTransition } from 'react';
 import { useRouter } from 'next/navigation';
