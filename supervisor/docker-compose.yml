@@ -1,6 +1,6 @@
-# Garrison M2.3 deployment topology.
+# Garrison M5.4 deployment topology.
 #
-# Seven services (M2.2 four + M2.3 three):
+# Eight services (M2.3 seven + M5.4 one):
 #   postgres              — M1/M2.1 state store + pg_notify event bus
 #   mempalace             — MemPalace 3.3.2 sidecar; idle host for per-exec work
 #   docker-proxy          — linuxserver/socket-proxy with POST=1 EXEC=1
@@ -15,6 +15,11 @@
 #   infisical             — Infisical secrets manager; reachable as
 #                           garrison-infisical:8080 on the compose network.
 #                           NOT published to host (FR-422).
+#   minio                 — MinIO single-node object storage (M5.4) hosting
+#                           the CEO-editable Company.md object. Internal
+#                           network only; no host port forwarding. Named
+#                           volume garrison-minio-data preserves bucket
+#                           state across restarts (no host bind mounts).
 #
 # Supervisor never mounts /var/run/docker.sock directly. All docker API
 # access flows through the filtered proxy. Residual security envelope
@@ -93,6 +98,32 @@ services:
     container_name: garrison-infisical-redis
     restart: unless-stopped
 
+  # M5.4: MinIO single-node object storage. Hosts the CEO-editable
+  # Company.md object at s3://garrison-company/<companyId>/company.md.
+  # Internal-network only (no ports: block) — accessed via service-name
+  # DNS as garrison-minio:9000 from the supervisor. Per spike §F1, the
+  # image is pinned by digest at deploy time. Persistence on a Docker
+  # named volume (garrison-minio-data) — no host bind mounts (operator
+  # constraint per specs/_context/m5-4-context.md). Root credentials
+  # are env-on-container only; supervisor uses a scoped service account
+  # whose creds live in Infisical (see ops-checklist M5.4 section).
+  minio:
+    image: minio/minio@sha256:69b2ec208575b69597784255eec6fa6a2985ee9e1a47f4411a51f7f5fdd193a9
+    container_name: garrison-minio
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?MINIO_ROOT_USER required}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD required}
+    volumes:
+      - garrison-minio-data:/data
+    command: server /data
+    healthcheck:
+      test: ["CMD-SHELL", "mc ready local || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
   # M2.3: Infisical secrets manager. Internal network only (no ports: block).
   # Set GARRISON_INFISICAL_IMAGE env var to pin a specific digest:
   #   GARRISON_INFISICAL_IMAGE=infisical/infisical@sha256:<digest>
@@ -129,6 +160,8 @@ services:
         condition: service_started
       infisical:
         condition: service_started
+      minio:
+        condition: service_started
     environment:
       GARRISON_DATABASE_URL: postgres://supervisor:${GARRISON_POSTGRES_PASSWORD}@postgres:5432/garrison
       GARRISON_AGENT_RO_PASSWORD: ${GARRISON_AGENT_RO_PASSWORD:?GARRISON_AGENT_RO_PASSWORD required}
@@ -144,6 +177,13 @@ services:
       GARRISON_INFISICAL_ADDR: http://garrison-infisical:8080
       GARRISON_INFISICAL_CLIENT_ID: ${GARRISON_INFISICAL_CLIENT_ID:?GARRISON_INFISICAL_CLIENT_ID required}
       GARRISON_INFISICAL_CLIENT_SECRET: ${GARRISON_INFISICAL_CLIENT_SECRET:?GARRISON_INFISICAL_CLIENT_SECRET required}
+      # M5.4: MinIO endpoint + bucket + scoped-cred Infisical paths.
+      GARRISON_MINIO_ENDPOINT: garrison-minio:9000
+      GARRISON_MINIO_BUCKET: garrison-company
+      GARRISON_MINIO_USE_TLS: "false"
+      GARRISON_MINIO_ACCESS_KEY_PATH: ${GARRISON_MINIO_ACCESS_KEY_PATH:?GARRISON_MINIO_ACCESS_KEY_PATH required}
+      GARRISON_MINIO_SECRET_KEY_PATH: ${GARRISON_MINIO_SECRET_KEY_PATH:?GARRISON_MINIO_SECRET_KEY_PATH required}
+      GARRISON_DASHBOARD_API_PORT: "8081"
     restart: unless-stopped
 
   # M3 — operator dashboard (Next.js 16 + React 19; standalone build).
@@ -177,6 +217,10 @@ services:
       INFISICAL_DASHBOARD_PROJECT_ID: ${INFISICAL_DASHBOARD_PROJECT_ID:-}
       INFISICAL_DASHBOARD_ENVIRONMENT: ${INFISICAL_DASHBOARD_ENVIRONMENT:-prod}
       INFISICAL_SITE_URL: ${INFISICAL_SITE_URL:-http://garrison-infisical:8080}
+      # M5.4 — Server-Side fetch target for /api/objstore/company-md +
+      # /api/mempalace/recent-{writes,kg}. Supervisor's dashboardapi
+      # binds port 8081 inside the compose network.
+      DASHBOARD_SUPERVISOR_API_URL: ${DASHBOARD_SUPERVISOR_API_URL:-http://garrison-supervisor:8081}
     ports:
       - "3000:3000"
     restart: unless-stopped
@@ -185,3 +229,4 @@ volumes:
   postgres-data:
   mempalace-palace:
   infisical-postgres-data:
+  garrison-minio-data:

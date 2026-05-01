@@ -21,7 +21,10 @@ import (
 )
 
 const (
-	testMinIOImage      = "minio/minio:latest" // CI pre-pulls this digest per ci.yml
+	// Pinned by digest (matches docker-compose.yml + the dashboard
+	// Playwright job's Pre-pull step in .github/workflows/ci.yml).
+	// Per spike §F1.
+	testMinIOImage      = "minio/minio@sha256:69b2ec208575b69597784255eec6fa6a2985ee9e1a47f4411a51f7f5fdd193a9"
 	testMinIORootUser   = "spike-user"
 	testMinIORootPasswd = "spike-password-123"
 	testCompanyID       = "00000000-0000-0000-0000-000000000001"
