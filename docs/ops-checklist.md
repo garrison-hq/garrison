@@ -637,8 +637,102 @@ Post-deploy:
 3. Confirm `/chat/all` (full thread list view) and `/chat/<uuid>` (active session view) both load.
 4. The new literal channel `work.chat.session_deleted` joins `KNOWN_CHANNELS`; `deleteChatSession` emits IDs-only payload per FR-321.
 
+## M5.4 — knowledge-base pane (Company.md + recent palace writes + KG facts)
+
+M5.4 adds **MinIO** as the 4th container alongside supervisor +
+mempalace + docker-proxy + the M2.3 Infisical trio, hosting the CEO-
+editable Company.md object at
+`s3://garrison-company/<companyId>/company.md`. Persistence uses a
+Docker named volume `garrison-minio-data` — no host bind mounts. Two
+new Go and TS dependencies: `github.com/minio/minio-go/v7` (supervisor)
+and `@uiw/react-codemirror` + `@codemirror/lang-markdown` (dashboard).
+
+The supervisor exposes a new HTTP server (`internal/dashboardapi`) on
+port 8081, behind cookie-forward auth against the dashboard's better-
+auth `sessions` table:
+
+  GET / PUT /api/objstore/company-md
+  GET       /api/mempalace/recent-writes
+  GET       /api/mempalace/recent-kg
+
+Pre-deploy:
+
+1. Apply `migrations/20260501000000_m5_4_deploy_marker.sql` via goose.
+   The marker has no DDL — its presence in `goose_db_version` is the
+   deploy waypoint. No schema changes; no `GRANT SELECT` on `sessions`
+   (supervisor connects as schema owner with full privileges per the
+   T001 reality-adjustment).
+2. Pull the pinned MinIO image: `docker pull
+   minio/minio@sha256:69b2ec208575b69597784255eec6fa6a2985ee9e1a47f4411a51f7f5fdd193a9`.
+3. Set the operator `.env` values:
+   - `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` — MinIO container root
+     credentials (env-on-container only; never logged).
+   - `GARRISON_MINIO_ACCESS_KEY_PATH` / `GARRISON_MINIO_SECRET_KEY_PATH`
+     — Infisical secret paths the supervisor reads at startup.
+4. `docker compose up -d` brings up `garrison-minio` alongside the
+   existing seven services. Watch `docker logs garrison-minio` for
+   `API: http://...:9000` and `Healthcheck: ENABLED`.
+
+Post-deploy:
+
+1. Mint a scoped MinIO service account (do NOT use the root credentials
+   for the supervisor). Run inside the `garrison-minio` container:
+   ```
+   docker exec -it garrison-minio mc alias set local \
+     http://localhost:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD"
+   docker exec -it garrison-minio mc admin user svcacct add local \
+     "$MINIO_ROOT_USER" --access-key garrison-supervisor \
+     --secret-key "$(openssl rand -hex 24)"
+   ```
+   Capture the printed access-key + secret-key pair.
+2. Populate Infisical at the configured paths (e.g.
+   `/operator/MINIO_ACCESS_KEY` and `/operator/MINIO_SECRET_KEY`) with
+   the scoped service-account credentials from step 1.
+3. Restart the supervisor (`docker compose restart supervisor`). Watch
+   logs for:
+   - `objstore: bootstrap created bucket garrison-company` (first run)
+     OR `objstore: bootstrap bucket exists` (subsequent runs)
+   - `dashboardapi server listening addr=0.0.0.0:8081`
+   On `objstore: bootstrap failed`, the supervisor exits with
+   `ExitFailure`. Check that MinIO is reachable from the supervisor
+   container at `garrison-minio:9000` and that the Infisical paths
+   carry the scoped credentials.
+4. (Optional dev-only) Seed `examples/company.md` into the bucket as a
+   starter template:
+   ```
+   docker cp examples/company.md garrison-minio:/tmp/company.md
+   docker exec garrison-minio mc cp /tmp/company.md \
+     local/garrison-company/<companyId>/company.md
+   ```
+   Replace `<companyId>` with the operator's `companies.id` UUID.
+5. Open `/chat`, click the Company.md tab, click Edit; verify the
+   editor accepts changes and Save round-trips through the supervisor
+   proxy. Verify the Recent palace writes + KG recent facts tabs
+   render data without errors.
+
+Restart-recovery: the `garrison-minio-data` named volume preserves
+bucket state across `docker compose down` + `docker compose up -d`.
+**`docker compose down -v` is destructive** — it removes the named
+volume and the Company.md object with it. Operator should snapshot the
+volume before any destructive command:
+   ```
+   docker run --rm -v garrison-minio-data:/data:ro -v $(pwd):/backup \
+     busybox tar czf /backup/minio-$(date +%Y%m%d).tar.gz /data
+   ```
+
+Backup / restore design beyond ad-hoc snapshots is out of scope for
+M5.4; tracked as post-M5 follow-up.
+
+TLS: M5.4 ships internal-network plaintext only
+(`GARRISON_MINIO_USE_TLS=false`). Operator-controlled TLS termination
+is post-M5; the path is documented at FR-667.
+
 ## Changelog
 
+- **2026-05-01**: M5.4 knowledge-base pane deployment section added
+  (MinIO 4th container, scoped service-account credential model via
+  Infisical, dashboardapi HTTP server on port 8081, named volume
+  garrison-minio-data, no schema changes, examples/company.md fixture).
 - **2026-04-29**: M5.2 chat dashboard surface deployment section added (one new migration, one new pg_notify channel, sidebar entry + thread-history subnav, /chat/all + /chat/[[...sessionId]] routes, orphan-row sweep extension).
 - **2026-04-28**: M5.1 chat backend deployment section added (per-message ephemeral chat containers, OAuth token vault seeding, 7 GARRISON_CHAT_* env vars, restart + idle sweeps).
 - **2026-04-27**: M4 dashboard mutations deployment section added (4 migrations, dashboard ML activation, supervisor restart for the cache invalidator).
