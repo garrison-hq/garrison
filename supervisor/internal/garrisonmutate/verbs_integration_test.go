@@ -372,3 +372,123 @@ func TestProposeHire_HappyPath(t *testing.T) {
 }
 
 func ptrString(s string) *string { return &s }
+
+// -------- M6 T010 parent_ticket_id validation ---------------------------
+
+// seedQAEngineerDept inserts a second department + a ticket in 'in_dev'
+// so the cross-dept rejection test has a parent in another department.
+func seedQAEngineerDept(t *testing.T, fx integrationFixture) (deptID, ticketID pgtype.UUID) {
+	t.Helper()
+	ctx := context.Background()
+	if err := fx.pool.QueryRow(ctx,
+		`INSERT INTO departments (company_id, slug, name, workspace_path)
+		 SELECT company_id, 'qa-engineer', 'QA Engineer', '/tmp/qa-engineer'
+		   FROM departments WHERE id = $1
+		 RETURNING id`, fx.departmentID).Scan(&deptID); err != nil {
+		t.Fatalf("seed qa-engineer dept: %v", err)
+	}
+	if err := fx.pool.QueryRow(ctx,
+		`INSERT INTO tickets (department_id, objective, column_slug)
+		 VALUES ($1, 'parent in qa-engineer', 'in_dev')
+		 RETURNING id`, deptID).Scan(&ticketID); err != nil {
+		t.Fatalf("seed qa-engineer ticket: %v", err)
+	}
+	return
+}
+
+// TestCreateTicketWithParent_HappyPath — parent + child in the same dept,
+// parent not in done. The handler accepts and the audit row reflects
+// the parent linkage.
+func TestCreateTicketWithParent_HappyPath(t *testing.T) {
+	fx := setupIntegration(t)
+	parentJSON := `{"objective":"parent","department_slug":"engineering","column_slug":"in_dev"}`
+	parent, _ := realCreateTicketHandler(context.Background(), fx.deps, json.RawMessage(parentJSON))
+	if !parent.Success {
+		t.Fatalf("seed parent: %+v", parent)
+	}
+
+	childJSON := `{"objective":"child","department_slug":"engineering","parent_ticket_id":"` + parent.AffectedResourceID + `"}`
+	r, err := realCreateTicketHandler(context.Background(), fx.deps, json.RawMessage(childJSON))
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if !r.Success {
+		t.Fatalf("expected Success; got %+v", r)
+	}
+
+	var parentLinked pgtype.UUID
+	if err := fx.pool.QueryRow(context.Background(),
+		`SELECT parent_ticket_id FROM tickets WHERE id::text = $1`, r.AffectedResourceID,
+	).Scan(&parentLinked); err != nil {
+		t.Fatalf("read child parent_ticket_id: %v", err)
+	}
+	if !parentLinked.Valid {
+		t.Errorf("expected parent_ticket_id set on child")
+	}
+}
+
+// TestCreateTicketWithParent_RejectsCrossDept — parent in one department,
+// child requested in another. validation_failed with a clear message.
+func TestCreateTicketWithParent_RejectsCrossDept(t *testing.T) {
+	fx := setupIntegration(t)
+	_, qaParentID := seedQAEngineerDept(t, fx)
+	parentIDStr := uuidString(qaParentID)
+
+	childJSON := `{"objective":"child","department_slug":"engineering","parent_ticket_id":"` + parentIDStr + `"}`
+	r, _ := realCreateTicketHandler(context.Background(), fx.deps, json.RawMessage(childJSON))
+	if r.Success {
+		t.Fatal("expected failure for cross-dept parent")
+	}
+	if r.ErrorKind != string(ErrValidationFailed) {
+		t.Errorf("ErrorKind = %q; want %q", r.ErrorKind, ErrValidationFailed)
+	}
+	if !strings.Contains(r.Message, "different department") {
+		t.Errorf("Message %q missing 'different department'", r.Message)
+	}
+}
+
+// TestCreateTicketWithParent_RejectsClosedParent — parent already closed
+// (column_slug='done'). validation_failed.
+func TestCreateTicketWithParent_RejectsClosedParent(t *testing.T) {
+	fx := setupIntegration(t)
+	parentJSON := `{"objective":"parent","department_slug":"engineering","column_slug":"done"}`
+	parent, _ := realCreateTicketHandler(context.Background(), fx.deps, json.RawMessage(parentJSON))
+	if !parent.Success {
+		t.Fatalf("seed parent: %+v", parent)
+	}
+	childJSON := `{"objective":"child","department_slug":"engineering","parent_ticket_id":"` + parent.AffectedResourceID + `"}`
+	r, _ := realCreateTicketHandler(context.Background(), fx.deps, json.RawMessage(childJSON))
+	if r.Success {
+		t.Fatal("expected failure for closed parent")
+	}
+	if !strings.Contains(r.Message, "already closed") {
+		t.Errorf("Message %q missing 'already closed'", r.Message)
+	}
+}
+
+// TestCreateTicketWithParent_RejectsMissingParent — parent_ticket_id is
+// a syntactically valid UUID but no row matches.
+func TestCreateTicketWithParent_RejectsMissingParent(t *testing.T) {
+	fx := setupIntegration(t)
+	bogusUUID := "00000000-0000-0000-0000-000000000123"
+	childJSON := `{"objective":"child","department_slug":"engineering","parent_ticket_id":"` + bogusUUID + `"}`
+	r, _ := realCreateTicketHandler(context.Background(), fx.deps, json.RawMessage(childJSON))
+	if r.Success {
+		t.Fatal("expected failure for missing parent")
+	}
+	if !strings.Contains(r.Message, "does not exist") {
+		t.Errorf("Message %q missing 'does not exist'", r.Message)
+	}
+}
+
+// TestCreateTicketWithParent_NilParentSucceeds — explicit empty
+// parent_ticket_id behaves the same as omitting it; the existing happy
+// path is unchanged.
+func TestCreateTicketWithParent_NilParentSucceeds(t *testing.T) {
+	fx := setupIntegration(t)
+	args := `{"objective":"no-parent ticket","department_slug":"engineering","parent_ticket_id":""}`
+	r, _ := realCreateTicketHandler(context.Background(), fx.deps, json.RawMessage(args))
+	if !r.Success {
+		t.Fatalf("expected Success; got %+v", r)
+	}
+}
