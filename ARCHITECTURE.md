@@ -584,7 +584,7 @@ Some milestones carry genuine external unknowns — how a tool actually behaves 
 
 > **Deployment topology after M5.4**: four-container Compose stack on `garrison-net` — supervisor + mempalace sidecar + socket-proxy + minio sidecar (digest-pinned, named-volume `garrison-minio-data`, scoped service-account credentials in Infisical, root creds env-on-container only). MinIO is internal-network only; no host port forwarding in production.
 
-**M6 — CEO ticket decomposition + hygiene checks.** CEO writes tickets from conversation. Hygiene dashboard shows thin/missing writes. Rate-limit back-off and cost-based throttling land here (M2.1 observes cost and rate-limit events; M6 acts on them).
+**M6 — CEO ticket decomposition + hygiene + cost-throttle.** ✅ Shipped 2026-05-02. Retro: docs/retros/m6.md. Three threads compose the M5.x chat substrate: (1) `tickets.parent_ticket_id` enables CEO-driven decomposition via N individual `create_ticket` calls bounded by a per-turn ceiling; (2) hygiene predicates `thin_diary` + `missing_kg_facts` surface decomposition-without-substance; (3) per-company `daily_budget_usd` + `pause_until` columns + `throttle_events` audit table back-pressure spawns under cost or rate-limit conditions. The cost-telemetry blind-spot from M2.2 closes here via a result-grace window in `pipeline.Run`.
 
 **M7 — Hiring flow.** skills.sh integration plus **SkillHub (iflytek)** as the target-state private-skills registry alongside the public skills.sh feed (decision committed 2026-04-24; see `docs/skill-registry-candidates.md`). Proposal UI, approval writes agents + installs skills.
 

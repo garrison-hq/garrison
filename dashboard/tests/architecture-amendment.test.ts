@@ -90,3 +90,28 @@ describe('ARCHITECTURE.md M5.4 amendment', () => {
     );
   });
 });
+
+describe('ARCHITECTURE.md M6 amendment', () => {
+  // Pins the M6 substrings per T019. The M6 paragraph is annotated
+  // with shipped status + retro link; the schema section already
+  // documents tickets.parent_ticket_id (added pre-M6 as a forward-
+  // looking schema scaffold) and gains throttle_events on M6 ship.
+  it('M6 paragraph annotated with shipped status', () => {
+    const path = resolve(import.meta.dirname, '..', '..', 'ARCHITECTURE.md');
+    const source = readFileSync(path, 'utf-8');
+    expect(source).toContain('**M6 — ');
+    expect(source).toContain('docs/retros/m6.md');
+  });
+
+  it('schema section documents parent_ticket_id', () => {
+    const path = resolve(import.meta.dirname, '..', '..', 'ARCHITECTURE.md');
+    const source = readFileSync(path, 'utf-8');
+    expect(source).toContain('parent_ticket_id');
+  });
+
+  it('M6 paragraph references throttle_events table', () => {
+    const path = resolve(import.meta.dirname, '..', '..', 'ARCHITECTURE.md');
+    const source = readFileSync(path, 'utf-8');
+    expect(source).toContain('throttle_events');
+  });
+});
