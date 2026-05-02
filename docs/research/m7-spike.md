@@ -111,53 +111,112 @@ But the *install* step (read this list → fetch the skill content → place it 
 
 ---
 
-## §4 — The "install" actuator: missing entirely
+## §4 — The "install" actuator + per-agent runtime: scope-merged
 
-This is the largest unknown in M7. The verb `propose_hire` lands a proposal row. M7 ships an approval flow. After approval, *something* has to:
+**Scope decision (2026-05-02)**: the agent-workspace-sandboxing issue
+(`docs/issues/agent-workspace-sandboxing.md`, tracked since 2026-04-24 as a
+"post-M2.3 Docker-per-agent" item) merges into M7. Rationale: M7 introduces
+the first runtime-created agents AND the first per-agent custom skills. The
+container is the natural skill-install boundary — storage isolation,
+refresh boundary, leak-scan target — so resolving the runtime + the install
+actuator in the same milestone gives a single coherent story instead of
+shipping two halves that have to be re-wired later.
+
+The verb `propose_hire` lands a proposal row. M7 ships an approval flow.
+After approval, *something* has to:
 
 1. Read `agents.skills` (post-INSERT).
 2. For each entry, fetch the skill package from the named registry.
-3. Place the skill on the supervisor's filesystem (or in a per-spawn ephemeral location).
-4. Reference the skill at spawn time so the spawned claude has it in context.
+3. **Build (or reuse) the per-agent container image** — base = the M5.1
+   `garrison-claude:m5` image (already proven for the chat runtime); add
+   the agent's installed skills as a layer (or bind-mount) at
+   `/workspace/.claude/skills/<package>/`.
+4. **Spawn the agent in the per-agent container** — instead of the current
+   direct-exec on the supervisor host. Claude finds installed skills in
+   the container's `~/.claude/skills` (claude's native convention).
 
-There's no code today that does any of this. Open questions:
+So M7 closes both the install actuator AND the three sandboxing concerns
+(`docs/issues/agent-workspace-sandboxing.md` §"Three distinct concerns"):
+sandbox escape, diary-vs-reality path divergence, and the QA cross-check
+gap — all become moot when paths inside the container can't diverge from
+disk truth.
 
-1. **Storage model**: per-deployment `~/.claude/skills/<package>` (claude's default convention)? Or per-supervisor `/var/lib/garrison/skills/<package>`? Or per-customer-id (multi-tenant)?
-2. **Refresh cadence**: do skills get re-fetched on every spawn (slow) or cached and rotated on a schedule (stale-cache risk)?
-3. **Sandboxing**: skills can include arbitrary prompt text *and* (per anthropic docs) tool definitions. Garrison's M2.3 vault threat model says agents see no secrets — does an installed skill have to pass leak-scan before it lands? Per-customer customization makes this nontrivial.
-4. **Versioning**: pin to a version tag at hire-time, OR follow the registry's `latest`?
-5. **Failure mode**: if the install fails post-approval, is the agent row rolled back? Or does the agent enter a `status='install_failed'` state and the operator retries from a button?
+**Substrate** (already in the codebase, do NOT redesign):
+
+- `garrison-claude:m5` image — built for chat in M5.1; auths via
+  `CLAUDE_CODE_OAUTH_TOKEN` env var (no keychain mount needed). Cold
+  start ~30s for the bake, per-turn under 1s once warm.
+- Docker socket-proxy at `garrison-docker-proxy` (TCP :2375, allow-list
+  `POST/EXEC/CONTAINERS`). Already used by M2.2 mempalace + M5.1 chat.
+  M7 needs `POST /containers/create` added to the allow-list (the
+  socket-proxy gate's biggest extension to date — needs an audit).
+- Vault-injection idiom (M2.3): supervisor injects per-agent secrets via
+  env vars at spawn time. Container path inherits this directly.
+
+**Open questions for the M7 plan**:
+
+1. **Storage model**: per-agent-row Docker image (heavy — N agents = N
+   images) or single base image + per-agent bind-mount of
+   `/var/lib/garrison/skills/<agent-id>/` into `/workspace/.claude/skills`?
+   Lean: bind-mount, single image. Image rebuilds become an M7 retry.
+2. **Refresh cadence**: re-fetch skills on every agent spawn (slow,
+   stale-free) or cache and rotate on a schedule (fast, stale-risk)?
+   Lean: cache; supervisor invalidates on `agent.skills` UPDATE.
+3. **Skill leak-scan**: skills can carry arbitrary prompt text + tool
+   definitions. Per `docs/issues/agent-workspace-sandboxing.md` §"Three
+   distinct concerns" + M2.3 vault threat model, an installed skill should
+   pass leak-scan before it lands. Reuse the M2.3 finalize leak-scan?
+4. **Versioning**: pin to a version tag at hire-time, OR follow the
+   registry's `latest`? Pin is safer; latest is more honest about a
+   living registry. Probably pin + a `bump_skill_version` verb.
+5. **Failure mode**: if the install fails post-approval, is the agent row
+   rolled back? Or does the agent enter `status='install_failed'` and
+   the operator retries from a button?
+6. **Docker-proxy allow-list extension**: adding `POST /containers/create`
+   broadens the proxy's surface from "exec into existing containers" to
+   "create new containers". This is a one-time threat-model amendment
+   that needs the same posture as the M2.3 vault work — explicit
+   security-doc update before code lands. See
+   `docs/issues/agent-workspace-sandboxing.md` §"Planned resolution".
+7. **Rollout**: do all existing agents (engineer, qa-engineer) move to the
+   container runtime when M7 ships, or only newly-hired ones? The
+   migration matters for backwards-compat: existing departments won't
+   have an M7 container image. Lean: rebuild all agents at M7 ship.
 
 ---
 
-## §5 — What M7 inherits cleanly from M5.3
+## §5 — What M7 inherits cleanly from M5.x
 
 - The proposal table + verb. **Don't redesign** — the schema is ready for the status transitions M7 adds.
 - The `chat_mutation_audit` table. Every M7 approval write goes through the same audit pipeline.
 - The dashboard's read-only proposals page is a styling start; M7 extends with approve/reject buttons.
 - The `agents` schema needs no change for the `.skills` extension — the column is already there.
 - The vault threat model is unchanged; M7 doesn't introduce new agent-vs-vault interactions.
+- **The chat-container runtime** (M5.1's `garrison-claude:m5` image + token-via-env auth + socket-proxy gate) — M7 reuses the image as the agent-container base, extending §4's per-agent skill-mount on top. This is the largest single thing M7 inherits.
 
 What M7 does NOT inherit (must build):
 
 - Registry client(s).
-- Install actuator + storage layout.
+- Install actuator + storage layout (now scope-merged with the agent runtime per §4).
 - Approve/reject server actions on the dashboard.
-- Per-skill leak-scan policy (or an explicit decision to skip).
+- Per-skill leak-scan policy (or an explicit decision to skip — likely reuse M2.3's leak-scan).
 - The "agents row appears post-approval" lifecycle — today every agent is seeded by a migration; M7 introduces the first runtime-created agent rows.
+- **`POST /containers/create` allow-list addition** to the docker-socket-proxy (one-time threat-model amendment; see §4 Q6).
 
 ---
 
 ## §6 — Open questions for the M7 context doc
 
-1. ~~**SkillHub re-check verdict** — at M7 kickoff: ship-with-SkillHub, ship-with-fallback, or defer M7 entirely?~~ **Closed 2026-05-02: ship-with-SkillHub.** The deployment-shape sub-question (single-container vs. K8s vs. managed) is still open and rolls into the M7 plan's first task.
+1. ~~**SkillHub re-check verdict** — at M7 kickoff: ship-with-SkillHub, ship-with-fallback, or defer M7 entirely?~~ **Closed 2026-05-02: ship-with-SkillHub.** Deployment shape (single-container vs. K8s vs. managed) rolls into the M7 plan's first task.
 2. **`agents.skills` JSONB shape** — finalize the entry schema (registry / package / version / [config]?).
-3. **Install storage layout** — supervisor-host filesystem, per-customer? per-spawn? per-agent-row?
-4. **Install timing** — at-approval (eager) or at-first-spawn (lazy)? Affects rollback semantics.
+3. ~~**Install storage layout** — supervisor-host filesystem, per-customer? per-spawn? per-agent-row?~~ **Lean closed via §4 scope-merge: per-agent bind-mount of `/var/lib/garrison/skills/<agent-id>/` into the per-agent container's `/workspace/.claude/skills`.** Plan-level decision.
+4. **Install timing** — at-approval (eager, container rebuild) or at-first-spawn (lazy bind-mount)? Affects rollback semantics + cold-start latency.
 5. **mcp-builder integration** — installed-skill or excluded-from-skill-list (development-only meta-tool)?
 6. **Failure-mode UX** — what does an operator see if `install_skill` fails between approval and agent activation?
 7. **Multi-tenant scope** — when Garrison hosts multiple customers, do skill installs get a customer-id prefix on the storage path? Do they inherit Infisical-style secret scoping?
 8. **Approval guardrails** — the operator approves; does the supervisor enforce any policy (e.g. skill from an allow-listed registry)? Or is approval purely operator-judgment?
+9. **Existing-agent migration** — when M7 ships per-agent containers, do the M2.x-seeded `engineer` + `qa-engineer` rows migrate to the container runtime, or only newly-hired agents? Lean: full migration (otherwise we keep the direct-exec runtime alive forever).
+10. **Image-build vs bind-mount tradeoff** — per-agent rebuilds of `garrison-claude:m5 + skills` are slow but immutable; bind-mounts are fast but mutable. The choice affects audit (can the operator point at a single immutable image hash for a given agent invocation?).
 
 ---
 
