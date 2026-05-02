@@ -15,7 +15,7 @@ const baseTicket: TicketCardRow = {
   objective: 'Build the kanban thing',
   columnSlug: 'in_dev',
   createdAt: new Date('2026-05-02T10:00:00Z'),
-  agentRoleSlug: null,
+  assignedAgentRoleSlug: null,
   parentTicketId: null,
 };
 
