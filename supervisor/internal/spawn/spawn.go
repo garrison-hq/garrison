@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/garrison-hq/garrison/supervisor/internal/agents"
+	"github.com/garrison-hq/garrison/supervisor/internal/claudeproto"
 	"github.com/garrison-hq/garrison/supervisor/internal/concurrency"
 	"github.com/garrison-hq/garrison/supervisor/internal/finalize"
 	"github.com/garrison-hq/garrison/supervisor/internal/mcpconfig"
@@ -812,11 +813,37 @@ func runRealClaude(
 	go func() {
 		defer close(pipelineDone)
 		result = Result{}
+		// M6 T008: rate-limit pause actuator. Wires the FirePause call
+		// into a short independent tx so the in-flight stream read isn't
+		// blocked. CompanyID is captured here at policy construction
+		// (resolved via dept earlier in this function); on FirePause
+		// failure the closure logs at warn level and the spawn keeps
+		// running per FR-043.
+		var onRateLimitRejected func(context.Context, claudeproto.RateLimitEvent)
+		if dept.CompanyID.Valid && deps.Throttle.Pool != nil {
+			companyID := dept.CompanyID
+			throttleDeps := deps.Throttle
+			onRateLimitRejected = func(rlCtx context.Context, e claudeproto.RateLimitEvent) {
+				detail := throttle.RateLimitDetail{
+					Status:        e.Info.Status,
+					RateLimitType: e.Info.RateLimitType,
+					TotalCostUSD:  result.TotalCostUSD,
+				}
+				if err := pgx.BeginFunc(rlCtx, throttleDeps.Pool, func(tx pgx.Tx) error {
+					return throttle.FirePause(rlCtx, throttleDeps, store.New(tx), companyID, detail)
+				}); err != nil {
+					logger.Warn("throttle: FirePause failed; in-flight spawn continues",
+						"company_id", formatUUID(companyID),
+						"err", err)
+				}
+			}
+		}
 		policy := NewFinalizePolicy(logger, instanceID, ticketUUID, &result, FinalizeDeps{
-			Expected:    finalizeExpected,
-			State:       finalizeState,
-			OnCommit:    onCommit,
-			ResultGrace: deps.FinalizeResultGrace,
+			Expected:            finalizeExpected,
+			State:               finalizeState,
+			OnCommit:            onCommit,
+			ResultGrace:         deps.FinalizeResultGrace,
+			OnRateLimitRejected: onRateLimitRejected,
 		}, onBail)
 		result, pipelineErr = Run(execCtx, stdout, policy, logger)
 	}()

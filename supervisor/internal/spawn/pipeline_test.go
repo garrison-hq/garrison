@@ -905,6 +905,94 @@ func TestFinalizeResultGracePostsHonestCost(t *testing.T) {
 	}
 }
 
+// -------- M6 T008 OnRateLimit actuator --------------------------------
+
+// TestOnRateLimit_FiresPauseOnRejected — when claude emits a rate_limit
+// event with Status="rejected", FinalizePolicy.OnRateLimit invokes the
+// onRateLimitRejected closure exactly once. spawn.go wires the closure
+// to throttle.FirePause; the test verifies the pipeline-side dispatch
+// without standing up a Postgres testcontainer.
+func TestOnRateLimit_FiresPauseOnRejected(t *testing.T) {
+	var fired atomic.Int32
+	var capturedStatus atomic.Value
+	policy := NewFinalizePolicy(discardLogger(), pgtype.UUID{}, pgtype.UUID{}, &Result{},
+		FinalizeDeps{
+			OnRateLimitRejected: func(_ context.Context, e claudeproto.RateLimitEvent) {
+				fired.Add(1)
+				capturedStatus.Store(e.Info.Status)
+			},
+		}, nil)
+	policy.OnRateLimit(context.Background(), claudeproto.RateLimitEvent{
+		Info: claudeproto.RateLimitInfo{Status: "rejected", RateLimitType: "input"},
+	})
+	if fired.Load() != 1 {
+		t.Errorf("actuator fired %d times; want 1", fired.Load())
+	}
+	if capturedStatus.Load().(string) != "rejected" {
+		t.Errorf("captured status = %q; want rejected", capturedStatus.Load())
+	}
+}
+
+// TestOnRateLimit_DoesNotFireOnNonRejected — observational rate-limit
+// events ("warn", "using_overage") must NOT trigger the actuator. The
+// pause is only meaningful when claude has refused requests; lower-tier
+// signals are log-only.
+func TestOnRateLimit_DoesNotFireOnNonRejected(t *testing.T) {
+	for _, status := range []string{"warn", "using_overage", "approaching", ""} {
+		t.Run("status="+status, func(t *testing.T) {
+			var fired atomic.Int32
+			policy := NewFinalizePolicy(discardLogger(), pgtype.UUID{}, pgtype.UUID{}, &Result{},
+				FinalizeDeps{
+					OnRateLimitRejected: func(_ context.Context, _ claudeproto.RateLimitEvent) {
+						fired.Add(1)
+					},
+				}, nil)
+			policy.OnRateLimit(context.Background(), claudeproto.RateLimitEvent{
+				Info: claudeproto.RateLimitInfo{Status: status},
+			})
+			if fired.Load() != 0 {
+				t.Errorf("actuator fired %d times for status=%q; want 0", fired.Load(), status)
+			}
+		})
+	}
+}
+
+// TestOnRateLimit_DoesNotKillInFlightSpawn — firing the actuator must
+// not signal bail. The in-flight spawn keeps reading stream events to
+// completion; FR-043 says the pause only affects subsequent spawns.
+// Verified by routing a rejected rate-limit through Run mid-stream and
+// confirming Result accumulates the trailing result event normally.
+func TestOnRateLimit_DoesNotKillInFlightSpawn(t *testing.T) {
+	stream := strings.Join([]string{
+		fixtureInit,
+		`{"type":"rate_limit_event","session_id":"sess-1","uuid":"rl-1","rate_limit_info":{"status":"rejected","resetsAt":1700000000,"rateLimitType":"input","utilization":1.0,"isUsingOverage":false,"surpassedThreshold":1.0}}`,
+		fixtureResult,
+	}, "\n") + "\n"
+
+	var fired atomic.Int32
+	var bailed atomic.Bool
+	policy := NewFinalizePolicy(discardLogger(), pgtype.UUID{}, pgtype.UUID{}, &Result{},
+		FinalizeDeps{
+			OnRateLimitRejected: func(_ context.Context, _ claudeproto.RateLimitEvent) {
+				fired.Add(1)
+			},
+		},
+		func(_ string) { bailed.Store(true) })
+	r, err := Run(context.Background(), strings.NewReader(stream), policy, discardLogger())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if fired.Load() != 1 {
+		t.Errorf("actuator fired %d times; want 1", fired.Load())
+	}
+	if bailed.Load() {
+		t.Error("rate-limit must NOT bail the in-flight spawn")
+	}
+	if !r.ResultSeen {
+		t.Error("result event after rate_limit_event should still be observed")
+	}
+}
+
 // TestFinalizeResultGraceTimesOutGracefully validates the failure-mode
 // contract: when no result event arrives within ResultGrace, onCommit
 // fires anyway with cost still empty. Mirrors the FR-021 promise that

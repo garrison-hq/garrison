@@ -165,6 +165,13 @@ type FinalizePolicy struct {
 	// closure was passed as a separate Run() parameter; the Policy
 	// refactor consolidates lifecycle state into the policy struct.
 	bailFn func(reason string)
+
+	// M6 T008: rate-limit actuator closure. Stored on the policy
+	// struct (not the finalizeHook) so non-finalize-expected roles
+	// also benefit from the per-company pause when claude rejects
+	// requests for budget reasons. Nil disables the actuator (test
+	// paths + back-compat).
+	onRateLimitRejected func(ctx context.Context, e claudeproto.RateLimitEvent)
 }
 
 // finalizeHook is the internal wiring for T006/T007. It bundles the
@@ -222,6 +229,14 @@ type FinalizeDeps struct {
 	// commit semantics; positive values enable the deferred-commit path.
 	// spawn.Deps.FinalizeResultGrace flows here at construction time.
 	ResultGrace time.Duration
+	// M6 T008: OnRateLimitRejected fires when a rate_limit_event lands
+	// with Status == "rejected". spawn.go wires a closure that opens a
+	// short independent tx and calls throttle.FirePause; tests inject
+	// a recording closure to verify the actuator fires only on
+	// rejected (not on warn/using_overage). Nil disables the actuator
+	// (back-compat shape for existing tests + non-rate-limit-aware
+	// flows).
+	OnRateLimitRejected func(ctx context.Context, e claudeproto.RateLimitEvent)
 }
 
 // isFinalizeToolName matches either the bare tool name or Claude's
@@ -473,7 +488,7 @@ func (p *FinalizePolicy) handleFinalizeToolResult(tr claudeproto.ToolResultSumma
 	}
 }
 
-func (p *FinalizePolicy) OnRateLimit(_ context.Context, e claudeproto.RateLimitEvent) {
+func (p *FinalizePolicy) OnRateLimit(ctx context.Context, e claudeproto.RateLimitEvent) {
 	p.logger.Warn("claude rate_limit_event",
 		"instance_id", uuidString(p.instanceID),
 		"session_id", e.SessionID,
@@ -484,6 +499,17 @@ func (p *FinalizePolicy) OnRateLimit(_ context.Context, e claudeproto.RateLimitE
 		"utilization", e.Info.Utilization,
 		"is_using_overage", e.Info.IsUsingOverage,
 		"surpassed_threshold", e.Info.SurpassedThreshold)
+
+	// M6 T008: fire the rate-limit-pause actuator only on hard rejection.
+	// "warn" / "using_overage" are observational; "rejected" means claude
+	// refused the request and the supervisor should pause spawns for
+	// this company until the back-off elapses. The actuator runs in a
+	// short independent tx (composed by spawn.go) so it doesn't block
+	// the in-flight stream read; FirePause failures are logged at warn
+	// level and the in-flight spawn keeps running per FR-043.
+	if e.Info.Status == "rejected" && p.onRateLimitRejected != nil {
+		p.onRateLimitRejected(ctx, e)
+	}
 }
 
 func (p *FinalizePolicy) OnResult(_ context.Context, e claudeproto.ResultEvent) {
@@ -778,6 +804,7 @@ func NewFinalizePolicy(
 		}
 		finalize.State.Expected = true
 	}
+	r.onRateLimitRejected = finalize.OnRateLimitRejected
 	return r
 }
 
