@@ -145,6 +145,8 @@ Read this before proposing changes. Most "wouldn't it be better if..." questions
 
 **Trade-off accepted**: We depend on an external registry and its availability. If skills.sh goes down or changes its contract, our hiring flow breaks. We mitigate by caching installed skills locally (they're just files) and by auditing new skills during the hiring approval step. We do not mitigate by running our own mirror — the overhead outweighs the risk at our scale.
 
+**Amendment 2026-05-04 (M7)**: At the M7 hiring-flow ship the registry surface broadens from skills.sh-only to **skills.sh (public) + self-hosted SkillHub (`github.com/iflytek/skillhub`, deployed alongside the supervisor on Garrison's own host)**. The decision was committed at the M7 spike (`docs/research/m7-spike.md` §2 verdict: SHIP) and codified by the M7 hiring threat model (`docs/security/hiring-threat-model.md` §5 "registries provide vs. Garrison builds"). Why the addition rather than skills.sh-only: SkillHub's per-publisher account model + governance surface aligns with what a multi-tenant Garrison deployment will need post-M9, and SkillHub being self-hostable preserves Principle XI ("self-hosted on Hetzner") that the original §7 framing implicitly assumed. The original "no curated internal library" rule still holds — SkillHub is a registry, not a library, and the operator approves each install the same way they approve a skills.sh install.
+
 ---
 
 ## 8. Why UI-driven hiring instead of git-PR hiring
