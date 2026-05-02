@@ -375,8 +375,14 @@ throttleDeps := throttle.Deps{
     Now:                 time.Now,
 }
 
-// passed into:
+// passed into spawn.Deps (the existing struct in supervisor/internal/spawn/spawn.go):
 spawnDeps.Throttle = throttleDeps
+// also passed into chat.Deps (existing struct in supervisor/internal/chat/deps.go):
+chatDeps.MaxTicketsPerTurn = cfg.MaxTicketsPerTurn
+// and into hygiene.Deps (existing struct in supervisor/internal/hygiene/deps.go):
+hygieneDeps.ThinDiaryThreshold = cfg.ThinDiaryThreshold
+// and (FinalizeResultGrace) into spawn.Deps for the cost-telemetry result-grace path:
+spawnDeps.FinalizeResultGrace = cfg.FinalizeResultGrace
 ```
 
 No new errgroup goroutines. No new LISTEN channels at the supervisor side (the supervisor only EMITS `work.throttle.event`; the dashboard SSE bridge subscribes).
