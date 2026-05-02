@@ -2,7 +2,7 @@
 // Run `bun run drizzle:pull` to regenerate.
 // Source: goose-managed migrations under ../../migrations/.
 
-import { pgTable, integer, bigint, boolean, timestamp, index, foreignKey, uuid, text, numeric, jsonb, unique, check, primaryKey, interval } from "drizzle-orm/pg-core"
+import { pgTable, integer, bigint, boolean, timestamp, index, foreignKey, uuid, text, numeric, jsonb, unique, check, smallint, primaryKey, interval } from "drizzle-orm/pg-core"
 import { sql } from "drizzle-orm"
 
 
@@ -51,29 +51,6 @@ export const eventOutbox = pgTable("event_outbox", {
 	index("idx_event_outbox_unprocessed").using("btree", table.createdAt.asc().nullsLast().op("timestamptz_ops")).where(sql`(processed_at IS NULL)`),
 ]);
 
-export const tickets = pgTable("tickets", {
-	id: uuid().defaultRandom().primaryKey().notNull(),
-	departmentId: uuid("department_id").notNull(),
-	objective: text().notNull(),
-	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-	columnSlug: text("column_slug").default('todo').notNull(),
-	acceptanceCriteria: text("acceptance_criteria"),
-	metadata: jsonb().default({}).notNull(),
-	origin: text().default('sql').notNull(),
-	createdViaChatSessionId: uuid("created_via_chat_session_id"),
-}, (table) => [
-	foreignKey({
-			columns: [table.departmentId],
-			foreignColumns: [departments.id],
-			name: "tickets_department_id_fkey"
-		}),
-	foreignKey({
-			columns: [table.createdViaChatSessionId],
-			foreignColumns: [chatSessions.id],
-			name: "tickets_created_via_chat_session_id_fkey"
-		}).onDelete("set null"),
-]);
-
 export const departments = pgTable("departments", {
 	id: uuid().defaultRandom().primaryKey().notNull(),
 	slug: text().notNull(),
@@ -92,10 +69,43 @@ export const departments = pgTable("departments", {
 	unique("departments_slug_key").on(table.slug),
 ]);
 
+export const tickets = pgTable("tickets", {
+	id: uuid().defaultRandom().primaryKey().notNull(),
+	departmentId: uuid("department_id").notNull(),
+	objective: text().notNull(),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	columnSlug: text("column_slug").default('todo').notNull(),
+	acceptanceCriteria: text("acceptance_criteria"),
+	metadata: jsonb().default({}).notNull(),
+	origin: text().default('sql').notNull(),
+	createdViaChatSessionId: uuid("created_via_chat_session_id"),
+	parentTicketId: uuid("parent_ticket_id"),
+}, (table) => [
+	index("idx_tickets_chat_session").using("btree", table.createdViaChatSessionId.asc().nullsLast().op("uuid_ops")).where(sql`(created_via_chat_session_id IS NOT NULL)`),
+	index("idx_tickets_parent").using("btree", table.parentTicketId.asc().nullsLast().op("uuid_ops")).where(sql`(parent_ticket_id IS NOT NULL)`),
+	foreignKey({
+			columns: [table.departmentId],
+			foreignColumns: [departments.id],
+			name: "tickets_department_id_fkey"
+		}),
+	foreignKey({
+			columns: [table.createdViaChatSessionId],
+			foreignColumns: [chatSessions.id],
+			name: "tickets_created_via_chat_session_id_fkey"
+		}).onDelete("set null"),
+	foreignKey({
+			columns: [table.parentTicketId],
+			foreignColumns: [table.id],
+			name: "tickets_parent_ticket_id_fkey"
+		}),
+]);
+
 export const companies = pgTable("companies", {
 	id: uuid().defaultRandom().primaryKey().notNull(),
 	name: text().notNull(),
 	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	dailyBudgetUsd: numeric("daily_budget_usd", { precision: 10, scale:  2 }),
+	pauseUntil: timestamp("pause_until", { withTimezone: true, mode: 'string' }),
 });
 
 export const agents = pgTable("agents", {
@@ -183,8 +193,8 @@ export const chatSessions = pgTable("chat_sessions", {
 	isArchived: boolean("is_archived").default(false).notNull(),
 }, (table) => [
 	index("idx_chat_sessions_active").using("btree", table.status.asc().nullsLast().op("text_ops")).where(sql`(status = 'active'::text)`),
-	index("idx_chat_sessions_user_active_unarchived").using("btree", table.startedByUserId.asc().nullsLast().op("uuid_ops"), table.startedAt.desc().nullsFirst().op("timestamptz_ops")).where(sql`(is_archived = false)`),
-	index("idx_chat_sessions_user_started").using("btree", table.startedByUserId.asc().nullsLast().op("timestamptz_ops"), table.startedAt.desc().nullsFirst().op("timestamptz_ops")),
+	index("idx_chat_sessions_user_active_unarchived").using("btree", table.startedByUserId.asc().nullsLast().op("timestamptz_ops"), table.startedAt.desc().nullsFirst().op("uuid_ops")).where(sql`(is_archived = false)`),
+	index("idx_chat_sessions_user_started").using("btree", table.startedByUserId.asc().nullsLast().op("uuid_ops"), table.startedAt.desc().nullsFirst().op("uuid_ops")),
 	check("chat_sessions_status_check", sql`status = ANY (ARRAY['active'::text, 'ended'::text, 'aborted'::text])`),
 ]);
 
@@ -212,6 +222,79 @@ export const chatMessages = pgTable("chat_messages", {
 	unique("chat_messages_session_id_turn_index_key").on(table.sessionId, table.turnIndex),
 	check("chat_messages_role_check", sql`role = ANY (ARRAY['operator'::text, 'assistant'::text])`),
 	check("chat_messages_status_check", sql`status = ANY (ARRAY['pending'::text, 'streaming'::text, 'completed'::text, 'failed'::text, 'aborted'::text])`),
+]);
+
+export const chatMutationAudit = pgTable("chat_mutation_audit", {
+	id: uuid().defaultRandom().primaryKey().notNull(),
+	chatSessionId: uuid("chat_session_id").notNull(),
+	chatMessageId: uuid("chat_message_id").notNull(),
+	verb: text().notNull(),
+	argsJsonb: jsonb("args_jsonb").notNull(),
+	outcome: text().notNull(),
+	reversibilityClass: smallint("reversibility_class").notNull(),
+	affectedResourceId: text("affected_resource_id"),
+	affectedResourceType: text("affected_resource_type"),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+}, (table) => [
+	index("idx_cma_resource").using("btree", table.affectedResourceType.asc().nullsLast().op("text_ops"), table.affectedResourceId.asc().nullsLast().op("text_ops")),
+	index("idx_cma_session").using("btree", table.chatSessionId.asc().nullsLast().op("uuid_ops"), table.createdAt.desc().nullsFirst().op("timestamptz_ops")),
+	foreignKey({
+			columns: [table.chatSessionId],
+			foreignColumns: [chatSessions.id],
+			name: "chat_mutation_audit_chat_session_id_fkey"
+		}).onDelete("cascade"),
+	foreignKey({
+			columns: [table.chatMessageId],
+			foreignColumns: [chatMessages.id],
+			name: "chat_mutation_audit_chat_message_id_fkey"
+		}).onDelete("cascade"),
+	check("chat_mutation_audit_verb_check", sql`verb = ANY (ARRAY['create_ticket'::text, 'edit_ticket'::text, 'transition_ticket'::text, 'pause_agent'::text, 'resume_agent'::text, 'spawn_agent'::text, 'edit_agent_config'::text, 'propose_hire'::text])`),
+	check("chat_mutation_audit_outcome_check", sql`outcome = ANY (ARRAY['success'::text, 'validation_failed'::text, 'leak_scan_failed'::text, 'ticket_state_changed'::text, 'concurrency_cap_full'::text, 'invalid_transition'::text, 'resource_not_found'::text, 'tool_call_ceiling_reached'::text])`),
+	check("chat_mutation_audit_reversibility_class_check", sql`reversibility_class = ANY (ARRAY[1, 2, 3])`),
+	check("chat_mutation_audit_affected_resource_type_check", sql`affected_resource_type = ANY (ARRAY['ticket'::text, 'agent_role'::text, 'hiring_proposal'::text])`),
+]);
+
+export const hiringProposals = pgTable("hiring_proposals", {
+	id: uuid().defaultRandom().primaryKey().notNull(),
+	roleTitle: text("role_title").notNull(),
+	departmentSlug: text("department_slug").notNull(),
+	justificationMd: text("justification_md").notNull(),
+	skillsSummaryMd: text("skills_summary_md"),
+	proposedVia: text("proposed_via").notNull(),
+	proposedByChatSessionId: uuid("proposed_by_chat_session_id"),
+	status: text().default('pending').notNull(),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+}, (table) => [
+	index("idx_hp_chat_session").using("btree", table.proposedByChatSessionId.asc().nullsLast().op("uuid_ops")).where(sql`(proposed_by_chat_session_id IS NOT NULL)`),
+	index("idx_hp_status_dept").using("btree", table.status.asc().nullsLast().op("timestamptz_ops"), table.departmentSlug.asc().nullsLast().op("text_ops"), table.createdAt.desc().nullsFirst().op("text_ops")),
+	foreignKey({
+			columns: [table.departmentSlug],
+			foreignColumns: [departments.slug],
+			name: "hiring_proposals_department_slug_fkey"
+		}).onDelete("restrict"),
+	foreignKey({
+			columns: [table.proposedByChatSessionId],
+			foreignColumns: [chatSessions.id],
+			name: "hiring_proposals_proposed_by_chat_session_id_fkey"
+		}).onDelete("set null"),
+	check("hiring_proposals_proposed_via_check", sql`proposed_via = ANY (ARRAY['ceo_chat'::text, 'dashboard'::text, 'agent'::text])`),
+	check("hiring_proposals_status_check", sql`status = ANY (ARRAY['pending'::text, 'approved'::text, 'rejected'::text, 'superseded'::text])`),
+]);
+
+export const throttleEvents = pgTable("throttle_events", {
+	id: uuid().defaultRandom().primaryKey().notNull(),
+	companyId: uuid("company_id").notNull(),
+	kind: text().notNull(),
+	firedAt: timestamp("fired_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	payload: jsonb().default({}).notNull(),
+}, (table) => [
+	index("idx_throttle_events_company_fired").using("btree", table.companyId.asc().nullsLast().op("timestamptz_ops"), table.firedAt.desc().nullsFirst().op("timestamptz_ops")),
+	foreignKey({
+			columns: [table.companyId],
+			foreignColumns: [companies.id],
+			name: "throttle_events_company_id_fkey"
+		}),
+	check("throttle_events_kind_check", sql`kind = ANY (ARRAY['company_budget_exceeded'::text, 'rate_limit_pause'::text])`),
 ]);
 
 export const agentRoleSecrets = pgTable("agent_role_secrets", {
@@ -242,61 +325,4 @@ export const secretMetadata = pgTable("secret_metadata", {
 }, (table) => [
 	primaryKey({ columns: [table.secretPath, table.customerId], name: "secret_metadata_pkey"}),
 	check("secret_metadata_rotation_provider_check", sql`rotation_provider = ANY (ARRAY['infisical_native'::text, 'manual_paste'::text, 'not_rotatable'::text])`),
-]);
-
-export const chatMutationAudit = pgTable("chat_mutation_audit", {
-	id: uuid().defaultRandom().primaryKey().notNull(),
-	chatSessionId: uuid("chat_session_id").notNull(),
-	chatMessageId: uuid("chat_message_id").notNull(),
-	verb: text().notNull(),
-	argsJsonb: jsonb("args_jsonb").notNull(),
-	outcome: text().notNull(),
-	reversibilityClass: integer("reversibility_class").notNull(),
-	affectedResourceId: text("affected_resource_id"),
-	affectedResourceType: text("affected_resource_type"),
-	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-}, (table) => [
-	index("idx_cma_session").on(table.chatSessionId, table.createdAt),
-	index("idx_cma_resource").on(table.affectedResourceType, table.affectedResourceId),
-	foreignKey({
-			columns: [table.chatSessionId],
-			foreignColumns: [chatSessions.id],
-			name: "chat_mutation_audit_chat_session_id_fkey"
-		}).onDelete("cascade"),
-	foreignKey({
-			columns: [table.chatMessageId],
-			foreignColumns: [chatMessages.id],
-			name: "chat_mutation_audit_chat_message_id_fkey"
-		}).onDelete("cascade"),
-	check("chat_mutation_audit_verb_check", sql`verb = ANY (ARRAY['create_ticket'::text, 'edit_ticket'::text, 'transition_ticket'::text, 'pause_agent'::text, 'resume_agent'::text, 'spawn_agent'::text, 'edit_agent_config'::text, 'propose_hire'::text])`),
-	check("chat_mutation_audit_outcome_check", sql`outcome = ANY (ARRAY['success'::text, 'validation_failed'::text, 'leak_scan_failed'::text, 'ticket_state_changed'::text, 'concurrency_cap_full'::text, 'invalid_transition'::text, 'resource_not_found'::text, 'tool_call_ceiling_reached'::text])`),
-	check("chat_mutation_audit_reversibility_class_check", sql`reversibility_class = ANY (ARRAY[1, 2, 3])`),
-	check("chat_mutation_audit_affected_resource_type_check", sql`affected_resource_type = ANY (ARRAY['ticket'::text, 'agent_role'::text, 'hiring_proposal'::text])`),
-]);
-
-export const hiringProposals = pgTable("hiring_proposals", {
-	id: uuid().defaultRandom().primaryKey().notNull(),
-	roleTitle: text("role_title").notNull(),
-	departmentSlug: text("department_slug").notNull(),
-	justificationMd: text("justification_md").notNull(),
-	skillsSummaryMd: text("skills_summary_md"),
-	proposedVia: text("proposed_via").notNull(),
-	proposedByChatSessionId: uuid("proposed_by_chat_session_id"),
-	status: text().default('pending').notNull(),
-	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-}, (table) => [
-	index("idx_hp_status_dept").on(table.status, table.departmentSlug, table.createdAt),
-	index("idx_hp_chat_session").on(table.proposedByChatSessionId),
-	foreignKey({
-			columns: [table.departmentSlug],
-			foreignColumns: [departments.slug],
-			name: "hiring_proposals_department_slug_fkey"
-		}).onDelete("restrict"),
-	foreignKey({
-			columns: [table.proposedByChatSessionId],
-			foreignColumns: [chatSessions.id],
-			name: "hiring_proposals_proposed_by_chat_session_id_fkey"
-		}).onDelete("set null"),
-	check("hiring_proposals_proposed_via_check", sql`proposed_via = ANY (ARRAY['ceo_chat'::text, 'dashboard'::text, 'agent'::text])`),
-	check("hiring_proposals_status_check", sql`status = ANY (ARRAY['pending'::text, 'approved'::text, 'rejected'::text, 'superseded'::text])`),
 ]);
