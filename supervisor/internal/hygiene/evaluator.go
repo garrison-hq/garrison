@@ -39,9 +39,20 @@ const (
 	StatusFinalizePartial Status = "finalize_partial"
 	StatusStuck           Status = "stuck"
 
+	// M6 T012 additions. ThinDiary supersedes the legacy Thin status:
+	// the threshold is operator-tunable (default 200, env-tunable via
+	// GARRISON_HYGIENE_THIN_DIARY_THRESHOLD). MissingKgFacts is the
+	// kg_query-by-ticket-id-result-empty predicate (vs. the M2.2
+	// timeline-style MissingKG which uses a window-bounded any-triples
+	// scan). Both surface in the M6 hygiene-table extension (T016).
+	StatusThinDiary      Status = "thin_diary"
+	StatusMissingKgFacts Status = "missing_kg_facts"
+
 	// ThinBodyThreshold is the per-FR-214 boundary: diary body < 100
 	// chars is flagged as 'thin' regardless of KG-triple presence. The
 	// rule applies only when a matching diary exists in the first place.
+	// M6 keeps this threshold for back-compat; new rows use the
+	// EvaluationInput.ThinDiaryThreshold (default 200).
 	ThinBodyThreshold = 100
 )
 
@@ -139,6 +150,23 @@ type EvaluationInput struct {
 	KGTriples []PalaceTriple
 
 	PalaceErr error
+
+	// M6 T012 fields. Setting ThinDiaryThreshold > 0 enables the M6
+	// evaluator path (StatusThinDiary + StatusMissingKgFacts) which
+	// supersedes the legacy StatusThin / StatusMissingKG ordering for
+	// rows the listener/sweep populates with the new fields. Zero
+	// preserves M2.2 evaluator behaviour byte-for-byte.
+	ThinDiaryThreshold int
+	// KGFactsForTicket is the result of mempalace.QueryClient.
+	// KgQueryByTicketID — a ticket-keyed kg_query (vs the timeline-
+	// style query KGTriples is populated from). The new evaluator
+	// path uses this list (rather than the window-bounded any-triple
+	// scan) to decide MissingKgFacts.
+	KGFactsForTicket []PalaceTriple
+	// KGFactsForTicketErr is the error from KgQueryByTicketID. Non-
+	// nil → the evaluator skips the MissingKgFacts predicate (soft-
+	// gates posture per Constitution IV).
+	KGFactsForTicketErr error
 }
 
 // Evaluate applies the FR-214 rule set:
@@ -164,6 +192,21 @@ func Evaluate(in EvaluationInput) Status {
 	if matchingDiary == nil {
 		return StatusMissingDiary
 	}
+	// M6 T012 path: ThinDiaryThreshold > 0 selects the M6 ordering.
+	// thin_diary fires before missing_kg_facts; both supersede the
+	// legacy StatusThin/StatusMissingKG vocabulary for new rows.
+	if in.ThinDiaryThreshold > 0 {
+		if len(matchingDiary.Body) < in.ThinDiaryThreshold {
+			return StatusThinDiary
+		}
+		// Sidecar failure → skip the missing_kg_facts predicate per
+		// the soft-gates posture (Constitution IV).
+		if in.KGFactsForTicketErr == nil && len(in.KGFactsForTicket) == 0 {
+			return StatusMissingKgFacts
+		}
+		return StatusClean
+	}
+	// Legacy M2.2 path (preserved for back-compat).
 	if len(matchingDiary.Body) < ThinBodyThreshold {
 		return StatusThin
 	}

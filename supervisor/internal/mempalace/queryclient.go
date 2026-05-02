@@ -179,6 +179,79 @@ func (c *QueryClient) RecentKGTriples(ctx context.Context, limit int) ([]KGTripl
 	return items, nil
 }
 
+// KgQueryByTicketID returns every KG triple that mentions the supplied
+// ticket id (as subject or object). Unlike RecentKGTriples (timeline-
+// style, palace-wide) this calls mempalace_kg_query with a ticket-keyed
+// filter so the M6 hygiene evaluator can decide missing_kg_facts on a
+// per-ticket basis. Returns ErrSidecarUnreachable on docker exec or
+// parse failure (the evaluator skips the predicate on that error per
+// the soft-gates posture).
+func (c *QueryClient) KgQueryByTicketID(ctx context.Context, ticketIDText string) ([]KGTriple, error) {
+	if ticketIDText == "" {
+		return nil, nil
+	}
+	if c.MempalaceContainer == "" || c.PalacePath == "" {
+		return nil, fmt.Errorf("%w: missing container or palace path", ErrSidecarUnreachable)
+	}
+	if c.Exec == nil {
+		return nil, fmt.Errorf("%w: no DockerExec", ErrSidecarUnreachable)
+	}
+	timeout := c.Timeout
+	if timeout == 0 {
+		timeout = 10 * time.Second
+	}
+	runCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	stdout, stderr, err := c.Exec.Run(runCtx, c.execArgs(), bytes.NewReader(buildKGQueryByTicketRequest(ticketIDText)))
+	if err != nil {
+		return nil, fmt.Errorf("%w: docker exec: %v: stderr=%s", ErrSidecarUnreachable, err, stderr)
+	}
+	items, err := parseKGTimelineResponse(stdout)
+	if err != nil {
+		return nil, fmt.Errorf("%w: parse: %v", ErrSidecarUnreachable, err)
+	}
+	// Filter client-side as a defensive shim: mempalace_kg_query's
+	// subject-filter semantics vary by version. Keep only triples that
+	// actually mention the ticket id (subject or object).
+	out := make([]KGTriple, 0, len(items))
+	for _, it := range items {
+		if it.Subject == ticketIDText || it.Object == ticketIDText {
+			out = append(out, it)
+		}
+	}
+	return out, nil
+}
+
+// buildKGQueryByTicketRequest composes initialize (id=1) + tools/call
+// mempalace_kg_query (id=2) with the ticket id as the subject filter.
+// The arguments shape follows the M5.4 RecentKGTriples pattern; the
+// palace's parser tolerates `subject` and the matching `object` filter
+// shape per the M2.2 live-run finding 2026-04-23.
+func buildKGQueryByTicketRequest(ticketIDText string) []byte {
+	init := map[string]any{
+		"jsonrpc": "2.0", "id": 1, "method": "initialize",
+		"params": map[string]any{
+			"protocolVersion": mcpProtocolVersion,
+			"capabilities":    map[string]any{},
+			"clientInfo":      map[string]any{"name": mcpClientName, "version": "0"},
+		},
+	}
+	kgQuery := map[string]any{
+		"jsonrpc": "2.0", "id": 2, "method": rpcMethodToolsCall,
+		"params": map[string]any{
+			"name": "mempalace_kg_query",
+			"arguments": map[string]any{
+				"subject": ticketIDText,
+			},
+		},
+	}
+	var buf bytes.Buffer
+	for _, msg := range []any{init, kgQuery} {
+		_ = json.NewEncoder(&buf).Encode(msg)
+	}
+	return buf.Bytes()
+}
+
 func (c *QueryClient) execArgs() []string {
 	return []string{
 		"exec", "-i", c.MempalaceContainer,

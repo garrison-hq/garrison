@@ -265,3 +265,54 @@ func isValidUTF8(s string) bool {
 	}
 	return true
 }
+
+// -------- M6 T012 KgQueryByTicketID --------------------------------------
+
+// TestKgQueryByTicketID_ReturnsEmptyWhenNoTriples — sidecar response
+// with zero triples for the supplied ticket → empty slice + nil error.
+func TestKgQueryByTicketID_ReturnsEmptyWhenNoTriples(t *testing.T) {
+	payload := `{"triples":[]}`
+	fake := &fakeQueryExec{stdout: []byte(initOK + drawerToolCallResponse(payload))}
+	c := newQueryClientWithFake(fake)
+
+	got, err := c.KgQueryByTicketID(context.Background(), "ticket_no_triples")
+	if err != nil {
+		t.Fatalf("KgQueryByTicketID err: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("len=%d; want 0", len(got))
+	}
+	if !strings.Contains(fake.stdins[0], `"name":"mempalace_kg_query"`) {
+		t.Errorf("stdin missing kg_query tool_call: %s", fake.stdins[0])
+	}
+	if !strings.Contains(fake.stdins[0], `"subject":"ticket_no_triples"`) {
+		t.Errorf("stdin missing subject filter: %s", fake.stdins[0])
+	}
+}
+
+// TestKgQueryByTicketID_ParsesSidecarResponse — sidecar returns triples
+// where the ticket id appears as either subject or object; the client
+// keeps both and discards triples that don't reference the ticket.
+func TestKgQueryByTicketID_ParsesSidecarResponse(t *testing.T) {
+	target := "ticket_target"
+	payload := `{"triples":[
+        {"id":"t1","subject":"agent_x","predicate":"completed","object":"` + target + `","written_at":"2026-05-02T10:00:00Z"},
+        {"id":"t2","subject":"` + target + `","predicate":"shipped_in","object":"deploy_42","written_at":"2026-05-02T11:00:00Z"},
+        {"id":"t3","subject":"unrelated","predicate":"x","object":"y","written_at":"2026-05-02T09:00:00Z"}
+    ]}`
+	fake := &fakeQueryExec{stdout: []byte(initOK + drawerToolCallResponse(payload))}
+	c := newQueryClientWithFake(fake)
+
+	got, err := c.KgQueryByTicketID(context.Background(), target)
+	if err != nil {
+		t.Fatalf("KgQueryByTicketID err: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("len=%d; want 2 (filtered ticket_target as subject OR object)", len(got))
+	}
+	for _, tr := range got {
+		if tr.Subject != target && tr.Object != target {
+			t.Errorf("triple does not reference target: %+v", tr)
+		}
+	}
+}
