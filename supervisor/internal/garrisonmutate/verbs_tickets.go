@@ -93,27 +93,12 @@ func realCreateTicketHandler(ctx context.Context, deps Deps, raw json.RawMessage
 		columnSlug = "todo"
 	}
 
-	// M6 T010: validate parent_ticket_id if supplied. Cross-table CHECK
-	// can't enforce same-department + non-closed; verb error messages
-	// need to be operator-readable anyway.
-	var parentTicketID pgtype.UUID
-	if trimmed := strings.TrimSpace(args.ParentTicketID); trimmed != "" {
-		if err := parentTicketID.Scan(trimmed); err != nil {
-			return validationFailure("create_ticket: parent_ticket_id is not a valid UUID"), nil
-		}
-		parent, err := q.GetTicketByID(ctx, parentTicketID)
-		if err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return validationFailure("create_ticket: parent_ticket_id refers to a ticket that does not exist"), nil
-			}
-			return Result{}, fmt.Errorf("create_ticket: lookup parent ticket: %w", err)
-		}
-		if parent.DepartmentID != deptID {
-			return validationFailure("create_ticket: parent_ticket_id is in a different department"), nil
-		}
-		if parent.ColumnSlug == "done" {
-			return validationFailure("create_ticket: parent_ticket_id is already closed"), nil
-		}
+	parentTicketID, parentRes, parentErr := resolveParentTicketID(ctx, q, args.ParentTicketID, deptID)
+	if parentErr != nil {
+		return Result{}, parentErr
+	}
+	if parentRes != nil {
+		return *parentRes, nil
 	}
 
 	ticket, err := q.InsertChatTicket(ctx, store.InsertChatTicketParams{
@@ -181,6 +166,48 @@ type EditTicketArgs struct {
 // realEditTicketHandler implements garrison-mutate.edit_ticket. Tier 2
 // reversibility: diff captured in audit (before/after for each changed
 // field).
+// resolveParentTicketID validates the M6 T010 parent_ticket_id arg.
+// Returns:
+//   - parentTicketID (pgtype.UUID): valid (or zero-value) UUID for the
+//     create_ticket INSERT.
+//   - validationResult (*Result): non-nil on a user-facing validation
+//     failure (UUID parse / not found / cross-dept / closed parent).
+//   - err (error): non-nil only on a transport-level lookup failure
+//     (caller surfaces as %w).
+//
+// Pulled out of realCreateTicketHandler to keep that function below
+// SonarCloud's cognitive-complexity threshold per the M6 retro § "what
+// the spec got wrong".
+func resolveParentTicketID(ctx context.Context, q *store.Queries, raw string, deptID pgtype.UUID) (pgtype.UUID, *Result, error) {
+	var zero pgtype.UUID
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return zero, nil, nil
+	}
+	var parentTicketID pgtype.UUID
+	if err := parentTicketID.Scan(trimmed); err != nil {
+		r := validationFailure("create_ticket: parent_ticket_id is not a valid UUID")
+		return zero, &r, nil
+	}
+	parent, err := q.GetTicketByID(ctx, parentTicketID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			r := validationFailure("create_ticket: parent_ticket_id refers to a ticket that does not exist")
+			return zero, &r, nil
+		}
+		return zero, nil, fmt.Errorf("create_ticket: lookup parent ticket: %w", err)
+	}
+	if parent.DepartmentID != deptID {
+		r := validationFailure("create_ticket: parent_ticket_id is in a different department")
+		return zero, &r, nil
+	}
+	if parent.ColumnSlug == "done" {
+		r := validationFailure("create_ticket: parent_ticket_id is already closed")
+		return zero, &r, nil
+	}
+	return parentTicketID, nil, nil
+}
+
 func realEditTicketHandler(ctx context.Context, deps Deps, raw json.RawMessage) (Result, error) {
 	var args EditTicketArgs
 	if err := json.Unmarshal(raw, &args); err != nil {

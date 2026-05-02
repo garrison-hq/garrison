@@ -27,7 +27,7 @@ import { useEffect, useReducer, useRef } from 'react';
 export interface ThrottleEvent {
   event_id: string;
   company_id: string;
-  kind: 'company_budget_exceeded' | 'rate_limit_pause' | string;
+  kind: string;
   fired_at: string;
 }
 

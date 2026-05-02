@@ -105,10 +105,10 @@ func (c *QueryClient) RecentDrawers(ctx context.Context, limit int) ([]DrawerEnt
 		return nil, nil
 	}
 	if c.MempalaceContainer == "" || c.PalacePath == "" {
-		return nil, fmt.Errorf("%w: missing container or palace path", ErrSidecarUnreachable)
+		return nil, fmt.Errorf(errFmtMissingPalacePath, ErrSidecarUnreachable)
 	}
 	if c.Exec == nil {
-		return nil, fmt.Errorf("%w: no DockerExec", ErrSidecarUnreachable)
+		return nil, fmt.Errorf(errFmtNoDockerExec, ErrSidecarUnreachable)
 	}
 
 	timeout := c.Timeout
@@ -120,12 +120,12 @@ func (c *QueryClient) RecentDrawers(ctx context.Context, limit int) ([]DrawerEnt
 
 	stdout, stderr, err := c.Exec.Run(runCtx, c.execArgs(), bytes.NewReader(buildListDrawersRequest()))
 	if err != nil {
-		return nil, fmt.Errorf("%w: docker exec: %v: stderr=%s", ErrSidecarUnreachable, err, stderr)
+		return nil, fmt.Errorf(errFmtDockerExecFailed, ErrSidecarUnreachable, err, stderr)
 	}
 
 	items, err := parseListDrawersResponse(stdout)
 	if err != nil {
-		return nil, fmt.Errorf("%w: parse: %v", ErrSidecarUnreachable, err)
+		return nil, fmt.Errorf(errFmtParse, ErrSidecarUnreachable, err)
 	}
 
 	sort.SliceStable(items, func(i, j int) bool {
@@ -147,10 +147,10 @@ func (c *QueryClient) RecentKGTriples(ctx context.Context, limit int) ([]KGTripl
 		return nil, nil
 	}
 	if c.MempalaceContainer == "" || c.PalacePath == "" {
-		return nil, fmt.Errorf("%w: missing container or palace path", ErrSidecarUnreachable)
+		return nil, fmt.Errorf(errFmtMissingPalacePath, ErrSidecarUnreachable)
 	}
 	if c.Exec == nil {
-		return nil, fmt.Errorf("%w: no DockerExec", ErrSidecarUnreachable)
+		return nil, fmt.Errorf(errFmtNoDockerExec, ErrSidecarUnreachable)
 	}
 
 	timeout := c.Timeout
@@ -162,12 +162,12 @@ func (c *QueryClient) RecentKGTriples(ctx context.Context, limit int) ([]KGTripl
 
 	stdout, stderr, err := c.Exec.Run(runCtx, c.execArgs(), bytes.NewReader(buildKGTimelineRequest()))
 	if err != nil {
-		return nil, fmt.Errorf("%w: docker exec: %v: stderr=%s", ErrSidecarUnreachable, err, stderr)
+		return nil, fmt.Errorf(errFmtDockerExecFailed, ErrSidecarUnreachable, err, stderr)
 	}
 
 	items, err := parseKGTimelineResponse(stdout)
 	if err != nil {
-		return nil, fmt.Errorf("%w: parse: %v", ErrSidecarUnreachable, err)
+		return nil, fmt.Errorf(errFmtParse, ErrSidecarUnreachable, err)
 	}
 
 	sort.SliceStable(items, func(i, j int) bool {
@@ -178,6 +178,16 @@ func (c *QueryClient) RecentKGTriples(ctx context.Context, limit int) ([]KGTripl
 	}
 	return items, nil
 }
+
+// Error-format constants shared across the three sidecar-call methods
+// (RecentDrawers, RecentKGTriples, KgQueryByTicketID). Pulled into
+// constants per SonarCloud duplicate-string check; behaviour-preserving.
+const (
+	errFmtMissingPalacePath = "%w: missing container or palace path"
+	errFmtNoDockerExec      = "%w: no DockerExec"
+	errFmtDockerExecFailed  = "%w: docker exec: %v: stderr=%s"
+	errFmtParse             = "%w: parse: %v"
+)
 
 // KgQueryByTicketID returns every KG triple that mentions the supplied
 // ticket id (as subject or object). Unlike RecentKGTriples (timeline-
@@ -191,10 +201,10 @@ func (c *QueryClient) KgQueryByTicketID(ctx context.Context, ticketIDText string
 		return nil, nil
 	}
 	if c.MempalaceContainer == "" || c.PalacePath == "" {
-		return nil, fmt.Errorf("%w: missing container or palace path", ErrSidecarUnreachable)
+		return nil, fmt.Errorf(errFmtMissingPalacePath, ErrSidecarUnreachable)
 	}
 	if c.Exec == nil {
-		return nil, fmt.Errorf("%w: no DockerExec", ErrSidecarUnreachable)
+		return nil, fmt.Errorf(errFmtNoDockerExec, ErrSidecarUnreachable)
 	}
 	timeout := c.Timeout
 	if timeout == 0 {
@@ -204,11 +214,11 @@ func (c *QueryClient) KgQueryByTicketID(ctx context.Context, ticketIDText string
 	defer cancel()
 	stdout, stderr, err := c.Exec.Run(runCtx, c.execArgs(), bytes.NewReader(buildKGQueryByTicketRequest(ticketIDText)))
 	if err != nil {
-		return nil, fmt.Errorf("%w: docker exec: %v: stderr=%s", ErrSidecarUnreachable, err, stderr)
+		return nil, fmt.Errorf(errFmtDockerExecFailed, ErrSidecarUnreachable, err, stderr)
 	}
 	items, err := parseKGTimelineResponse(stdout)
 	if err != nil {
-		return nil, fmt.Errorf("%w: parse: %v", ErrSidecarUnreachable, err)
+		return nil, fmt.Errorf(errFmtParse, ErrSidecarUnreachable, err)
 	}
 	// Filter client-side as a defensive shim: mempalace_kg_query's
 	// subject-filter semantics vary by version. Keep only triples that

@@ -447,31 +447,7 @@ func (p *FinalizePolicy) handleFinalizeToolResult(tr claudeproto.ToolResultSumma
 	)
 
 	if body.Ok {
-		// Fire the commit callback with the original tool_use input.
-		payload := p.finalize.toolUseInputs[tr.ToolUseID]
-		p.finalize.state.Committed = true
-		// M6 T006: if a result-grace window is configured, defer the
-		// onCommit fire so it lands AFTER result.TotalCostUSD has been
-		// populated by OnResult. Run() drives the post-commit wait via
-		// HasPendingCommit / FirePendingCommit. ResultGrace == 0 keeps
-		// M2.2.1 synchronous semantics (existing tests stay green).
-		if p.finalize.resultGrace > 0 && p.finalize.onCommit != nil {
-			p.finalize.pendingCommit = true
-			p.finalize.pendingPayload = payload
-			return
-		}
-		if p.finalize.onCommit != nil {
-			if err := p.finalize.onCommit(payload); err != nil {
-				// Commit callback failures (T007 rollbacks, etc.) are
-				// logged here; T007's WriteFinalize writes the matching
-				// terminal row via its own error paths so we don't
-				// double-book.
-				p.logger.Error("finalize onCommit returned error",
-					"instance_id", uuidString(p.instanceID),
-					"ticket_id", uuidString(p.ticketID),
-					"err", err)
-			}
-		}
+		p.handleFinalizeOK(tr.ToolUseID)
 		return
 	}
 
@@ -485,6 +461,34 @@ func (p *FinalizePolicy) handleFinalizeToolResult(tr claudeproto.ToolResultSumma
 		if p.finalize.onBail != nil {
 			p.finalize.onBail(ExitFinalizeInvalid)
 		}
+	}
+}
+
+// handleFinalizeOK is the M6 T006 commit branch extracted out of
+// handleFinalizeToolResult: it sets Committed=true and either fires
+// onCommit synchronously (M2.2.1 semantics, ResultGrace == 0) or
+// stashes the payload for Run() to fire later (M6 deferred-commit
+// path). Pulled into its own method to keep the parent's cognitive
+// complexity within the linter ceiling.
+func (p *FinalizePolicy) handleFinalizeOK(toolUseID string) {
+	payload := p.finalize.toolUseInputs[toolUseID]
+	p.finalize.state.Committed = true
+	if p.finalize.resultGrace > 0 && p.finalize.onCommit != nil {
+		p.finalize.pendingCommit = true
+		p.finalize.pendingPayload = payload
+		return
+	}
+	if p.finalize.onCommit == nil {
+		return
+	}
+	if err := p.finalize.onCommit(payload); err != nil {
+		// Commit callback failures (T007 rollbacks, etc.) are logged
+		// here; T007's WriteFinalize writes the matching terminal row
+		// via its own error paths so we don't double-book.
+		p.logger.Error("finalize onCommit returned error",
+			"instance_id", uuidString(p.instanceID),
+			"ticket_id", uuidString(p.ticketID),
+			"err", err)
 	}
 }
 
@@ -643,13 +647,38 @@ func Run(
 	// directly inline; that shape couldn't compose a wait because
 	// scanner.Scan() blocks on the read syscall, leaving no opening
 	// for a timer or context check between events.
-	type scanItem struct {
-		line []byte
-		err  error
-	}
-	streamEvents := make(chan scanItem, 1)
 	scannerCtx, cancelScanner := context.WithCancel(ctx)
 	defer cancelScanner()
+	streamEvents := startScannerPump(scannerCtx, stdout)
+
+	fp, _ := policy.(*FinalizePolicy) // nil for non-finalize policies
+	loop := &runLoop{ctx: ctx, policy: policy, fp: fp, logger: logger}
+	defer loop.stop()
+
+	for {
+		done, res, err := loop.step(streamEvents)
+		if done {
+			return res, err
+		}
+	}
+}
+
+// scanItem is the unit produced by startScannerPump's goroutine; line
+// carries a non-zero claude-stream NDJSON line, err carries a scanner
+// failure (non-nil error from scanner.Err()).
+type scanItem struct {
+	line []byte
+	err  error
+}
+
+// startScannerPump runs the bufio.Scanner read loop on a dedicated
+// goroutine and yields each non-empty line on the returned channel. The
+// channel closes when the scanner reaches EOF or the supplied ctx is
+// cancelled (defensive: callers cancel after Run returns so the
+// goroutine isn't leaked when production stdout is held open by a
+// stalled child process).
+func startScannerPump(ctx context.Context, stdout io.Reader) <-chan scanItem {
+	streamEvents := make(chan scanItem, 1)
 	go func() {
 		defer close(streamEvents)
 		scanner := bufio.NewScanner(stdout)
@@ -663,111 +692,129 @@ func Run(
 			copy(buf, line)
 			select {
 			case streamEvents <- scanItem{line: buf}:
-			case <-scannerCtx.Done():
+			case <-ctx.Done():
 				return
 			}
 		}
 		if err := scanner.Err(); err != nil && !errors.Is(err, io.EOF) {
 			select {
 			case streamEvents <- scanItem{err: err}:
-			case <-scannerCtx.Done():
+			case <-ctx.Done():
 			}
 		}
 	}()
+	return streamEvents
+}
 
-	fp, _ := policy.(*FinalizePolicy) // nil for non-finalize policies (e.g. ChatPolicy)
+// graceTickInterval is the periodic re-check cadence inside the
+// post-deferred-commit grace window. 50ms balances responsiveness
+// against scheduler overhead — the deferred commit fires when either
+// the result event lands or the grace window expires; the ticker is
+// the watchdog for the latter when the scanner is starved.
+const graceTickInterval = 50 * time.Millisecond
 
-	var graceCh <-chan time.Time
-	const graceTickInterval = 50 * time.Millisecond
-	var ticker *time.Ticker
+// runLoop holds Run's mutable per-call state so the select-loop body
+// can be extracted into step() without each branch passing 6+ args.
+type runLoop struct {
+	ctx     context.Context
+	policy  Policy
+	fp      *FinalizePolicy
+	logger  *slog.Logger
+	graceCh <-chan time.Time
+	ticker  *time.Ticker
+}
 
-	// firePending is the single exit-side commit-fire helper. Used by
-	// every Run-return path that observed HasPendingCommit so we never
-	// drop the deferred audit. Errors are already logged inside the
-	// FirePendingCommit method; we ignore the return here so an error
-	// doesn't shadow the in-flight ctx error or scanner error.
-	firePending := func() {
-		if fp != nil && fp.HasPendingCommit() {
-			_ = fp.FirePendingCommit()
-		}
+// step runs one iteration of the post-scanner select loop. Returns
+// (done=true, ...) when Run should return to its caller; (done=false,
+// ...) when the loop should keep iterating. Pulled out of Run so the
+// per-branch logic is straight-line code rather than a deeply nested
+// select.
+func (l *runLoop) step(streamEvents <-chan scanItem) (bool, Result, error) {
+	var tickC <-chan time.Time
+	if l.ticker != nil {
+		tickC = l.ticker.C
 	}
+	select {
+	case sr, ok := <-streamEvents:
+		return l.onStream(sr, ok)
+	case <-l.graceCh:
+		// Grace window expired. Fire pending commit (cost may still
+		// be NULL — that's the FR-021 failure-mode contract).
+		l.firePending()
+		return true, l.policy.Result(), nil
+	case <-tickC:
+		// Periodic re-check during the grace window. If the result
+		// event landed via a stream-events tick we may have already
+		// fired the commit; this branch covers the edge where the
+		// scanner is starved (claude paused) and we want a
+		// 50-ms-bounded re-check loop per the task spec.
+		if l.fp != nil && l.fp.HasPendingCommit() && l.policy.Result().ResultSeen {
+			l.firePending()
+			return true, l.policy.Result(), nil
+		}
+		return false, Result{}, nil
+	case <-l.ctx.Done():
+		// SIGTERM. Fire any pending commit so we don't drop the audit
+		// row, but preserve the ctx err for the caller.
+		l.firePending()
+		return true, l.policy.Result(), l.ctx.Err()
+	}
+}
 
-	for {
-		var tickC <-chan time.Time
-		if ticker != nil {
-			tickC = ticker.C
+// onStream handles one item from the scanner-pump channel. Returns
+// (done=true, ...) on EOF, scan error, or dispatch error; otherwise
+// inspects whether the policy just deferred a commit and, if so, either
+// fires it immediately (result already seen) or arms the grace window.
+func (l *runLoop) onStream(sr scanItem, ok bool) (bool, Result, error) {
+	if !ok {
+		// Scanner exited (EOF or read error already drained).
+		l.firePending()
+		return true, l.policy.Result(), nil
+	}
+	if sr.err != nil {
+		l.firePending()
+		return true, l.policy.Result(), fmt.Errorf("pipeline: scan: %w", sr.err)
+	}
+	if err := dispatchStreamLine(l.ctx, sr.line, l.policy, l.logger); err != nil {
+		l.firePending()
+		return true, l.policy.Result(), err
+	}
+	if l.fp != nil && l.fp.HasPendingCommit() {
+		if l.policy.Result().ResultSeen {
+			l.firePending()
+			return true, l.policy.Result(), nil
 		}
-		select {
-		case sr, ok := <-streamEvents:
-			if !ok {
-				// Scanner exited (EOF or read error already drained).
-				firePending()
-				if ticker != nil {
-					ticker.Stop()
-				}
-				return policy.Result(), nil
-			}
-			if sr.err != nil {
-				firePending()
-				if ticker != nil {
-					ticker.Stop()
-				}
-				return policy.Result(), fmt.Errorf("pipeline: scan: %w", sr.err)
-			}
-			if err := dispatchStreamLine(ctx, sr.line, policy, logger); err != nil {
-				firePending()
-				if ticker != nil {
-					ticker.Stop()
-				}
-				return policy.Result(), err
-			}
-			// Post-dispatch: if finalize just deferred its commit, start
-			// the grace window. If the result event already landed
-			// (ResultSeen=true) along with the same dispatch turn — or
-			// arrived previously — fire the deferred commit immediately.
-			if fp != nil && fp.HasPendingCommit() {
-				if policy.Result().ResultSeen {
-					firePending()
-					if ticker != nil {
-						ticker.Stop()
-					}
-					return policy.Result(), nil
-				}
-				if graceCh == nil && fp.finalize != nil {
-					graceCh = time.After(fp.finalize.resultGrace)
-					ticker = time.NewTicker(graceTickInterval)
-				}
-			}
-		case <-graceCh:
-			// Grace window expired. Fire pending commit (cost may still
-			// be NULL — that's the FR-021 failure-mode contract).
-			firePending()
-			if ticker != nil {
-				ticker.Stop()
-			}
-			return policy.Result(), nil
-		case <-tickC:
-			// Periodic re-check during the grace window. If the result
-			// event landed via a stream-events tick we may have already
-			// fired the commit; this branch covers the edge where the
-			// scanner is starved (claude paused) and we want a
-			// 50-ms-bounded re-check loop per the task spec.
-			if fp != nil && fp.HasPendingCommit() && policy.Result().ResultSeen {
-				firePending()
-				if ticker != nil {
-					ticker.Stop()
-				}
-				return policy.Result(), nil
-			}
-		case <-ctx.Done():
-			// SIGTERM. Fire any pending commit so we don't drop the
-			// audit row, but preserve the ctx err for the caller.
-			firePending()
-			if ticker != nil {
-				ticker.Stop()
-			}
-			return policy.Result(), ctx.Err()
-		}
+		l.armGraceTimer()
+	}
+	return false, Result{}, nil
+}
+
+// armGraceTimer starts the deferred-commit grace window + 50ms
+// re-check ticker on first observation of a pending commit. Subsequent
+// calls are no-ops (the grace channel stays armed until a return path
+// takes it).
+func (l *runLoop) armGraceTimer() {
+	if l.graceCh != nil || l.fp == nil || l.fp.finalize == nil {
+		return
+	}
+	l.graceCh = time.After(l.fp.finalize.resultGrace)
+	l.ticker = time.NewTicker(graceTickInterval)
+}
+
+// firePending fires a deferred onCommit if one is queued. Errors are
+// already logged inside FirePendingCommit; we ignore the return so an
+// error doesn't shadow the in-flight ctx error or scanner error.
+func (l *runLoop) firePending() {
+	if l.fp != nil && l.fp.HasPendingCommit() {
+		_ = l.fp.FirePendingCommit()
+	}
+}
+
+// stop releases the grace ticker. Idempotent; safe to call from defer.
+func (l *runLoop) stop() {
+	if l.ticker != nil {
+		l.ticker.Stop()
+		l.ticker = nil
 	}
 }
 

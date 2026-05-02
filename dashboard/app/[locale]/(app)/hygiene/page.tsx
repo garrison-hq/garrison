@@ -32,8 +32,10 @@ const VALID_MODES: FailureMode[] = [
 
 const VALID_TABS: HygieneTabFilter[] = ['failures', 'audit', 'all'];
 
+type ParamValue = string | string[] | undefined;
+
 function parseMode(
-  raw: string | string[] | undefined,
+  raw: ParamValue,
 ): FailureMode | undefined {
   if (typeof raw !== 'string') return undefined;
   return (VALID_MODES as string[]).includes(raw)
@@ -41,7 +43,7 @@ function parseMode(
     : undefined;
 }
 
-function parseTab(raw: string | string[] | undefined): HygieneTabFilter {
+function parseTab(raw: ParamValue): HygieneTabFilter {
   if (typeof raw === 'string' && (VALID_TABS as string[]).includes(raw)) {
     return raw as HygieneTabFilter;
   }
