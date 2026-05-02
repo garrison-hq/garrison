@@ -82,11 +82,17 @@ func (t *truncatedDockerExec) RunStream(ctx context.Context, args []string, writ
 func TestM5_1_Chaos_ContainerCrashedMidStream(t *testing.T) {
 	pool := testdb.Start(t)
 	q := store.New(pool)
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-	defer cancel()
 
 	// Real Infisical so the vault-fetch path isn't a coverage hole.
+	// Container bootup runs OUTSIDE the test's 90s ctx so a slow CI
+	// runner doesn't consume the budget reserved for the actual
+	// HandleMessageInSession call. Pre-M7 this was inside the ctx
+	// and worked at 90s; M7's heavier integration suite pushed the
+	// timing past the threshold (see M7 retro flake-fix note).
 	vaultClient, customerID := chatVaultStack(t, true /* seed token */)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
 
 	exec := &truncatedDockerExec{}
 	deps := minimalEdgeDeps(t, pool, q, vaultClient, nil) // exec set below
