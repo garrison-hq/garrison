@@ -28,7 +28,7 @@ import type { ThrottleEventRow } from '@/lib/queries/throttle';
 
 const PAYLOAD_PREVIEW_LIMIT = 80;
 
-interface MergedRow {
+export interface MergedRow {
   eventId: string;
   companyId: string;
   companyName: string;
@@ -37,13 +37,13 @@ interface MergedRow {
   payload: unknown;
 }
 
-function kindTone(kind: string): 'warn' | 'err' | 'neutral' {
+export function kindTone(kind: string): 'warn' | 'err' | 'neutral' {
   if (kind === 'rate_limit_pause') return 'warn';
   if (kind === 'company_budget_exceeded') return 'err';
   return 'neutral';
 }
 
-function previewPayload(payload: unknown): string {
+export function previewPayload(payload: unknown): string {
   let text: string;
   try {
     text = typeof payload === 'string' ? payload : JSON.stringify(payload ?? {});
@@ -54,7 +54,7 @@ function previewPayload(payload: unknown): string {
   return text.slice(0, PAYLOAD_PREVIEW_LIMIT) + '…';
 }
 
-function mergeRows(
+export function mergeRows(
   initial: ThrottleEventRow[],
   liveEvents: ThrottleEvent[],
   companyNameById: Map<string, string>,

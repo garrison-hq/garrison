@@ -12,7 +12,7 @@ import { HygieneTabStrip, type HygieneTab } from './HygieneTabStrip';
 
 const VALID_TABS: HygieneTab[] = ['failures', 'audit', 'all'];
 
-function parseTab(raw: string | null): HygieneTab {
+export function parseTab(raw: string | null): HygieneTab {
   if (raw && (VALID_TABS as string[]).includes(raw)) return raw as HygieneTab;
   return 'failures';
 }

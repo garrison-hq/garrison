@@ -16,11 +16,11 @@
 //  - Newest events are PREPENDED so the rendered list reads
 //    newest-first without per-render sorting.
 //
-// EventSource factory injection (mirrors chatStream.ts pattern)
-// is intentionally omitted — this hook has no replay/dedupe shape
-// to test directly; manual smoke-verification covers the live path
-// per T020. The dashboard's "tests for Go only" rule means no
-// vitest spec accompanies the hook.
+// The pure store + reducer (`emptyStore`, `pushEvent`) are exported
+// for vitest unit coverage; the React hook itself is exercised
+// end-to-end by Playwright once the M6.x integration suite lands.
+// Mirrors the chatStream.ts test seam ("ChatStreamMachine is the
+// pure surface; the hook is browser-coverage-only").
 
 import { useEffect, useReducer, useRef } from 'react';
 
@@ -38,7 +38,7 @@ export interface UseThrottleStreamResult {
 
 const BUFFER_CAP = 100;
 
-interface ThrottleStreamStore {
+export interface ThrottleStreamStore {
   events: ThrottleEvent[];
   lastError: string | null;
   /** Dedupe by event_id so a reconnect-replay (Last-Event-ID) doesn't
@@ -46,11 +46,11 @@ interface ThrottleStreamStore {
   seenIds: Set<string>;
 }
 
-function emptyStore(): ThrottleStreamStore {
+export function emptyStore(): ThrottleStreamStore {
   return { events: [], lastError: null, seenIds: new Set() };
 }
 
-function pushEvent(store: ThrottleStreamStore, raw: string): ThrottleStreamStore {
+export function pushEvent(store: ThrottleStreamStore, raw: string): ThrottleStreamStore {
   let payload: ThrottleEvent;
   try {
     payload = JSON.parse(raw) as ThrottleEvent;
