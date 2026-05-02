@@ -1,3 +1,6 @@
+'use client';
+
+import type { MouseEvent } from 'react';
 import Link from 'next/link';
 import { relativeTime, formatIsoFull } from '@/lib/format/relativeTime';
 import type { TicketCardRow } from '@/lib/queries/kanban';
@@ -24,9 +27,21 @@ export function TicketCard({ ticket }: Readonly<{ ticket: TicketCardRow }>) {
       data-testid="ticket-card"
     >
       <div className="flex items-center justify-between gap-2 mb-1.5">
-        <span className="font-mono text-[10.5px] text-text-3 tracking-tight">
-          {ticket.id.slice(0, 8)}
-        </span>
+        <div className="flex items-center gap-2 min-w-0">
+          <span className="font-mono text-[10.5px] text-text-3 tracking-tight">
+            {ticket.id.slice(0, 8)}
+          </span>
+          {ticket.parentTicketId ? (
+            <Link
+              href={`/tickets/${ticket.parentTicketId}`}
+              onClick={(e: MouseEvent<HTMLAnchorElement>) => e.stopPropagation()}
+              className="font-mono text-[10.5px] text-text-3 hover:text-text-1 tracking-tight"
+              data-testid="ticket-parent-chip"
+            >
+              parent: {ticket.parentTicketId.slice(0, 8)}
+            </Link>
+          ) : null}
+        </div>
         <span
           className="font-mono text-[10.5px] text-text-3 font-tabular"
           title={`updated ${formatIsoFull(ticket.createdAt)}`}

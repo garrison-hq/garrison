@@ -20,6 +20,11 @@ export interface TicketCardRow {
   columnSlug: string;
   createdAt: Date;
   assignedAgentRoleSlug: string | null;
+  /** M6 / T017 — parent ticket id when this ticket was decomposed
+   *  from a larger objective via the chat-driven create_ticket
+   *  verb. Null for top-level tickets. The kanban TicketCard
+   *  surfaces a small parent chip when this is non-null. */
+  parentTicketId: string | null;
 }
 
 export async function fetchDepartmentBySlug(slug: string): Promise<DeptInfo | null> {
@@ -58,12 +63,14 @@ export async function fetchKanban(slug: string): Promise<TicketCardRow[]> {
     column_slug: string;
     created_at: Date;
     assigned_agent_role_slug: string | null;
+    parent_ticket_id: string | null;
   }>(sql`
     SELECT
       t.id,
       t.objective,
       t.column_slug,
       t.created_at,
+      t.parent_ticket_id,
       (SELECT ai.role_slug
          FROM agent_instances ai
         WHERE ai.ticket_id = t.id AND ai.status = 'running'
@@ -79,5 +86,6 @@ export async function fetchKanban(slug: string): Promise<TicketCardRow[]> {
     columnSlug: r.column_slug,
     createdAt: r.created_at,
     assignedAgentRoleSlug: r.assigned_agent_role_slug,
+    parentTicketId: r.parent_ticket_id,
   }));
 }
