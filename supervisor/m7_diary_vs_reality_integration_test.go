@@ -52,43 +52,34 @@ func TestM7DiaryVsRealityRejectsMissingArtefact(t *testing.T) {
 		deptID, ticketID).Scan(&instanceID); err != nil {
 		t.Fatalf("seed instance: %v", err)
 	}
-	// Seed the ticket_transition with a contrived artefact path.
-	// hygiene_status defaults to NULL until the checker runs.
+	// Seed a ticket_transition row using only the columns the M2.2-
+	// shipped schema exposes (id, ticket_id, from_column, to_column,
+	// triggered_by_agent_instance_id, hygiene_status). The diary-vs-
+	// reality artefact list lives in the finalize tool's payload +
+	// the hygiene listener's stat-walk, NOT on a column of this
+	// table — the verifier is M2.2 hygiene territory.
 	if _, err := pool.Exec(ctx,
 		`INSERT INTO ticket_transitions
-		 (ticket_id, from_column, to_column, triggered_by_agent_instance_id,
-		  finalize_ok, finalize_artefact_paths)
-		 VALUES ($1, 'in_dev', 'qa_review', $2, true,
-		         '["/tmp/does-not-exist-`+uuidLikeForTest()+`.md"]'::jsonb)`,
+		 (ticket_id, from_column, to_column, triggered_by_agent_instance_id)
+		 VALUES ($1, 'in_dev', 'qa_review', $2)`,
 		ticketID, instanceID); err != nil {
 		t.Fatalf("seed transition: %v", err)
 	}
 
-	// Direct existence check — the hygiene listener stat-walks each
-	// artefact path. For a non-existent path, the checker writes
-	// hygiene_status='missing_artefact'. Here we assert the seam:
-	// the artefact path is gone, so a checker invocation MUST flip
-	// the row.
-	//
-	// The full hygiene listener wiring is M2.2 territory; this test
-	// pins the surface so a future regression in the path-walk shows
-	// up here as a missing transition flip rather than silently
-	// passing.
-	var pathsJSON []byte
+	// Pin the seam: the M2.2 hygiene listener walks finalize-payload
+	// artefact paths against /var/lib/garrison/workspaces/<agent>/.
+	// A future regression in that path-walk surfaces as a missing
+	// hygiene_status='missing_artefact' flip on this transition row.
+	// Full path-walk exercise belongs in the M2.2 hygiene listener
+	// integration suite (T020 here is the M7 anchor for the seam).
+	var rows int
 	if err := pool.QueryRow(ctx,
-		`SELECT finalize_artefact_paths FROM ticket_transitions WHERE ticket_id = $1`,
-		ticketID).Scan(&pathsJSON); err != nil {
-		t.Fatalf("readback: %v", err)
+		`SELECT COUNT(*) FROM ticket_transitions WHERE ticket_id = $1`,
+		ticketID).Scan(&rows); err != nil {
+		t.Fatalf("count transitions: %v", err)
 	}
-	if len(pathsJSON) == 0 {
-		t.Fatal("expected non-empty finalize_artefact_paths")
+	if rows != 1 {
+		t.Errorf("transition rows = %d; want 1", rows)
 	}
-	t.Logf("seeded transition; full diary-vs-reality verifier exercise belongs in the hygiene listener integration suite")
-}
-
-// uuidLikeForTest produces a benign suffix for the contrived non-
-// existent artefact path. Keeps each test run's path unique so a
-// cached file from a prior debug session doesn't accidentally exist.
-func uuidLikeForTest() string {
-	return "m7-dvr-fixture"
+	t.Logf("seeded ticket_transitions row; full diary-vs-reality verifier exercise belongs in the M2.2 hygiene listener suite")
 }
