@@ -16,7 +16,7 @@ Three primary components:
 - **Dashboard** — Next.js 16 + React 19 app. Operator console for Kanban, hiring, activity, CEO chat.
 - **Postgres** — source of truth for state, event bus via `pg_notify`, shared by supervisor and dashboard.
 
-Garrison is being built milestone-by-milestone (M1 through M8). Each milestone ships end-to-end functional before the next begins.
+Garrison is being built milestone-by-milestone (M1 through M9). Each milestone ships end-to-end functional before the next begins.
 
 - **M1** — event bus + supervisor core. Shipped 2026-04-22.
 - **M2** — first real agent loop, shipped 2026-04-22 → 2026-04-24 across five sub-milestones (M2.1 Claude Code invocation, M2.2 MemPalace MCP wiring, M2.2.1 `finalize_ticket`, M2.2.2 compliance calibration, M2.3 Infisical vault).
@@ -25,7 +25,7 @@ Garrison is being built milestone-by-milestone (M1 through M8). Each milestone s
 - **M5.1** — CEO chat backend. Shipped 2026-04-28.
 - **M5.2** — CEO chat dashboard surface. Shipped 2026-04-29.
 - **M5.3** — chat-driven mutations under autonomous-execution posture. **Active.**
-- **M6** through **M8** — see `ARCHITECTURE.md`.
+- **M6** through **M9** — see `ARCHITECTURE.md`.
 
 Current milestone: **M5.3 — chat-driven mutations**.
 
@@ -148,7 +148,7 @@ These apply throughout the supervisor code:
 Specs are narrow per milestone. Each milestone's spec covers only that milestone's concerns. The active milestone's `specs/_context/m{N}-context.md` enumerates what is in scope; ARCHITECTURE.md and `docs/issues/` enumerate work that is intentionally deferred.
 
 Standing out-of-scope for any non-named milestone:
-- **Workspace sandboxing / Docker-per-agent** — see `docs/issues/agent-workspace-sandboxing.md`. Per-agent Docker containers with hard guardrails preventing workspace escape; deferred post-M5.
+- ~~**Workspace sandboxing / Docker-per-agent**~~ — **scope-merged into M7 (2026-05-02)**, see `docs/research/m7-spike.md` §4 + `docs/security/agent-sandbox-threat-model.md`. The container is the natural skill-install boundary, so M7 resolves the per-agent runtime and the install actuator in one ship. While M7 is active this is *in*-scope; once M7 ships it returns to "sealed and binding" rather than "deferred."
 - **Cost-telemetry blind-spot fix** — see `docs/issues/cost-telemetry-blind-spot.md`. Successful finalize runs read `$0.00` for `total_cost_usd`; surface the caveat in any cost UI but do not fix the supervisor signal-handling here.
 - **Mutating sealed M2/M2.3 surfaces** — supervisor spawn semantics, finalize tool schema, vault rules, `garrison_agent_*` Postgres roles, MemPalace MCP wiring. These are sealed unless the active milestone's context file explicitly amends them.
 - Future-milestone surfaces — M5.3 sessions don't carry M7 hiring or M8 MCP-registry work; M7 sessions don't carry M8 work; etc.
