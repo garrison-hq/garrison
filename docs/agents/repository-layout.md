@@ -39,7 +39,8 @@ garrison/
 │   ├── 009-m4-dashboard-mutations/
 │   ├── 010-m5-1-ceo-chat-backend/
 │   ├── 011-m5-2-ceo-chat-frontend/
-│   └── 012-m5-3-chat-driven-mutations/
+│   ├── 012-m5-3-chat-driven-mutations/
+│   └── 013-m5-4-knows-pane/
 ├── supervisor/                   ← Go binary
 │   ├── cmd/supervisor/           ← main + `mcp postgres` + `mcp finalize` + `mcp garrison-mutate` subcommands
 │   ├── internal/
@@ -54,12 +55,18 @@ garrison/
 │   │   ├── vault/                ← M2.3: SecretValue + Client + ScanAndRedact + audit row
 │   │   ├── chat/                 ← M5.1 + M5.2 + M5.3: chat policy + transport + listener + tool-use surface
 │   │   ├── garrisonmutate/       ← M5.3: 8 chat-driven mutation verbs (in-tree MCP server)
+│   │   ├── leakscan/             ← M5.4: shared 10-pattern set extracted from finalize
+│   │   ├── objstore/             ← M5.4: MinIO wrapper + leak-scan + size-cap + ETag-aware GET/PUT
+│   │   ├── dashboardapi/         ← M5.4: HTTP server on port 8081 (Company.md + mempalace proxy)
 │   │   ├── config/, store/, events/, pgdb/, recovery/, health/, concurrency/, testdb/
 │   ├── tools/
 │   │   └── vaultlog/             ← M2.3: custom go vet analyzer rejecting SecretValue logging
 │   ├── go.mod
 │   └── Dockerfile
-├── dashboard/                    ← Next.js 16 app (M3 + M4 + M5.1 + M5.2 shipped)
+├── dashboard/                    ← Next.js 16 app (M3 + M4 + M5.1 + M5.2 + M5.4 shipped)
+│   ├── lib/actions/companyMD.ts  ← M5.4: Server Actions for Company.md GET/PUT
+│   ├── lib/queries/knowsPane.ts  ← M5.4: recent palace writes + KG facts queries
+│   └── components/features/ceo-chat/{KnowsPane,CompanyMDTab,CompanyMDEditor,RecentPalaceWritesTab,KGRecentFactsTab}.tsx ← M5.4
 ├── migrations/                   ← SQL, consumed by sqlc (Go) and Drizzle (TS)
 │   └── seed/                     ← engineer.md, qa-engineer.md (embedded into migrations via +embed-agent-md)
 ├── docs/
@@ -75,10 +82,11 @@ garrison/
 │   ├── README.md
 │   ├── research/
 │   │   ├── m2-spike.md
-│   │   └── m5-spike.md
+│   │   ├── m5-spike.md
+│   │   └── m5-4-spike-minio.md   ← M5.4 binding input (MinIO behaviour)
 │   ├── security/
 │   │   ├── vault-threat-model.md
-│   │   └── chat-threat-model.md  ← M5.3 binding input
+│   │   └── chat-threat-model.md  ← M5.3 + M5.4 amendments
 │   ├── forensics/
 │   │   └── pgmcp-three-bug-chain.md  ← post-M2.2.2 root-cause investigation
 │   ├── issues/
@@ -96,7 +104,9 @@ garrison/
 │       ├── m3.md
 │       ├── m4.md
 │       ├── m5-1.md
-│       └── m5-2.md
+│       ├── m5-2.md
+│       ├── m5-3.md
+│       └── m5-4.md
 ├── experiment-results/           ← exploratory matrices (e.g. matrix-post-uuid-fix.md), not production
 ├── examples/                     ← toy company YAML, sample agent.md files
 └── .specify/                     ← spec-kit scaffolding

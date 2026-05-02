@@ -22,6 +22,7 @@
 
 import { useEffect, useRef, useState, useTransition } from 'react';
 import { Kbd } from '@/components/ui/Kbd';
+import { TerminalIcon } from '@/components/ui/icons';
 import { PalaceLiveChip } from './PalaceLiveChip';
 import { startChatSession, sendChatMessage } from '@/lib/actions/chat';
 
@@ -156,7 +157,10 @@ export function Composer({
         <span className="shrink-0">
           <PalaceLiveChip ageMs={palaceAgeMs} />
         </span>
-        <span className="flex-1 min-w-0 truncate">{captionText}</span>
+        <span className="flex-1 min-w-0 truncate inline-flex items-center gap-1.5">
+          <TerminalIcon className="text-text-4 shrink-0" aria-hidden />
+          <span className="truncate">{captionText}</span>
+        </span>
         <button
           type="button"
           onClick={handleSend}

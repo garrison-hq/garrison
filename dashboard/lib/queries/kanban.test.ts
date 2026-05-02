@@ -66,7 +66,7 @@ describe('lib/queries/kanban', () => {
     expect(dept).toBeNull();
   });
 
-  it('fetchKanban returns open tickets ordered by created_at descending and excludes done tickets', async () => {
+  it('fetchKanban returns all tickets including done, ordered by created_at descending', async () => {
     const { deptId } = await seedDept();
     const sql = postgres(env.TEST_SUPERUSER_DSN, { max: 1 });
     try {
@@ -76,13 +76,17 @@ describe('lib/queries/kanban', () => {
           (gen_random_uuid(), ${deptId}, 'todo', 'oldest', 'sql', now() - interval '2 hours'),
           (gen_random_uuid(), ${deptId}, 'in_dev', 'middle', 'sql', now() - interval '1 hour'),
           (gen_random_uuid(), ${deptId}, 'todo', 'newest', 'sql', now()),
-          (gen_random_uuid(), ${deptId}, 'done', 'closed', 'sql', now())
+          (gen_random_uuid(), ${deptId}, 'done', 'closed', 'sql', now() - interval '30 minutes')
       `;
     } finally {
       await sql.end();
     }
     const { fetchKanban } = await import('./kanban');
     const tickets = await fetchKanban('engineering');
-    expect(tickets.map((t) => t.objective)).toEqual(['newest', 'middle', 'oldest']);
+    // Done tickets are now included so the operator sees the full
+    // department state on the kanban (M5.4 retro live-stack
+    // discovery — operator-reported "ticket disappears when done").
+    // Order is created_at DESC: now → 30m ago → 1h ago → 2h ago.
+    expect(tickets.map((t) => t.objective)).toEqual(['newest', 'closed', 'middle', 'oldest']);
   });
 });

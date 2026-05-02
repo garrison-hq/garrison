@@ -70,7 +70,7 @@ export async function fetchKanban(slug: string): Promise<TicketCardRow[]> {
         ORDER BY ai.started_at DESC LIMIT 1) AS assigned_agent_role_slug
     FROM tickets t
     JOIN departments d ON d.id = t.department_id
-    WHERE d.slug = ${slug} AND t.column_slug <> 'done'
+    WHERE d.slug = ${slug}
     ORDER BY t.created_at DESC
   `);
   return rows.map((r) => ({

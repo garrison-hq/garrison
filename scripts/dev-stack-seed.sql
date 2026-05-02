@@ -51,13 +51,13 @@ INSERT INTO departments (id, company_id, slug, name, concurrency_cap, workspace_
 VALUES
   ('00000000-0000-0000-0000-00000000d001', '00000000-0000-0000-0000-00000000c001',
    'engineering', 'Engineering', 3, '/tmp/garrison-dev/engineering',
-   '{"columns":[{"slug":"todo","label":"To do"},{"slug":"in_dev","label":"In dev"},{"slug":"in_review","label":"In review"},{"slug":"done","label":"Done"}]}'::jsonb),
+   '{"columns":[{"slug":"todo","label":"To do"},{"slug":"in_dev","label":"In dev"},{"slug":"qa_review","label":"QA review"},{"slug":"done","label":"Done"}]}'::jsonb),
   ('00000000-0000-0000-0000-00000000d002', '00000000-0000-0000-0000-00000000c001',
    'qa-engineer', 'QA Engineering', 2, '/tmp/garrison-dev/qa-engineer',
-   '{"columns":[{"slug":"todo","label":"To do"},{"slug":"in_dev","label":"In dev"},{"slug":"in_review","label":"In review"},{"slug":"done","label":"Done"}]}'::jsonb),
+   '{"columns":[{"slug":"todo","label":"To do"},{"slug":"in_dev","label":"In dev"},{"slug":"qa_review","label":"QA review"},{"slug":"done","label":"Done"}]}'::jsonb),
   ('00000000-0000-0000-0000-00000000d003', '00000000-0000-0000-0000-00000000c001',
    'docs', 'Documentation', 1, '/tmp/garrison-dev/docs',
-   '{"columns":[{"slug":"todo","label":"To do"},{"slug":"in_dev","label":"In dev"},{"slug":"in_review","label":"In review"},{"slug":"done","label":"Done"}]}'::jsonb)
+   '{"columns":[{"slug":"todo","label":"To do"},{"slug":"in_dev","label":"In dev"},{"slug":"qa_review","label":"QA review"},{"slug":"done","label":"Done"}]}'::jsonb)
 ON CONFLICT (id) DO NOTHING;
 
 -- =========================================================================
@@ -70,9 +70,13 @@ VALUES
   ('00000000-0000-0000-0000-0000000a0001',
    '00000000-0000-0000-0000-00000000d001',
    'engineer',
-   '# Engineer (dev-stack seed)' || chr(10) || 'Generalist; picks up unrouted todo tickets.',
+   '# Engineer (dev-stack seed)' || chr(10) || 'Generalist; M2.2 canonical workflow has engineer pick up at in_dev.',
    'claude-opus-4-7',
-   '["todo"]'::jsonb,
+   -- M2.2 retro shifted engineer.listens_for from todo → in_dev. The
+   -- supervisor's dispatcher in cmd/supervisor/main.go routes BOTH
+   -- channels to engineerHandler (back-compat for M1/M2.1 chaos tests),
+   -- so this is informational only — the actual routing is hardcoded.
+   '["in_dev"]'::jsonb,
    '["agent-md", "github-pr-authoring", "linear-ticket-hygiene"]'::jsonb,
    'wing_engineering',
    'active'),
@@ -99,7 +103,7 @@ VALUES
    'security-engineer',
    '# Security engineer (dev-stack seed)',
    'claude-opus-4-7',
-   '["in_review"]'::jsonb,
+   '["qa_review"]'::jsonb,
    '["agent-md", "vault-threat-modeling", "secret-scanning"]'::jsonb,
    'wing_engineering',
    'active'),
@@ -108,7 +112,7 @@ VALUES
    'devops',
    '# DevOps (dev-stack seed)',
    'claude-haiku-4-5',
-   '["in_review", "done"]'::jsonb,
+   '["qa_review", "done"]'::jsonb,
    '["agent-md", "docker-compose", "github-actions-pin"]'::jsonb,
    'wing_engineering',
    'active'),
@@ -118,7 +122,7 @@ VALUES
    'qa-engineer',
    '# QA Engineer (dev-stack seed)',
    'claude-sonnet-4-6',
-   '["in_review"]'::jsonb,
+   '["qa_review"]'::jsonb,
    '["agent-md", "playwright-dev", "vitest"]'::jsonb,
    'wing_qa',
    'active'),
@@ -127,7 +131,7 @@ VALUES
    'qa-automation',
    '# QA Automation (dev-stack seed)',
    'claude-haiku-4-5',
-   '["in_review"]'::jsonb,
+   '["qa_review"]'::jsonb,
    '["agent-md", "playwright-dev", "vitest", "github-actions-pin"]'::jsonb,
    'wing_qa',
    'active'),
@@ -136,7 +140,7 @@ VALUES
    'qa-perf',
    '# QA Performance (dev-stack seed)',
    'claude-opus-4-7',
-   '["in_review"]'::jsonb,
+   '["qa_review"]'::jsonb,
    '["agent-md", "k6-load-tests", "postgres-tuning"]'::jsonb,
    'wing_qa',
    'active'),
@@ -155,7 +159,7 @@ VALUES
    'api-docs-writer',
    '# API Docs Writer (dev-stack seed)',
    'claude-haiku-4-5',
-   '["todo", "in_review"]'::jsonb,
+   '["todo", "qa_review"]'::jsonb,
    '["agent-md", "openapi-3", "markdown-style-guide", "github-pr-authoring"]'::jsonb,
    'wing_docs',
    'active')
@@ -181,7 +185,7 @@ VALUES
    'Every POST form receives a fresh token per render.', 'sql',
    now() - interval '8 hours'),
   ('00000000-0000-0000-0000-aaaa00000004', '00000000-0000-0000-0000-00000000d001',
-   'in_review', 'Bcrypt rounds bumped from 10 to 12',
+   'qa_review', 'Bcrypt rounds bumped from 10 to 12',
    'Login latency within 250ms p95 on baseline machine.', 'sql',
    now() - interval '1 day'),
   ('00000000-0000-0000-0000-aaaa00000005', '00000000-0000-0000-0000-00000000d001',
@@ -193,7 +197,7 @@ VALUES
 INSERT INTO tickets (id, department_id, column_slug, objective, acceptance_criteria, origin, created_at)
 VALUES
   ('00000000-0000-0000-0000-aaaa00010001', '00000000-0000-0000-0000-00000000d002',
-   'in_review', 'Verify session migration meets latency budget',
+   'qa_review', 'Verify session migration meets latency budget',
    'Run perf suite; p95 under 300ms.', 'sql',
    now() - interval '10 hours'),
   ('00000000-0000-0000-0000-aaaa00010002', '00000000-0000-0000-0000-00000000d002',
@@ -312,11 +316,11 @@ ON CONFLICT (id) DO NOTHING;
 INSERT INTO ticket_transitions (ticket_id, from_column, to_column, triggered_by_agent_instance_id, hygiene_status, at)
 VALUES
   -- Clean transitions (won't show in /hygiene; will show in activity feed)
-  ('00000000-0000-0000-0000-aaaa00000005', 'in_review', 'done',
+  ('00000000-0000-0000-0000-aaaa00000005', 'qa_review', 'done',
    '00000000-0000-0000-0000-bbbb00000001', 'clean', now() - interval '3 days' + interval '4 minutes'),
-  ('00000000-0000-0000-0000-aaaa00000004', 'in_dev', 'in_review',
+  ('00000000-0000-0000-0000-aaaa00000004', 'in_dev', 'qa_review',
    '00000000-0000-0000-0000-bbbb00000002', 'clean', now() - interval '1 day' + interval '6 minutes'),
-  ('00000000-0000-0000-0000-aaaa00010002', 'in_review', 'done',
+  ('00000000-0000-0000-0000-aaaa00010002', 'qa_review', 'done',
    '00000000-0000-0000-0000-bbbb00000004', 'clean', now() - interval '2 days' + interval '7 minutes'),
 
   -- Finalize-path failure mode (one of: missing_diary, missing_kg, finalize_never_called)
@@ -338,7 +342,7 @@ VALUES
   -- /activity has a richer timeline. One per agent_instance from
   -- bbbb00000008..bbbb0000000f, telling the lifecycle story for
   -- each run (todo → in_dev → in_review → done).
-  ('00000000-0000-0000-0000-aaaa00000005', 'in_dev', 'in_review',
+  ('00000000-0000-0000-0000-aaaa00000005', 'in_dev', 'qa_review',
    '00000000-0000-0000-0000-bbbb00000008', 'clean',
    now() - interval '3 days' + interval '20 minutes'),
   ('00000000-0000-0000-0000-aaaa00000004', 'todo', 'in_dev',
@@ -350,13 +354,13 @@ VALUES
   ('00000000-0000-0000-0000-aaaa00000001', 'in_dev', 'todo',
    '00000000-0000-0000-0000-bbbb0000000a', 'clean',
    now() - interval '6 hours' + interval '2 minutes'),
-  ('00000000-0000-0000-0000-aaaa00010002', 'in_dev', 'in_review',
+  ('00000000-0000-0000-0000-aaaa00010002', 'in_dev', 'qa_review',
    '00000000-0000-0000-0000-bbbb0000000b', 'clean',
    now() - interval '2 days 12 hours' + interval '3 minutes'),
   ('00000000-0000-0000-0000-aaaa00010001', 'todo', 'in_dev',
    '00000000-0000-0000-0000-bbbb0000000c', 'clean',
    now() - interval '1 day 4 hours' + interval '2 minutes'),
-  ('00000000-0000-0000-0000-aaaa00010001', 'in_dev', 'in_review',
+  ('00000000-0000-0000-0000-aaaa00010001', 'in_dev', 'qa_review',
    '00000000-0000-0000-0000-bbbb0000000c', 'clean',
    now() - interval '1 day 4 hours' + interval '8 minutes'),
   ('00000000-0000-0000-0000-aaaa00020001', 'todo', 'in_dev',
@@ -368,13 +372,13 @@ VALUES
   ('00000000-0000-0000-0000-aaaa00000002', 'todo', 'in_dev',
    '00000000-0000-0000-0000-bbbb0000000e', 'clean',
    now() - interval '4 hours' + interval '1 minute'),
-  ('00000000-0000-0000-0000-aaaa00000002', 'in_dev', 'in_review',
+  ('00000000-0000-0000-0000-aaaa00000002', 'in_dev', 'qa_review',
    '00000000-0000-0000-0000-bbbb0000000e', 'clean',
    now() - interval '4 hours' + interval '6 minutes'),
   ('00000000-0000-0000-0000-aaaa00000001', 'todo', 'in_dev',
    '00000000-0000-0000-0000-bbbb0000000f', 'clean',
    now() - interval '90 minutes' + interval '1 minute'),
-  ('00000000-0000-0000-0000-aaaa00000001', 'in_dev', 'in_review',
+  ('00000000-0000-0000-0000-aaaa00000001', 'in_dev', 'qa_review',
    '00000000-0000-0000-0000-bbbb0000000f', 'clean',
    now() - interval '90 minutes' + interval '3 minutes');
 
@@ -387,7 +391,7 @@ VALUES
   ('work.ticket.created',
    jsonb_build_object('ticket_id', '00000000-0000-0000-0000-aaaa00000002', 'event_id', 'evt-001'),
    now() - interval '5 hours'),
-  ('work.ticket.transitioned.engineering.in_dev.in_review',
+  ('work.ticket.transitioned.engineering.in_dev.qa_review',
    jsonb_build_object(
      'ticket_id', '00000000-0000-0000-0000-aaaa00000004',
      'agent_instance_id', '00000000-0000-0000-0000-bbbb00000002',
@@ -399,13 +403,13 @@ VALUES
      'agent_instance_id', '00000000-0000-0000-0000-bbbb00000003',
      'event_id', 'evt-003'),
    now() - interval '8 hours'),
-  ('work.ticket.transitioned.engineering.in_review.done',
+  ('work.ticket.transitioned.engineering.qa_review.done',
    jsonb_build_object(
      'ticket_id', '00000000-0000-0000-0000-aaaa00000005',
      'agent_instance_id', '00000000-0000-0000-0000-bbbb00000001',
      'event_id', 'evt-004'),
    now() - interval '3 days' + interval '4 minutes'),
-  ('work.ticket.transitioned.qa-engineer.in_review.done',
+  ('work.ticket.transitioned.qa-engineer.qa_review.done',
    jsonb_build_object(
      'ticket_id', '00000000-0000-0000-0000-aaaa00010002',
      'agent_instance_id', '00000000-0000-0000-0000-bbbb00000004',

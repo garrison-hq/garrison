@@ -212,6 +212,7 @@ jobs:
           docker pull postgres:15-alpine &
           docker pull redis:7-alpine &
           docker pull infisical/infisical:v0.159.22 &
+          docker pull minio/minio@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e &
           wait
       # `--with-deps` installs the Linux packages Chromium needs
       # (libnss, libgbm, fonts, …). Cheaper than running

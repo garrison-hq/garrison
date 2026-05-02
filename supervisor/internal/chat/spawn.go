@@ -64,7 +64,7 @@ func (deps Deps) SpawnTurn(
 	defer tokenSV.Zero()
 
 	// Step 2 — MCP config write.
-	mcpPath, err := writeChatMCPConfig(deps, messageID, supervisorBin, agentRoDSN, mcpExtraEnv)
+	mcpPath, err := writeChatMCPConfig(deps, sessionID, messageID, supervisorBin, agentRoDSN, mcpExtraEnv)
 	if err != nil {
 		deps.Logger.Error("chat: mcp config write failed", "err", err)
 		writeAssistantError(ctx, deps, messageID, ErrorClaudeRuntimeError)
@@ -126,10 +126,26 @@ type MempalaceWiring struct {
 	DockerHost         string
 }
 
-func writeChatMCPConfig(deps Deps, messageID pgtype.UUID, supervisorBin, agentRoDSN string, wiring MempalaceWiring) (string, error) {
+func writeChatMCPConfig(deps Deps, sessionID, messageID pgtype.UUID, supervisorBin, agentRoDSN string, wiring MempalaceWiring) (string, error) {
 	idText := uuidString(messageID)
 	if idText == "" {
 		return "", errors.New("chat: writeChatMCPConfig: invalid messageID")
+	}
+	sessionIDText := uuidString(sessionID)
+	// M5.3 garrison-mutate entry: all-or-nothing on the three session
+	// fields. Lit up only when ChatInternalDatabaseURL is configured;
+	// otherwise BuildChatConfig falls back to the M5.1/M5.2 two-entry
+	// shape. Earlier revisions of this file passed neither sessionID nor
+	// the database URL through, which silently disabled chat-driven
+	// mutations entirely (the CEO had no garrison-mutate.* tools to
+	// call) — caught during the M5.4-ship A→Z smoke test.
+	chatDB := ""
+	chatSession := ""
+	chatMessage := ""
+	if deps.ChatInternalDatabaseURL != "" && sessionIDText != "" {
+		chatDB = deps.ChatInternalDatabaseURL
+		chatSession = sessionIDText
+		chatMessage = idText
 	}
 	body, err := mcpconfig.BuildChatConfig(mcpconfig.ChatConfigParams{
 		SupervisorBin: supervisorBin,
@@ -140,6 +156,9 @@ func writeChatMCPConfig(deps Deps, messageID pgtype.UUID, supervisorBin, agentRo
 			PalacePath:         wiring.PalacePath,
 			DockerHost:         wiring.DockerHost,
 		},
+		DatabaseURL:   chatDB,
+		ChatSessionID: chatSession,
+		ChatMessageID: chatMessage,
 	})
 	if err != nil {
 		return "", err

@@ -4,8 +4,6 @@ import { getTranslations } from 'next-intl/server';
 import { StatusDot } from '@/components/ui/StatusDot';
 import { getSession } from '@/lib/auth/session';
 import { fetchSidebarStats } from '@/lib/queries/sidebarStats';
-import { getRecentThreadsForCurrentUser } from '@/lib/actions/chat';
-import { ThreadHistorySubnav } from '@/components/features/ceo-chat/ThreadHistorySubnav';
 import {
   AdminIcon,
   AgentIcon,
@@ -33,12 +31,6 @@ export async function Sidebar() {
   const t = await getTranslations('nav');
   const session = await getSession();
   const stats = await fetchSidebarStats();
-  // M5.2 — fetch recent threads for the chat subnav. Soft-fail to []
-  // if the call throws (e.g. the chat schema migration hasn't run on
-  // this environment yet) so the sidebar stays mountable.
-  const recentThreads = session
-    ? await getRecentThreadsForCurrentUser(10).catch(() => [])
-    : [];
   const email = session?.user.email ?? '';
   const initials = email
     .split('@')[0]
@@ -68,21 +60,23 @@ export async function Sidebar() {
         />
       </Link>
 
-      {/* Persistent primary action — operator-driven ticket
-          creation per FR-025. The button is always visible so the
-          operator can create a ticket from any surface; the form's
-          department dropdown lets them pick the workflow. The
-          per-department kanban page also has a button that
-          prefills the workflow for that department. */}
+      {/* Persistent secondary action — operator-driven ticket
+          creation per FR-025. Plain <a> (not next/link) so the
+          navigation bypasses the @panel intercepting route, which
+          matches /tickets/<segment> for the ticket-detail drawer
+          and would otherwise capture /tickets/new and leave the
+          children slot stale. Neutral styling (not the primary
+          accent) so the only saturated lime on the surface is the
+          composer's send button. */}
       <div className="px-3 pb-3">
-        <Link
+        <a
           href="/tickets/new"
-          className="flex items-center justify-center gap-1.5 w-full px-3 py-2 rounded bg-accent text-white hover:bg-accent/90 text-[13px] font-medium"
+          className="flex items-center justify-center gap-1.5 w-full px-3 py-1.5 rounded bg-surface-2 hover:bg-surface-3 border border-border-1 hover:border-border-2 text-text-1 text-[12.5px] font-medium transition-colors"
           data-testid="sidebar-new-ticket"
         >
-          <span aria-hidden>+</span>
+          <span aria-hidden className="text-text-3">+</span>
           <span>New ticket</span>
-        </Link>
+        </a>
       </div>
 
       <nav aria-label={t('primaryNavigationLabel')} className="flex-1 flex flex-col gap-0.5 px-2">
@@ -93,7 +87,6 @@ export async function Sidebar() {
         </NavGroup>
         <NavLink href="/activity" label={t('activity')} icon={<ActivityIcon />} />
         <NavLink href="/chat" label="CEO chat" icon={<ChatIcon />} />
-        <ThreadHistorySubnav threads={recentThreads.map((r) => ({ id: r.id, threadNumber: r.threadNumber }))} />
         {/* M5.3 stopgap (FR-494 default lean): Hiring proposals
             sublink under CEO chat — chat originates these proposals,
             so the operator's mental model groups them with chat.

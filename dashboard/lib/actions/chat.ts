@@ -158,7 +158,8 @@ export async function sendChatMessage(
 //
 // Plus one user-facing query wrapper:
 //
-//   getRecentThreadsForCurrentUser(limit?)  — used by ThreadHistorySubnav.
+//   getRecentThreadsForCurrentUser(limit?)  — used by ChatShell to seed
+//                                              the right-pane recent-threads block.
 //
 // Every mutating action verifies the caller owns the session via
 // requireSessionOwner() before any write. Non-owner collapses to
@@ -284,8 +285,8 @@ export async function deleteChatSession(sessionId: string): Promise<void> {
   });
 }
 
-// getRecentThreadsForCurrentUser is the action wrapper used by the
-// ThreadHistorySubnav for its server-rendered initial state. Reads
+// getRecentThreadsForCurrentUser is the action wrapper used by
+// ChatShell to seed the right-pane recent-threads block. Reads
 // the auth session to derive userId — kept in lib/actions/chat.ts
 // rather than lib/queries/chat.ts because actions can call queries
 // but queries are pure-data helpers per M3 convention.

@@ -52,10 +52,26 @@ func TestBuildSharedPalaceClientNilWhenFakeAgent(t *testing.T) {
 	}
 }
 
-func TestBuildSharedPalaceClientNilWhenBootstrapDisabled(t *testing.T) {
-	cfg := &config.Config{DisablePalaceBootstrap: true}
-	if c := buildSharedPalaceClient(cfg); c != nil {
-		t.Errorf("disable-bootstrap: want nil client, got %+v", c)
+// TestBuildSharedPalaceClientPopulatedWhenBootstrapDisabled — M5.4
+// A→Z smoke discovered that DisablePalaceBootstrap=1 was nil-ing the
+// palace client AND nulling the M2.2.1 atomic-finalize path. The flag
+// now means "skip the bootstrap subprocess only" — the client is
+// constructed unconditionally for non-fake-agent paths so finalize
+// tool_uses commit correctly.
+func TestBuildSharedPalaceClientPopulatedWhenBootstrapDisabled(t *testing.T) {
+	cfg := &config.Config{
+		DisablePalaceBootstrap: true,
+		MempalaceContainer:     "garrison-mempalace",
+		PalacePath:             "/palace",
+		DockerHost:             "unix:///var/run/docker.sock",
+		DockerBin:              "/usr/bin/docker",
+	}
+	c := buildSharedPalaceClient(cfg)
+	if c == nil {
+		t.Fatal("disable-bootstrap: want non-nil client (only fake-agent should null it)")
+	}
+	if c.MempalaceContainer != "garrison-mempalace" {
+		t.Errorf("container: %q", c.MempalaceContainer)
 	}
 }
 

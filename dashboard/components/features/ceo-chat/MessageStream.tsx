@@ -22,6 +22,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { MessageBubble } from './MessageBubble';
 import { useStickyBottom } from './useStickyBottom';
 import { useChatStream } from '@/lib/sse/chatStream';
+import { reconstructToolCallsFromEnvelope } from '@/lib/sse/replay';
 
 interface ServerMessage {
   id: string;
@@ -48,6 +49,13 @@ interface MessageStreamProps {
   endedFooter?: React.ReactNode;
   /** Cosmetic CEO model name (passed straight to MessageBubble). */
   modelBadge?: string | null;
+  /** Bumped by the parent each time the operator sends a message — the
+   *  stream force-scrolls to bottom + resets the new-pill counter so
+   *  the operator's own freshly-sent message lands in view, regardless
+   *  of where they were scrolled before send. M5.4 retro: without this
+   *  the "↓ N new" pill appears on the assistant terminal even though
+   *  the operator wants to follow their own outgoing message instead. */
+  scrollSignal?: number;
 }
 
 const SCROLL_UP_PILL_THRESHOLD_PX = 100;
@@ -60,6 +68,7 @@ export function MessageStream({
   renderErrorBlock,
   endedFooter,
   modelBadge,
+  scrollSignal,
 }: Readonly<MessageStreamProps>) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const { isStuck, scrollToBottom } = useStickyBottom(containerRef);
@@ -83,6 +92,17 @@ export function MessageStream({
     // bottom on mount so the operator sees the most recent turns.
     queueMicrotask(() => scrollToBottom());
   }, [sessionId, initialMessages, hasMoreInitial, scrollToBottom]);
+
+  // Force-scroll on operator send. The parent bumps scrollSignal in
+  // Composer.onSent so the operator's freshly-sent message lands in
+  // view even if they were scrolled up reading older turns. Resets
+  // the new-pill counter too — the user's intent is to follow the
+  // turn they just initiated.
+  useEffect(() => {
+    if (scrollSignal === undefined) return;
+    setNewPillCount(0);
+    queueMicrotask(() => scrollToBottom());
+  }, [scrollSignal, scrollToBottom]);
 
   // Track "new since scroll-up" via terminal-commit count.
   useEffect(() => {
@@ -142,7 +162,15 @@ export function MessageStream({
     return [...messages].sort((a, b) => a.turnIndex - b.turnIndex).map((m) => {
       const terminal = stream.terminals.get(m.id);
       const partial = stream.partialDeltas.get(m.id);
-      const toolCalls = stream.toolCalls.get(m.id) ?? [];
+      // Live SSE wins for in-flight messages; for committed messages
+      // (page reload, scroll-back) the live map is empty, so fall back
+      // to reconstructing from the persisted raw_event_envelope per
+      // M5.2 FR-261. Without the fallback the chips disappear on
+      // refresh — caught live during M5.4 retro.
+      const liveToolCalls = stream.toolCalls.get(m.id);
+      const toolCalls = liveToolCalls && liveToolCalls.length > 0
+        ? liveToolCalls
+        : reconstructToolCallsFromEnvelope(m.rawEventEnvelope);
       const mergedContent = terminal?.content ?? m.content ?? partial ?? null;
       const mergedStatus = terminal?.status ?? m.status;
       const isInFlight = m.role === 'assistant' && terminal === undefined &&

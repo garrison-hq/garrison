@@ -73,7 +73,7 @@ export function ThemeSwitcher({ initial }: Readonly<{ initial: ThemePreference }
             data-testid={`theme-${pref}`}
             className={`px-2 py-0.5 rounded font-mono transition-colors ${
               selected
-                ? 'bg-surface-3 text-text-1 shadow-sm'
+                ? 'bg-accent/15 text-accent'
                 : 'text-text-3 hover:text-text-2'
             }`}
           >

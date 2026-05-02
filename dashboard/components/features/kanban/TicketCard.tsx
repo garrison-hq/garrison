@@ -30,6 +30,13 @@ export function TicketCard({ ticket }: Readonly<{ ticket: TicketCardRow }>) {
         <span
           className="font-mono text-[10.5px] text-text-3 font-tabular"
           title={`updated ${formatIsoFull(ticket.createdAt)}`}
+          // Relative time computed against Date.now() — SSR + client
+          // can read different "now" values when the minute ticks
+          // over between render and hydrate (e.g. server says
+          // "24m ago", client says "25m ago"). suppressHydrationWarning
+          // tells React this specific subtree is intentionally
+          // non-deterministic; the client's value wins after hydrate.
+          suppressHydrationWarning
         >
           {relativeTime(ticket.createdAt)}
         </span>

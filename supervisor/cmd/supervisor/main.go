@@ -13,11 +13,13 @@ import (
 	"github.com/garrison-hq/garrison/supervisor/internal/agents"
 	"github.com/garrison-hq/garrison/supervisor/internal/chat"
 	"github.com/garrison-hq/garrison/supervisor/internal/config"
+	"github.com/garrison-hq/garrison/supervisor/internal/dashboardapi"
 	"github.com/garrison-hq/garrison/supervisor/internal/dockerexec"
 	"github.com/garrison-hq/garrison/supervisor/internal/events"
 	"github.com/garrison-hq/garrison/supervisor/internal/health"
 	"github.com/garrison-hq/garrison/supervisor/internal/hygiene"
 	"github.com/garrison-hq/garrison/supervisor/internal/mempalace"
+	"github.com/garrison-hq/garrison/supervisor/internal/objstore"
 	"github.com/garrison-hq/garrison/supervisor/internal/pgdb"
 	"github.com/garrison-hq/garrison/supervisor/internal/spawn"
 	"github.com/garrison-hq/garrison/supervisor/internal/store"
@@ -50,11 +52,17 @@ const (
 // for any test harness that still references it.
 const EngineeringTicketChannel = "work.ticket.created.engineering.todo"
 
-// M2.2 channel constants — the supervisor registers these two handlers
-// per Session 2026-04-23 and FR-227/FR-228.
+// M2.2 channel constants — the supervisor registers these handlers
+// per Session 2026-04-23 and FR-227/FR-228. The two `transitioned.*.in_dev`
+// channels were added during M5.4 retro after dropping the M1/M2.1 back-compat
+// dispatch on `created.engineering.todo`: with `todo` now a real backlog
+// column, the engineer needs to spawn on transitions INTO `in_dev`
+// (operator drag from todo, or QA bounce-back from qa_review).
 const (
-	EngineeringInDevChannel    = "work.ticket.created.engineering.in_dev"
-	EngineeringQAReviewChannel = "work.ticket.transitioned.engineering.in_dev.qa_review"
+	EngineeringInDevChannel     = "work.ticket.created.engineering.in_dev"
+	EngineeringTodoInDevChannel = "work.ticket.transitioned.engineering.todo.in_dev"
+	EngineeringQABounceChannel  = "work.ticket.transitioned.engineering.qa_review.in_dev"
+	EngineeringQAReviewChannel  = "work.ticket.transitioned.engineering.in_dev.qa_review"
 )
 
 const usage = `Usage: supervisor [FLAGS] | mcp-postgres | mcp finalize | mcp garrison-mutate
@@ -244,28 +252,20 @@ func runDaemon() int {
 		CustomerID: cfg.CustomerID(),
 	}
 
-	engineerHandler := func(ctx context.Context, eventID pgtype.UUID) error {
-		return spawn.Spawn(ctx, spawnDeps, eventID, "engineer")
-	}
-	qaEngineerHandler := func(ctx context.Context, eventID pgtype.UUID) error {
-		return spawn.Spawn(ctx, spawnDeps, eventID, "qa-engineer")
-	}
-	dispatcher := events.NewDispatcher(map[string]events.Handler{
-		// M2.2 canonical channels: engineer listens_for was shifted from
-		// `todo` to `in_dev` per Session 2026-04-23. The engineer agent
-		// row's listens_for data carries in_dev only. The dispatcher also
-		// routes the legacy `created.engineering.todo` channel to the same
-		// engineer handler so M1/M2.1 chaos tests + any operator workflow
-		// that inserts tickets at the default `todo` column continues to
-		// work. The clarification forbids registering a *separate agent*
-		// against todo; it doesn't constrain which channels the *dispatcher*
-		// maps to the existing engineer.
-		EngineeringTicketChannel:   engineerHandler, // "created.engineering.todo" (M1/M2.1 back-compat)
-		EngineeringInDevChannel:    engineerHandler, // M2.2 canonical
-		EngineeringQAReviewChannel: qaEngineerHandler,
-	})
+	dispatcher := buildDispatcher(spawnDeps)
 
 	healthServer := health.NewServer(cfg, state, pool)
+
+	// M5.4 — objstore client + dashboardapi server. Both are gated on
+	// vault availability: in fake-agent mode or when GARRISON_INFISICAL_ADDR
+	// is unset (M2.1/M2.2 chaos-test path), the supervisor skips this
+	// surface entirely. In production (vault configured), MinIO bootstrap
+	// is fail-closed: an unreachable MinIO at boot causes ExitFailure.
+	objstoreClient, exitCode := buildObjstoreClient(ctx, cfg, vaultClient, logger)
+	if exitCode != ExitOK {
+		return exitCode
+	}
+	dashboardAPIServer := buildDashboardAPIServer(cfg, pool, objstoreClient, sharedPalaceClient, logger)
 
 	g, gctx := errgroup.WithContext(ctx)
 
@@ -287,6 +287,8 @@ func runDaemon() int {
 		logger.Info("health server listening", "addr", fmt.Sprintf("0.0.0.0:%d", cfg.HealthPort))
 		return healthServer.Serve(gctx)
 	})
+
+	startDashboardAPIServerIfWired(g, gctx, dashboardAPIServer, cfg, logger)
 
 	// M4 — agents.changed cache invalidator (T014 / FR-100).
 	// The dashboard's editAgent server action emits
@@ -347,6 +349,12 @@ func runDaemon() int {
 		ShutdownSignalGrace:  spawn.ShutdownSignalGrace,
 		ClaudeBinInContainer: "/usr/local/bin/claude",
 		DefaultModel:         cfg.ChatDefaultModel,
+		// M5.3 garrison-mutate full-perms DSN for the chat container.
+		// Falls back to cfg.DatabaseURL (the supervisor's host-side DSN);
+		// operator overrides via GARRISON_CHAT_INTERNAL_DATABASE_URL when
+		// the chat container is on a different network alias than the
+		// supervisor (the dev/compose case).
+		ChatInternalDatabaseURL: chatInternalDatabaseURL(cfg),
 	}
 	if err := chat.RunRestartSweep(ctx, chatDeps); err != nil {
 		logger.Warn("chat: restart sweep failed; continuing", "err", err)
@@ -485,11 +493,21 @@ func resolveSupervisorBin(logger *slog.Logger) string {
 
 // buildSharedPalaceClient constructs the M2.2.1 T011 palace client
 // shared across the hygiene listener and the finalize atomic writer.
-// Returns nil for the fake-agent and bootstrap-disabled paths so callers
-// can hold a pointer unconditionally and rely on WriteFinalize's
-// nil-guard to skip the atomic write.
+// Returns nil only for the fake-agent path so callers can hold a
+// pointer unconditionally and rely on WriteFinalize's nil-guard to
+// skip the atomic write when there's truly no palace.
+//
+// DisablePalaceBootstrap is intentionally NOT a reason to nil this
+// out: the flag means "skip the one-time bootstrap subprocess",
+// not "disable all palace operations". The dev stack +
+// M2.1/M2.2 chaos tests set DisablePalaceBootstrap=1 but the
+// mempalace container is still up and reachable; an in-flight
+// finalize_ticket call needs to write to it at commit time. Earlier
+// revisions returned nil here, which left finalize tool_uses with
+// `deps.Palace is nil; skipping atomic write` and tickets stuck at
+// in_dev with the `finalize: no palace client wired` error chain.
 func buildSharedPalaceClient(cfg *config.Config) *mempalace.Client {
-	if cfg.UseFakeAgent || cfg.DisablePalaceBootstrap {
+	if cfg.UseFakeAgent {
 		return nil
 	}
 	return &mempalace.Client{
@@ -500,6 +518,214 @@ func buildSharedPalaceClient(cfg *config.Config) *mempalace.Client {
 		Timeout:            10 * time.Second,
 		Exec:               dockerexec.RealDockerExec{DockerBin: cfg.DockerBin},
 	}
+}
+
+// buildDispatcher composes the channel→handler map for events.Dispatcher.
+// M2.2 canonical channels are always wired; the M1/M2.1 back-compat
+// `created.engineering.todo` channel is restored under
+// GARRISON_M21_BACKCOMPAT_DISPATCH=1 so the chaos+integration test suite
+// can keep pinning the original todo-spawn contract while production
+// keeps `todo` as a real operator triage column.
+func buildDispatcher(spawnDeps spawn.Deps) *events.Dispatcher {
+	engineerHandler := func(ctx context.Context, eventID pgtype.UUID) error {
+		return spawn.Spawn(ctx, spawnDeps, eventID, "engineer")
+	}
+	qaEngineerHandler := func(ctx context.Context, eventID pgtype.UUID) error {
+		return spawn.Spawn(ctx, spawnDeps, eventID, "qa-engineer")
+	}
+	handlers := map[string]events.Handler{
+		EngineeringInDevChannel:     engineerHandler,
+		EngineeringTodoInDevChannel: engineerHandler,
+		EngineeringQABounceChannel:  engineerHandler,
+		EngineeringQAReviewChannel:  qaEngineerHandler,
+	}
+	if os.Getenv("GARRISON_M21_BACKCOMPAT_DISPATCH") == "1" {
+		handlers[EngineeringTicketChannel] = engineerHandler
+	}
+	return events.NewDispatcher(handlers)
+}
+
+// chatInternalDatabaseURL returns the chat-container-side full-perms
+// Postgres DSN passed to the M5.3 garrison-mutate MCP entry.
+// GARRISON_CHAT_INTERNAL_DATABASE_URL overrides; falls back to the
+// supervisor's host-side cfg.DatabaseURL when unset (production
+// compose where the chat container reaches the same DSN by network
+// alias).
+func chatInternalDatabaseURL(cfg *config.Config) string {
+	if v := os.Getenv("GARRISON_CHAT_INTERNAL_DATABASE_URL"); v != "" {
+		return v
+	}
+	return cfg.DatabaseURL
+}
+
+// startDashboardAPIServerIfWired registers the dashboardapi server's
+// Serve goroutine on the errgroup when buildDashboardAPIServer
+// produced a non-nil server (i.e., not in fake-agent mode and vault
+// is configured). Pulled out of runDaemon to keep its cognitive
+// complexity within Sonar's threshold.
+func startDashboardAPIServerIfWired(
+	g *errgroup.Group,
+	gctx context.Context,
+	srv *dashboardapi.Server,
+	cfg *config.Config,
+	logger *slog.Logger,
+) {
+	if srv == nil {
+		return
+	}
+	g.Go(func() error {
+		logger.Info("dashboardapi server listening", "addr", fmt.Sprintf("0.0.0.0:%d", cfg.DashboardAPIPort))
+		return srv.Serve(gctx)
+	})
+}
+
+// uuidString renders a pgtype.UUID as the canonical 8-4-4-4-12
+// hyphen-separated form used across the codebase (see existing
+// buildVaultClient site).
+func uuidString(u pgtype.UUID) string {
+	return fmt.Sprintf("%x-%x-%x-%x-%x",
+		u.Bytes[0:4], u.Bytes[4:6], u.Bytes[6:8], u.Bytes[8:10], u.Bytes[10:16])
+}
+
+// buildObjstoreClient fetches the scoped MinIO credentials from
+// Infisical and constructs an objstore.Client + runs BootstrapBucket.
+// M2.2 mempalace-bootstrap parallel: fail-closed at boot — an
+// unreachable MinIO causes ExitFailure.
+//
+// Returns (nil, ExitOK) when M5.4 is gracefully skipped: fake-agent
+// mode or vault disabled (no Infisical address). This preserves
+// M2.1/M2.2 chaos-test compatibility — those tests run without
+// Infisical.
+func buildObjstoreClient(ctx context.Context, cfg *config.Config, vaultClient vault.Fetcher, logger *slog.Logger) (*objstore.Client, int) {
+	if cfg.UseFakeAgent || vaultClient == nil {
+		logger.Info("objstore: skipping M5.4 wiring (fake-agent or vault unavailable)")
+		return nil, ExitOK
+	}
+
+	// Fetch the two scoped MinIO secrets in one Fetch call. The vault
+	// client writes vault_access_log rows per M2.3 Rule 4; failures
+	// short-circuit (fail-closed at boot).
+	const (
+		envAccessKey = "MINIO_ACCESS_KEY"
+		envSecretKey = "MINIO_SECRET_KEY"
+	)
+	grants := []vault.GrantRow{
+		{EnvVarName: envAccessKey, SecretPath: cfg.MinIOAccessKeyPath},
+		{EnvVarName: envSecretKey, SecretPath: cfg.MinIOSecretKeyPath},
+	}
+	secrets, err := vaultClient.Fetch(ctx, grants)
+	if err != nil {
+		logger.Error("objstore: vault fetch for MinIO credentials failed; aborting startup", "err", err)
+		return nil, ExitFailure
+	}
+	defer func() {
+		for _, sv := range secrets {
+			sv.Zero()
+		}
+	}()
+
+	accessSV, ok := secrets[envAccessKey]
+	if !ok {
+		logger.Error("objstore: vault returned no value for MinIO access key")
+		return nil, ExitFailure
+	}
+	secretSV, ok := secrets[envSecretKey]
+	if !ok {
+		logger.Error("objstore: vault returned no value for MinIO secret key")
+		return nil, ExitFailure
+	}
+
+	// UnsafeBytes is one of the two production call sites M2.3 documents
+	// as legitimate (the other is internal/spawn env injection).
+	client, err := objstore.New(objstore.Config{
+		Endpoint:  cfg.MinIOEndpoint,
+		UseTLS:    cfg.MinIOUseTLS,
+		AccessKey: string(accessSV.UnsafeBytes()),
+		SecretKey: string(secretSV.UnsafeBytes()),
+		Bucket:    cfg.MinIOBucket,
+		CompanyID: uuidString(cfg.CustomerID()),
+	}, logger)
+	if err != nil {
+		logger.Error("objstore: client construction failed", "err", err)
+		return nil, ExitFailure
+	}
+
+	// Bootstrap is fail-closed (mirrors M2.2 mempalace-bootstrap).
+	bootstrapCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if err := client.BootstrapBucket(bootstrapCtx); err != nil {
+		logger.Error("objstore: bootstrap failed; aborting startup",
+			"err", err, "endpoint", cfg.MinIOEndpoint, "bucket", cfg.MinIOBucket)
+		return nil, ExitFailure
+	}
+
+	return client, ExitOK
+}
+
+// buildDashboardAPIServer wires the dashboardapi.Server with the route
+// set + auth middleware. Returns nil when objstore wiring was skipped
+// (M2.1/M2.2 chaos test path) — runDaemon's caller adapts.
+func buildDashboardAPIServer(
+	cfg *config.Config,
+	pool *pgxpool.Pool,
+	objstoreClient *objstore.Client,
+	sharedPalaceClient *mempalace.Client,
+	logger *slog.Logger,
+) *dashboardapi.Server {
+	if objstoreClient == nil {
+		return nil
+	}
+
+	// QueryClient: built directly from cfg so it lights up even when
+	// `sharedPalaceClient` is nil (GARRISON_DISABLE_PALACE_BOOTSTRAP=1
+	// path used by M2.1/M2.2 chaos tests + the dev stack). The
+	// QueryClient only needs the docker-exec config + a reachable
+	// mempalace container — it does NOT depend on bootstrap output.
+	// Earlier revisions tied creation to sharedPalaceClient, which made
+	// the /api/mempalace/recent-writes + /recent-kg routes 404 in any
+	// environment that skipped bootstrap.
+	queryClient := mempalace.NewQueryClient(
+		dockerexec.RealDockerExec{DockerBin: cfg.DockerBin},
+		cfg.MempalaceContainer,
+		cfg.PalacePath,
+		logger,
+	)
+	queryClient.DockerHost = cfg.DockerHost
+	_ = sharedPalaceClient // retained as a parameter for future wiring; see comment above
+
+	// SessionValidator: closure over pool.QueryRow against the dashboard's
+	// better-auth `sessions` table. Cookie value is the `token` column;
+	// supervisor connects as schema owner and already has SELECT (per
+	// T001 reality-adjustment, no GRANT migration needed).
+	sessionRowQuery := dashboardapi.SessionRowQuery(
+		func(ctx context.Context, token string) (string, time.Time, error) {
+			var userID pgtype.UUID
+			var expiresAt time.Time
+			err := pool.QueryRow(ctx,
+				`SELECT user_id, expires_at FROM sessions WHERE token = $1`,
+				token,
+			).Scan(&userID, &expiresAt)
+			if err != nil {
+				return "", time.Time{}, err
+			}
+			return uuidString(userID), expiresAt, nil
+		},
+	)
+	validator := dashboardapi.NewSQLSessionValidator(sessionRowQuery, time.Now)
+
+	deps := dashboardapi.Deps{
+		Objstore:         objstoreClient,
+		Mempalace:        queryClient,
+		SessionValidator: validator,
+		Logger:           logger,
+		CompanyID:        uuidString(cfg.CustomerID()),
+	}
+	srv := dashboardapi.NewServer(cfg, deps)
+	if err := srv.RegisterDefaultRoutes(deps); err != nil {
+		logger.Error("dashboardapi: route registration failed", "err", err)
+		return nil
+	}
+	return srv
 }
 
 // buildVaultClient constructs the M2.3 vault.Fetcher when the Infisical

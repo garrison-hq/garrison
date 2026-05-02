@@ -132,7 +132,10 @@ func realCreateTicketHandler(ctx context.Context, deps Deps, raw json.RawMessage
 		Success:             true,
 		AffectedResourceID:  resourceID,
 		AffectedResourceURL: ticketURLPrefix + resourceID,
-		Message:             fmt.Sprintf("Created ticket %s in %s", resourceID, args.DepartmentSlug),
+		Message: fmt.Sprintf(
+			"Created ticket %s in %s at column %q. The supervisor's spawn loop dispatches the appropriate agent automatically — do NOT call transition_ticket on this ticket as a follow-up unless you intend to override the agent's work.",
+			resourceID, args.DepartmentSlug, columnSlug,
+		),
 	}, nil
 }
 
@@ -241,10 +244,20 @@ func realEditTicketHandler(ctx context.Context, deps Deps, raw json.RawMessage) 
 }
 
 // TransitionTicketArgs is the JSON input shape for transition_ticket.
+//
+// ExpectedFromColumn is an optional optimistic-concurrency check
+// (added live 2026-05-01 after the M5.4 A→Z smoke surfaced a
+// CEO/engineer race). When supplied, the verb verifies the ticket's
+// current column matches before transitioning; on mismatch it returns
+// outcome=ticket_state_changed so the caller can reconcile against
+// fresh state instead of clobbering another actor's work. Empty =
+// skip the check (M5.3 back-compat for callers that haven't been
+// updated to send the field).
 type TransitionTicketArgs struct {
-	TicketID string `json:"ticket_id"`
-	ToColumn string `json:"to_column"`
-	Reason   string `json:"reason,omitempty"`
+	TicketID           string `json:"ticket_id"`
+	ToColumn           string `json:"to_column"`
+	ExpectedFromColumn string `json:"expected_from_column,omitempty"`
+	Reason             string `json:"reason,omitempty"`
 }
 
 // realTransitionTicketHandler implements garrison-mutate.transition_ticket.
@@ -274,6 +287,34 @@ func realTransitionTicketHandler(ctx context.Context, deps Deps, raw json.RawMes
 	cur, err := q.GetTicketColumnAndDept(ctx, ticketID)
 	if err != nil {
 		return Result{}, fmt.Errorf("transition_ticket: get current: %w", err)
+	}
+	// Optimistic-concurrency check: when the caller supplied an
+	// expected_from_column, verify it matches what's actually on the
+	// ticket right now. Discovered live during the M5.4-ship A→Z smoke
+	// (2026-05-01): the CEO LLM raced with an agent — the engineer
+	// finalized in_dev → qa_review within seconds of create_ticket,
+	// the CEO (still holding stale state) issued
+	// transition_ticket(to_column=in_dev) and clobbered the engineer's
+	// work because there was no concurrency check at all.
+	//
+	// Same shape as the chat-threat-model.md "ticket_state_changed"
+	// outcome: when the caller-observed state diverges from current
+	// state, fail with a typed error so the CEO can reconcile (or
+	// just acknowledge the agent already did the work).
+	//
+	// Backwards transitions (e.g. QA bouncing back to in_dev) remain
+	// fully allowed — they're a legitimate workflow primitive. This
+	// check is purely about staleness, not direction.
+	if args.ExpectedFromColumn != "" && args.ExpectedFromColumn != cur.ColumnSlug {
+		writeErr := writeFailureAudit(ctx, deps, "transition_ticket", args, ErrTicketStateChanged, 1, args.TicketID)
+		return Result{
+			Success:   false,
+			ErrorKind: string(ErrTicketStateChanged),
+			Message: fmt.Sprintf(
+				"Ticket %s is now at column %q, not %q as you expected — another actor (likely the agent assigned to it) moved it. Check the ticket's current state before deciding what to do next.",
+				args.TicketID, cur.ColumnSlug, args.ExpectedFromColumn,
+			),
+		}, writeErr
 	}
 	if cur.ColumnSlug == args.ToColumn {
 		return commitNoopTransition(ctx, tx, q, deps, args)

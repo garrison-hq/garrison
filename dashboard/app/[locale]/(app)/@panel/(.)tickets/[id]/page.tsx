@@ -22,12 +22,22 @@ import { TicketDetailPanel } from '@/components/features/ticket-detail/TicketDet
 
 export const dynamic = 'force-dynamic';
 
+// UUID-shape guard for the intercepting route. Next 16's `[id]`
+// dynamic segment matches ANY non-empty path component including
+// non-UUID strings like "new" (the create form path). Returning
+// null for non-UUID slugs leaves the @panel slot empty so the
+// static /tickets/new page renders via the children slot —
+// notFound() here would render the 404 boundary inside the panel
+// instead of falling through.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export default async function InterceptedTicketPage({
   params,
 }: Readonly<{
   params: Promise<{ id: string }>;
 }>) {
   const { id } = await params;
+  if (!UUID_RE.test(id)) return null;
   const detail = await fetchTicketDetail(id);
   if (!detail) notFound();
   return (

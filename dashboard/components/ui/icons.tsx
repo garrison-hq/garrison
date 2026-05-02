@@ -82,6 +82,15 @@ export const AdminIcon = (p: Props) => (
   </svg>
 );
 
+// Thin-line terminal/prompt mark used by the chat composer's
+// caption row to signal "spawned subprocess".
+export const TerminalIcon = (p: Props) => (
+  <svg {...base} {...p}>
+    <rect x="2" y="3" width="12" height="10" rx="1" stroke="currentColor" strokeWidth="1.2" />
+    <path d="M5 7l2 1.5L5 10M8.5 10.5h3" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
+
 export const GearIcon = (p: Props) => (
   <svg {...base} {...p}>
     <circle cx="8" cy="8" r="2" stroke="currentColor" strokeWidth="1.2" />

@@ -139,7 +139,23 @@ type Config struct {
 	infisicalProjectID    string
 	infisicalEnvironment  string
 	customerID            pgtype.UUID
+
+	// M5.4 fields: MinIO sidecar + dashboard-facing HTTP server.
+	MinIOEndpoint      string // e.g. "garrison-minio:9000"
+	MinIOBucket        string // default "garrison-company"
+	MinIOUseTLS        bool   // default false (in-network plaintext)
+	MinIOAccessKeyPath string // Infisical secret path for the scoped access key
+	MinIOSecretKeyPath string // Infisical secret path for the scoped secret key
+	DashboardAPIPort   uint16 // default 8081
 }
+
+// DefaultMinIOBucket per M5.4 spec FR-620.
+const DefaultMinIOBucket = "garrison-company"
+
+// DefaultDashboardAPIPort per M5.4 plan §5; separate from
+// GARRISON_HEALTH_PORT (8080) so the auth-required /api/* endpoints
+// are isolated from the auth-free /health endpoint.
+const DefaultDashboardAPIPort uint16 = 8081
 
 // AgentMempalaceDSN returns the SELECT-only DSN the hygiene checker uses.
 // Derived from DatabaseURL with userinfo replaced by
@@ -430,6 +446,52 @@ func Load() (*Config, error) {
 			}
 			cfg.customerID = customerID
 		}
+	}
+
+	// M5.4 — MinIO sidecar + dashboard-facing HTTP server. Gated on
+	// vault availability: when GARRISON_INFISICAL_ADDR is unset
+	// (M2.1/M2.2 chaos test environments) the supervisor skips the
+	// dashboardapi + objstore wiring entirely, so requiring MinIO env
+	// vars there would block tests that pre-date M5.4 from running.
+	// Mirrors the buildObjstoreClient graceful-degrade path in
+	// cmd/supervisor/main.go.
+	if cfg.infisicalAddr == "" {
+		return cfg, nil
+	}
+	cfg.MinIOEndpoint = os.Getenv("GARRISON_MINIO_ENDPOINT")
+	if cfg.MinIOEndpoint == "" {
+		return nil, fmt.Errorf("config: GARRISON_MINIO_ENDPOINT is required (e.g. garrison-minio:9000)")
+	}
+	cfg.MinIOBucket = os.Getenv("GARRISON_MINIO_BUCKET")
+	if cfg.MinIOBucket == "" {
+		cfg.MinIOBucket = DefaultMinIOBucket
+	}
+	cfg.MinIOUseTLS = false
+	if v := os.Getenv("GARRISON_MINIO_USE_TLS"); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return nil, fmt.Errorf("config: GARRISON_MINIO_USE_TLS %q is not a valid bool: %w", v, err)
+		}
+		cfg.MinIOUseTLS = b
+	}
+	cfg.MinIOAccessKeyPath = os.Getenv("GARRISON_MINIO_ACCESS_KEY_PATH")
+	if cfg.MinIOAccessKeyPath == "" {
+		return nil, fmt.Errorf("config: GARRISON_MINIO_ACCESS_KEY_PATH is required (Infisical secret path for the scoped MinIO access key)")
+	}
+	cfg.MinIOSecretKeyPath = os.Getenv("GARRISON_MINIO_SECRET_KEY_PATH")
+	if cfg.MinIOSecretKeyPath == "" {
+		return nil, fmt.Errorf("config: GARRISON_MINIO_SECRET_KEY_PATH is required (Infisical secret path for the scoped MinIO secret key)")
+	}
+	cfg.DashboardAPIPort = DefaultDashboardAPIPort
+	if v := os.Getenv("GARRISON_DASHBOARD_API_PORT"); v != "" {
+		n, err := strconv.ParseUint(v, 10, 16)
+		if err != nil {
+			return nil, fmt.Errorf("config: GARRISON_DASHBOARD_API_PORT %q is not a valid uint16: %w", v, err)
+		}
+		if n == 0 {
+			return nil, fmt.Errorf("config: GARRISON_DASHBOARD_API_PORT must be non-zero")
+		}
+		cfg.DashboardAPIPort = uint16(n)
 	}
 
 	return cfg, nil

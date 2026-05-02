@@ -7,3 +7,6 @@ experiment-results/
 
 # Dev-stack generated artefacts (scripts/dev-stack-up.sh)
 .dev-stack.env
+
+# Dev-time built mockclaude binary (not source)
+supervisor/mockclaude

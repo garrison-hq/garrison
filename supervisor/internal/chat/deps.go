@@ -124,4 +124,15 @@ type Deps struct {
 	// invocation. Operator can override via env var. Default:
 	// "claude-sonnet-4-6".
 	DefaultModel string
+
+	// ChatInternalDatabaseURL is the chat-container-side full-perms
+	// Postgres DSN passed to the M5.3 garrison-mutate MCP server entry
+	// in BuildChatConfig. The supervisor (host) uses GARRISON_DATABASE_URL
+	// against `localhost:55432` (or wherever it binds); the chat
+	// container is on garrison-net and reaches Postgres via the
+	// `garrison-dev-pg:5432` alias. Empty → BuildChatConfig falls back
+	// to the M5.1/M5.2 two-entry shape (no garrison-mutate). Configured
+	// via GARRISON_CHAT_INTERNAL_DATABASE_URL at the cmd/supervisor
+	// wiring layer.
+	ChatInternalDatabaseURL string
 }

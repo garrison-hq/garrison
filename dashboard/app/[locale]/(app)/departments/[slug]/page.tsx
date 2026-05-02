@@ -1,5 +1,4 @@
 import { notFound } from 'next/navigation';
-import Link from 'next/link';
 import { fetchDepartmentBySlug, fetchKanban } from '@/lib/queries/kanban';
 import { KanbanBoard } from '@/components/features/kanban/KanbanBoard';
 
@@ -35,17 +34,18 @@ export default async function DepartmentPage({
           <span className="text-text-3 text-xs font-mono">{dept.slug}</span>
           {/* Department-scoped ticket creation: prefills the
               `dept` query param so the form lands with the
-              right workflow already selected. The persistent
-              sidebar button lets the operator pick a different
-              workflow if they need to. */}
-          <Link
+              right workflow already selected. Plain <a> (not
+              next/link) so the navigation bypasses the @panel
+              intercepting route — see Sidebar's "New ticket"
+              for the same pattern. */}
+          <a
             href={`/tickets/new?dept=${encodeURIComponent(dept.slug)}`}
             className="ml-auto inline-flex items-center gap-1.5 px-3 py-1.5 text-[12.5px] rounded bg-accent text-white hover:bg-accent/90"
             data-testid="new-ticket-in-dept"
           >
             <span aria-hidden>+</span>
             <span>New ticket</span>
-          </Link>
+          </a>
         </div>
         <div className="flex items-center gap-5 text-[11px]">
           {dept.columns.map((c) => (
