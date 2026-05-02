@@ -147,6 +147,15 @@ type Config struct {
 	MinIOAccessKeyPath string // Infisical secret path for the scoped access key
 	MinIOSecretKeyPath string // Infisical secret path for the scoped secret key
 	DashboardAPIPort   uint16 // default 8081
+
+	// M6 fields. Five new env-tuned knobs for ticket decomposition,
+	// hygiene threshold, cost-throttle, rate-limit back-off, and the
+	// cost-telemetry result-grace window.
+	MaxTicketsPerTurn   int           // GARRISON_CHAT_MAX_TICKETS_PER_TURN, default 10
+	ThinDiaryThreshold  int           // GARRISON_HYGIENE_THIN_DIARY_THRESHOLD, default 200
+	DefaultSpawnCostUSD string        // GARRISON_DEFAULT_SPAWN_COST_USD, default "0.05"
+	RateLimitBackOff    time.Duration // GARRISON_RATE_LIMIT_BACK_OFF_SECONDS, default 60s
+	FinalizeResultGrace time.Duration // GARRISON_FINALIZE_RESULT_GRACE, default 3s
 }
 
 // DefaultMinIOBucket per M5.4 spec FR-620.
@@ -234,6 +243,12 @@ func Load() (*Config, error) {
 		ChatOAuthVaultPath:     "/operator/CLAUDE_CODE_OAUTH_TOKEN",
 		ChatDockerNetwork:      "garrison-net",
 		ChatDefaultModel:       "claude-sonnet-4-6",
+		// M6 defaults.
+		MaxTicketsPerTurn:   10,
+		ThinDiaryThreshold:  200,
+		DefaultSpawnCostUSD: "0.05",
+		RateLimitBackOff:    60 * time.Second,
+		FinalizeResultGrace: 3 * time.Second,
 	}
 
 	// M5.1 env overrides — all optional; defaults above are used
@@ -264,6 +279,58 @@ func Load() (*Config, error) {
 	}
 	if v := os.Getenv("GARRISON_CHAT_DEFAULT_MODEL"); v != "" {
 		cfg.ChatDefaultModel = v
+	}
+
+	// M6 env overrides.
+	if v := os.Getenv("GARRISON_CHAT_MAX_TICKETS_PER_TURN"); v != "" {
+		var n int
+		if _, err := fmt.Sscanf(v, "%d", &n); err != nil {
+			return nil, fmt.Errorf("config: GARRISON_CHAT_MAX_TICKETS_PER_TURN is not parseable as int: %w", err)
+		}
+		if n < 1 {
+			return nil, fmt.Errorf("config: GARRISON_CHAT_MAX_TICKETS_PER_TURN must be >= 1; got %d", n)
+		}
+		cfg.MaxTicketsPerTurn = n
+	}
+	if v := os.Getenv("GARRISON_HYGIENE_THIN_DIARY_THRESHOLD"); v != "" {
+		var n int
+		if _, err := fmt.Sscanf(v, "%d", &n); err != nil {
+			return nil, fmt.Errorf("config: GARRISON_HYGIENE_THIN_DIARY_THRESHOLD is not parseable as int: %w", err)
+		}
+		if n < 0 {
+			return nil, fmt.Errorf("config: GARRISON_HYGIENE_THIN_DIARY_THRESHOLD must be >= 0; got %d", n)
+		}
+		cfg.ThinDiaryThreshold = n
+	}
+	if v := os.Getenv("GARRISON_DEFAULT_SPAWN_COST_USD"); v != "" {
+		var f float64
+		if _, err := fmt.Sscanf(v, "%f", &f); err != nil {
+			return nil, fmt.Errorf("config: GARRISON_DEFAULT_SPAWN_COST_USD is not parseable as float: %w", err)
+		}
+		if f < 0 {
+			return nil, fmt.Errorf("config: GARRISON_DEFAULT_SPAWN_COST_USD must be >= 0; got %f", f)
+		}
+		cfg.DefaultSpawnCostUSD = v
+	}
+	if v := os.Getenv("GARRISON_RATE_LIMIT_BACK_OFF_SECONDS"); v != "" {
+		var n int
+		if _, err := fmt.Sscanf(v, "%d", &n); err != nil {
+			return nil, fmt.Errorf("config: GARRISON_RATE_LIMIT_BACK_OFF_SECONDS is not parseable as int: %w", err)
+		}
+		if n <= 0 {
+			return nil, fmt.Errorf("config: GARRISON_RATE_LIMIT_BACK_OFF_SECONDS must be > 0; got %d", n)
+		}
+		cfg.RateLimitBackOff = time.Duration(n) * time.Second
+	}
+	if v := os.Getenv("GARRISON_FINALIZE_RESULT_GRACE"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return nil, fmt.Errorf("config: GARRISON_FINALIZE_RESULT_GRACE is not parseable: %w", err)
+		}
+		if d < 0 {
+			return nil, fmt.Errorf("config: GARRISON_FINALIZE_RESULT_GRACE must be >= 0; got %s", d)
+		}
+		cfg.FinalizeResultGrace = d
 	}
 
 	dbURL := os.Getenv("GARRISON_DATABASE_URL")
