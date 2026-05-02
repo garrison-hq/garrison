@@ -134,12 +134,12 @@ func grandfatherOne(ctx context.Context, deps Deps, agent store.Agent, digest st
 	}
 
 	auditBody, _ := json.Marshal(map[string]any{
-		"agent_id":      uuidString(agent.ID),
-		"role_slug":     agent.RoleSlug,
-		"image_digest":  digest,
-		"host_uid":      uid,
-		"container_id":  containerID,
-		"reason":        "M7 cutover: direct-exec → per-agent container",
+		"agent_id":     uuidString(agent.ID),
+		"role_slug":    agent.RoleSlug,
+		"image_digest": digest,
+		"host_uid":     uid,
+		"container_id": containerID,
+		"reason":       "M7 cutover: direct-exec → per-agent container",
 	})
 	if _, err := q.InsertChatMutationAudit(ctx, store.InsertChatMutationAuditParams{
 		ChatSessionID:        pgtype.UUID{Valid: false},

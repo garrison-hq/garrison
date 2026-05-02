@@ -1,6 +1,11 @@
 'use server';
 
 // M7 hiring Server Actions per spec FR-104..FR-110a + plan §6.
+//
+// Per Next.js 16 'use server' modules: only async function exports
+// allowed. Types + the HiringActionError class live in
+// lib/actions/hiring.types.ts so they can be imported into Client
+// Components without violating the Server-Action transport boundary.
 // Approve / reject for new-agent hires, skill changes, version bumps;
 // the install pipeline kickoff happens supervisor-side via the
 // transition_to_install_in_progress hook (the supervisor's restart-
@@ -26,31 +31,11 @@ import {
 import { getSession } from '@/lib/auth/session';
 import { AuthError, AuthErrorKind } from '@/lib/auth/errors';
 
-export type ApproveHireResult = {
-  agentId: string;
-  auditId: string;
-};
-
-export type ApproveSkillResult = {
-  agentId: string;
-  auditId: string;
-  supersededCount: number;
-};
-
-export class HiringActionError extends Error {
-  constructor(
-    message: string,
-    readonly kind:
-      | 'not_found'
-      | 'not_pending'
-      | 'wrong_type'
-      | 'missing_target_agent'
-      | 'reason_required',
-  ) {
-    super(message);
-    this.name = 'HiringActionError';
-  }
-}
+import {
+  type ApproveHireResult,
+  type ApproveSkillResult,
+  HiringActionError,
+} from './hiring.types';
 
 async function assertOperator(): Promise<{ operatorId: string }> {
   const session = await getSession();

@@ -59,7 +59,7 @@ func TestM7DiaryVsRealityRejectsMissingArtefact(t *testing.T) {
 		 (ticket_id, from_column, to_column, triggered_by_agent_instance_id,
 		  finalize_ok, finalize_artefact_paths)
 		 VALUES ($1, 'in_dev', 'qa_review', $2, true,
-		         '["/tmp/does-not-exist-` + uuidLikeForTest() + `.md"]'::jsonb)`,
+		         '["/tmp/does-not-exist-`+uuidLikeForTest()+`.md"]'::jsonb)`,
 		ticketID, instanceID); err != nil {
 		t.Fatalf("seed transition: %v", err)
 	}
