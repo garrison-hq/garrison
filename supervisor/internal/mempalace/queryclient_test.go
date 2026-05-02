@@ -349,6 +349,46 @@ func TestKgQueryByTicketID_MissingPalaceConfigReturnsErr(t *testing.T) {
 	}
 }
 
+// TestRecentDrawers_MissingConfigReturnsErr / _PropagatesDockerExecError
+// pin the same defensive shape RecentDrawers shares with the M6
+// KgQueryByTicketID extraction (the error-format-string constant
+// extraction in T012's cleanup made these lines part of the new-code
+// period, so we cover them here even though the logic predates M6).
+func TestRecentDrawers_MissingConfigReturnsErr(t *testing.T) {
+	c := &QueryClient{} // no Container/PalacePath/Exec
+	_, err := c.RecentDrawers(context.Background(), 10)
+	if err == nil {
+		t.Fatal("expected error for unconfigured QueryClient")
+	}
+	if !errors.Is(err, ErrSidecarUnreachable) {
+		t.Errorf("error %v should wrap ErrSidecarUnreachable", err)
+	}
+}
+
+func TestRecentDrawers_NoExecReturnsErr(t *testing.T) {
+	c := &QueryClient{MempalaceContainer: "x", PalacePath: "/y"}
+	_, err := c.RecentDrawers(context.Background(), 10)
+	if err == nil || !errors.Is(err, ErrSidecarUnreachable) {
+		t.Errorf("expected ErrSidecarUnreachable; got %v", err)
+	}
+}
+
+func TestRecentKGTriples_MissingConfigReturnsErr(t *testing.T) {
+	c := &QueryClient{}
+	_, err := c.RecentKGTriples(context.Background(), 10)
+	if err == nil || !errors.Is(err, ErrSidecarUnreachable) {
+		t.Errorf("expected ErrSidecarUnreachable; got %v", err)
+	}
+}
+
+func TestRecentKGTriples_NoExecReturnsErr(t *testing.T) {
+	c := &QueryClient{MempalaceContainer: "x", PalacePath: "/y"}
+	_, err := c.RecentKGTriples(context.Background(), 10)
+	if err == nil || !errors.Is(err, ErrSidecarUnreachable) {
+		t.Errorf("expected ErrSidecarUnreachable; got %v", err)
+	}
+}
+
 // TestKgQueryByTicketID_PropagatesDockerExecError — exec failure
 // surfaces as ErrSidecarUnreachable wrapping the underlying error.
 func TestKgQueryByTicketID_PropagatesDockerExecError(t *testing.T) {

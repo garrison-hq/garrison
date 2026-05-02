@@ -360,6 +360,72 @@ func TestFirePauseWritesPauseUntilAndAuditRow(t *testing.T) {
 	}
 }
 
+// TestFirePausePropagatesUpdateError uses an already-committed tx so
+// the next statement (UpdateCompanyPauseUntil) errors out, surfacing
+// the wrapping at throttle.go line 101.
+func TestFirePausePropagatesUpdateError(t *testing.T) {
+	pool := testdb.Start(t)
+	ctx := context.Background()
+	truncateAll(t, ctx, pool)
+
+	var companyID pgtype.UUID
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO companies (id, name) VALUES (gen_random_uuid(), 'pause-err-co') RETURNING id`,
+	).Scan(&companyID); err != nil {
+		t.Fatalf("insert company: %v", err)
+	}
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if err := tx.Rollback(ctx); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	deps := throttle.Deps{
+		Pool:                pool,
+		Logger:              slog.Default(),
+		DefaultSpawnCostUSD: numericFromCents(5),
+		RateLimitBackOff:    60 * time.Second,
+		Now:                 time.Now,
+	}
+	err = throttle.FirePause(ctx, deps, store.New(tx), companyID, throttle.RateLimitDetail{
+		Status: "rejected",
+	})
+	if err == nil {
+		t.Fatal("expected error from FirePause on rolled-back tx")
+	}
+}
+
+// TestFireBudgetDeferPropagatesInsertError mirrors the FirePause error
+// test for FireBudgetDefer: a rolled-back tx surfaces the wrapped
+// "InsertThrottleEvent" error at events.go line 31.
+func TestFireBudgetDeferPropagatesInsertError(t *testing.T) {
+	pool := testdb.Start(t)
+	ctx := context.Background()
+	truncateAll(t, ctx, pool)
+
+	var companyID pgtype.UUID
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO companies (id, name) VALUES (gen_random_uuid(), 'budget-err-co') RETURNING id`,
+	).Scan(&companyID); err != nil {
+		t.Fatalf("insert company: %v", err)
+	}
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if err := tx.Rollback(ctx); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	err = throttle.FireBudgetDefer(ctx, store.New(tx), companyID,
+		numericFromString(t, "0.50"), numericFromString(t, "0.10"), numericFromString(t, "1.00"))
+	if err == nil {
+		t.Fatal("expected error from FireBudgetDefer on rolled-back tx")
+	}
+}
+
 // TestCheckPropagatesQueryError forces a malformed query path: a NULL
 // company id causes GetCompanyThrottleState to return pgx.ErrNoRows.
 // throttle.Check should propagate that as a wrapped error rather than
