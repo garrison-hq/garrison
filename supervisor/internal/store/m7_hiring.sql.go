@@ -30,6 +30,57 @@ func (q *Queries) ApproveProposal(ctx context.Context, arg ApproveProposalParams
 	return err
 }
 
+const insertAgentForHire = `-- name: InsertAgentForHire :one
+INSERT INTO agents (
+    department_id, role_slug, agent_md, model,
+    skills, listens_for, palace_wing, status,
+    image_digest, mcp_servers_jsonb
+) VALUES (
+    $1,
+    $2,
+    $3,
+    $4,
+    $5,
+    $6,
+    $7,
+    'active',
+    '',
+    $8
+)
+RETURNING id
+`
+
+type InsertAgentForHireParams struct {
+	DepartmentID    pgtype.UUID
+	RoleSlug        string
+	AgentMd         string
+	Model           string
+	SkillsJsonb     []byte
+	ListensForJsonb []byte
+	PalaceWing      *string
+	McpServersJsonb []byte
+}
+
+// Used by garrisonmutate.ApproveHire (Server Action). Creates a new
+// agents row from an approved proposal. The agent's model + status
+// + listens_for default at insert time; agent_md is the operator-
+// approved snapshot, skills come from the proposal_snapshot_jsonb.
+func (q *Queries) InsertAgentForHire(ctx context.Context, arg InsertAgentForHireParams) (pgtype.UUID, error) {
+	row := q.db.QueryRow(ctx, insertAgentForHire,
+		arg.DepartmentID,
+		arg.RoleSlug,
+		arg.AgentMd,
+		arg.Model,
+		arg.SkillsJsonb,
+		arg.ListensForJsonb,
+		arg.PalaceWing,
+		arg.McpServersJsonb,
+	)
+	var id pgtype.UUID
+	err := row.Scan(&id)
+	return id, err
+}
+
 const insertHiringProposalM7 = `-- name: InsertHiringProposalM7 :one
 
 INSERT INTO hiring_proposals (
@@ -281,5 +332,22 @@ WHERE id = $1 AND status = 'approved'
 // consistent state.
 func (q *Queries) TransitionToInstallInProgress(ctx context.Context, id pgtype.UUID) error {
 	_, err := q.db.Exec(ctx, transitionToInstallInProgress, id)
+	return err
+}
+
+const updateAgentSkills = `-- name: UpdateAgentSkills :exec
+UPDATE agents SET skills = $1 WHERE id = $2
+`
+
+type UpdateAgentSkillsParams struct {
+	SkillsJsonb []byte
+	ID          pgtype.UUID
+}
+
+// Used by garrisonmutate.ApproveSkillChange and ApproveVersionBump
+// post-install. Replaces the agents.skills JSONB with the
+// operator-approved skill set captured in the proposal snapshot.
+func (q *Queries) UpdateAgentSkills(ctx context.Context, arg UpdateAgentSkillsParams) error {
+	_, err := q.db.Exec(ctx, updateAgentSkills, arg.SkillsJsonb, arg.ID)
 	return err
 }

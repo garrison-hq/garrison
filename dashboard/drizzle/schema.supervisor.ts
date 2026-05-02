@@ -341,8 +341,8 @@ export const agentInstallJournal = pgTable("agent_install_journal", {
 
 export const chatMutationAudit = pgTable("chat_mutation_audit", {
 	id: uuid().defaultRandom().primaryKey().notNull(),
-	chatSessionId: uuid("chat_session_id").notNull(),
-	chatMessageId: uuid("chat_message_id").notNull(),
+	chatSessionId: uuid("chat_session_id"),
+	chatMessageId: uuid("chat_message_id"),
 	verb: text().notNull(),
 	argsJsonb: jsonb("args_jsonb").notNull(),
 	outcome: text().notNull(),

@@ -77,3 +77,32 @@ WHERE status = 'pending'
 SELECT * FROM hiring_proposals
 WHERE status = 'install_in_progress'
 ORDER BY approved_at ASC;
+
+-- name: InsertAgentForHire :one
+-- Used by garrisonmutate.ApproveHire (Server Action). Creates a new
+-- agents row from an approved proposal. The agent's model + status
+-- + listens_for default at insert time; agent_md is the operator-
+-- approved snapshot, skills come from the proposal_snapshot_jsonb.
+INSERT INTO agents (
+    department_id, role_slug, agent_md, model,
+    skills, listens_for, palace_wing, status,
+    image_digest, mcp_servers_jsonb
+) VALUES (
+    sqlc.arg(department_id),
+    sqlc.arg(role_slug),
+    sqlc.arg(agent_md),
+    sqlc.arg(model),
+    sqlc.arg(skills_jsonb),
+    sqlc.arg(listens_for_jsonb),
+    sqlc.arg(palace_wing),
+    'active',
+    '',
+    sqlc.arg(mcp_servers_jsonb)
+)
+RETURNING id;
+
+-- name: UpdateAgentSkills :exec
+-- Used by garrisonmutate.ApproveSkillChange and ApproveVersionBump
+-- post-install. Replaces the agents.skills JSONB with the
+-- operator-approved skill set captured in the proposal snapshot.
+UPDATE agents SET skills = sqlc.arg(skills_jsonb) WHERE id = sqlc.arg(id);

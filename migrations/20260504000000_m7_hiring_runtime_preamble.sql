@@ -205,9 +205,32 @@ ALTER TABLE chat_mutation_audit
 ALTER TABLE chat_mutation_audit
   ADD COLUMN retention_class TEXT NULL;
 
+-- Server-Action-driven audits (approve_hire, reject_hire, approve_skill_change,
+-- approve_version_bump, update_agent_md, grandfathered_at_m7) originate
+-- from the operator's dashboard click rather than a chat turn. They have
+-- no chat_session_id / chat_message_id to anchor against. Drop the NOT
+-- NULL on both columns so Server-Action rows can land. The FKs stay
+-- (ON DELETE CASCADE → SET NULL on cascade is unchanged because the FK
+-- itself is unchanged); CASCADE still removes any chat-driven row when
+-- its session disappears.
+ALTER TABLE chat_mutation_audit ALTER COLUMN chat_session_id DROP NOT NULL;
+ALTER TABLE chat_mutation_audit ALTER COLUMN chat_message_id DROP NOT NULL;
+
 -- +goose Down
 
--- chat_mutation_audit
+-- chat_mutation_audit. M7-era Server-Action audit rows are removed
+-- before reverting the verb CHECK + NOT NULL on the chat-context FKs,
+-- because both constraints would otherwise reject the legacy data.
+DELETE FROM chat_mutation_audit WHERE verb IN (
+  'propose_skill_change', 'bump_skill_version',
+  'approve_hire', 'reject_hire',
+  'approve_skill_change', 'reject_skill_change',
+  'approve_version_bump', 'reject_version_bump',
+  'update_agent_md',
+  'grandfathered_at_m7'
+);
+ALTER TABLE chat_mutation_audit ALTER COLUMN chat_message_id SET NOT NULL;
+ALTER TABLE chat_mutation_audit ALTER COLUMN chat_session_id SET NOT NULL;
 ALTER TABLE chat_mutation_audit DROP COLUMN IF EXISTS retention_class;
 ALTER TABLE chat_mutation_audit DROP CONSTRAINT IF EXISTS chat_mutation_audit_verb_check;
 ALTER TABLE chat_mutation_audit
