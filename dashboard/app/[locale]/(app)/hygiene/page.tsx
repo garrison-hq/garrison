@@ -101,8 +101,8 @@ export default async function HygienePage({
       <FailureModeFilter counts={counts.byMode} total={counts.total} />
       <PatternCategoryFilter />
 
-      <section className="bg-surface-1 border border-border-1 rounded overflow-hidden">
-        <header className="px-4 py-2.5 border-b border-border-1 flex items-center gap-3">
+      <section className="bg-surface-1 border border-border-1 rounded overflow-hidden flex flex-col min-h-[420px]">
+        <header className="px-4 py-2.5 border-b border-border-1 flex items-center gap-3 shrink-0">
           <span className="text-text-3 text-[10.5px] uppercase tracking-[0.08em] font-medium">
             {metaT('openFlags')}
           </span>
@@ -110,7 +110,9 @@ export default async function HygienePage({
           <div className="flex-1" />
           <RefreshButton />
         </header>
-        <HygieneTable rows={hygiene.rows} emptyDescription={t('empty')} />
+        <div className="flex-1 min-h-0">
+          <HygieneTable rows={hygiene.rows} emptyDescription={t('empty')} />
+        </div>
       </section>
 
       <ThrottleEventsTable initialRows={throttleRows} />
