@@ -63,11 +63,13 @@ What does NOT exist today:
 
 ---
 
-## §2 — SkillHub maturity re-check (deferred to M7 kickoff)
+## §2 — SkillHub maturity re-check — VERDICT: SHIP
 
-**State of the decision** (`docs/skill-registry-candidates.md`): committed 2026-04-24 as target-state. Rationale: maturity over operational simplicity at target-state. Operationally a Spring Boot stack + Kubernetes is heavier than the rest of Garrison (which runs on Hetzner + Coolify with ~4 containers).
+**Re-check verdict (2026-05-02)**: **ship M7 with SkillHub** as the private-skills registry. Operator confirmation closes the architecture-reconciliation note's deferred re-check. M7 plan can assume SkillHub-as-registry from the first task; no fallback gate.
 
-**What the M7 spike should pin** (work that has NOT been done — this section is a pre-spike scoping pass):
+**State of the decision** (`docs/skill-registry-candidates.md`): committed 2026-04-24 as target-state. Re-check confirmed 2026-05-02. Rationale unchanged: maturity over operational simplicity at target-state. Operationally a Spring Boot stack + Kubernetes is heavier than the rest of Garrison (which runs on Hetzner + Coolify with ~4 containers); the M7 plan still has to scope the deployment story (single-container vs. K8s vs. managed).
+
+**What the M7 spike should still pin** (the GO/NO-GO is closed; these are the integration questions that remain):
 
 1. **Repo activity** — fetch github.com/iflytek/skillhub, count commits in last 90 days, last release, last issue triaged. The 2026-04-24 evaluation captured "60x the activity of skify" but didn't quote absolute numbers. Re-quote them now.
 2. **Deployment shape** — confirm the published artifacts. Is there a Docker Compose path? A single-container option? Or only the full Spring Boot + Kubernetes setup? Garrison's deployment posture at M7 cannot absorb a Kubernetes runtime.
@@ -79,11 +81,10 @@ What does NOT exist today:
 4. **Auth model** — RBAC with bootstrap admin. Does the operator-CEO have a separate token from the supervisor? How do tokens rotate? Where do they live (Infisical?)?
 5. **Public skills.sh fallback** — SkillHub doesn't replace skills.sh. M7 needs both. The fallback semantics (what if the SkillHub instance is down?) need to be in the M7 context's binding decisions.
 
-**Open question from architecture-reconciliation**: if SkillHub is too heavy at M7 kickoff (after the re-check), the fallback options were:
-- skify (small Node/TS, single contributor, 14 commits — flagged "personal project maturity")
-- Git-repo-as-skill-store (no infrastructure; CLI-fetched skill packages)
-
-The M7 plan should explicitly name the abort-criteria for SkillHub before code lands.
+**Resolved**: the architecture-reconciliation note's "abort-criteria for SkillHub" is moot —
+the operator's 2026-05-02 confirmation lifts the deferred-re-check gate.
+skify and the git-repo-as-skill-store remain in `docs/skill-registry-candidates.md`
+as historical context, not as live fallbacks.
 
 ---
 
@@ -149,7 +150,7 @@ What M7 does NOT inherit (must build):
 
 ## §6 — Open questions for the M7 context doc
 
-1. **SkillHub re-check verdict** — at M7 kickoff: ship-with-SkillHub, ship-with-fallback, or defer M7 entirely?
+1. ~~**SkillHub re-check verdict** — at M7 kickoff: ship-with-SkillHub, ship-with-fallback, or defer M7 entirely?~~ **Closed 2026-05-02: ship-with-SkillHub.** The deployment-shape sub-question (single-container vs. K8s vs. managed) is still open and rolls into the M7 plan's first task.
 2. **`agents.skills` JSONB shape** — finalize the entry schema (registry / package / version / [config]?).
 3. **Install storage layout** — supervisor-host filesystem, per-customer? per-spawn? per-agent-row?
 4. **Install timing** — at-approval (eager) or at-first-spawn (lazy)? Affects rollback semantics.

@@ -18,7 +18,7 @@ This document captures evaluation work done during M2.2.2 to pre-stage M7's deci
 - **For**: mature, well-engineered, governed. The governance surface (audit logs, RBAC, semantic versioning, OpenAPI SDKs) aligns with what a multi-tenant Garrison deployment will need once Hey Anton has real customers with regulatory constraints.
 - **Against**: over-engineered for current Garrison operational posture (solo-founder, Hetzner + Coolify). Running SkillHub requires a full Spring Boot stack plus Kubernetes. At target-state this is tolerable; near-term it's not.
 
-**M7 readiness**: Operator committed to SkillHub as the target-state choice on 2026-04-24, prioritizing maturity over operational simplicity at target-state. Integration is still deferred to M7; this doc records the decision and the rationale, not build-trigger work.
+**M7 readiness**: Operator committed to SkillHub as the target-state choice on 2026-04-24, prioritizing maturity over operational simplicity at target-state. **M7-kickoff re-check confirmed 2026-05-02: ship.** The deferred-re-check gate is lifted; the M7 plan assumes SkillHub-as-registry from task 0. Deployment shape (single-container vs. K8s vs. managed) is the remaining sub-question, scoped into the plan rather than a kickoff blocker. See `docs/research/m7-spike.md` §2.
 
 **Near-term operational note**: operator could experiment with SkillHub standalone for Hey Anton before M7 (use operationally without integrating architecturally). Not a recommendation; just flagging the option.
 
