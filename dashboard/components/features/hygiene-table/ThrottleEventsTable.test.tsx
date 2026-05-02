@@ -8,11 +8,18 @@
 // rendering are exercised end-to-end by the M6.x Playwright suite
 // when it lands.
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+import { renderToString } from 'react-dom/server';
+
+vi.mock('next-intl', () => ({
+  useTranslations: () => (key: string) => key,
+}));
+
 import {
   kindTone,
   previewPayload,
   mergeRows,
+  ThrottleEventsTable,
 } from './ThrottleEventsTable';
 import type { ThrottleEventRow } from '@/lib/queries/throttle';
 import type { ThrottleEvent } from '@/lib/sse/throttleStream';
@@ -93,5 +100,86 @@ describe('ThrottleEventsTable.mergeRows', () => {
   it('TestMergeRowsParsesFiredAtToDate', () => {
     const merged = mergeRows([], live, new Map());
     expect(merged[0].firedAt).toBeInstanceOf(Date);
+  });
+});
+
+describe('ThrottleEventsTable render', () => {
+  it('TestRendersEmptyStateWhenNoRowsPresent', () => {
+    const html = renderToString(<ThrottleEventsTable initialRows={[]} />);
+    // Empty branch surfaces the throttleEventsEmpty translation key
+    // (the next-intl mock echoes keys verbatim).
+    expect(html).toContain('throttleEventsEmpty');
+    // Header row count = 0.
+    expect(html).toContain('data-testid="throttle-events-table"');
+    // No throttle-event-row tbody entries.
+    expect(html).not.toContain('data-testid="throttle-event-row"');
+  });
+
+  it('TestRendersOneRowFromInitialSnapshot', () => {
+    const initial: ThrottleEventRow[] = [
+      {
+        eventId: 'r-1',
+        companyId: 'co-1',
+        companyName: 'Acme Aerospace',
+        kind: 'company_budget_exceeded',
+        firedAt: new Date('2026-05-02T10:00:00Z'),
+        payload: { current_24h_usd: 0.95 },
+      },
+    ];
+    const html = renderToString(<ThrottleEventsTable initialRows={initial} />);
+    // Non-empty branch: the table body renders + the row carries
+    // the company name + the kind chip.
+    expect(html).toContain('data-testid="throttle-event-row"');
+    expect(html).toContain('Acme Aerospace');
+    expect(html).toContain('company_budget_exceeded');
+  });
+
+  it('TestRendersTwoRowsFromInitialSnapshot', () => {
+    const initial: ThrottleEventRow[] = [
+      {
+        eventId: 'r-1',
+        companyId: 'co-1',
+        companyName: 'Acme',
+        kind: 'rate_limit_pause',
+        firedAt: new Date('2026-05-02T10:00:00Z'),
+        payload: {},
+      },
+      {
+        eventId: 'r-2',
+        companyId: 'co-2',
+        companyName: 'Beta',
+        kind: 'company_budget_exceeded',
+        firedAt: new Date('2026-05-02T11:00:00Z'),
+        payload: {},
+      },
+    ];
+    const html = renderToString(<ThrottleEventsTable initialRows={initial} />);
+    // Both rows render with their distinct company names.
+    expect(html).toContain('Acme');
+    expect(html).toContain('Beta');
+    // Both kinds render.
+    expect(html).toContain('rate_limit_pause');
+    expect(html).toContain('company_budget_exceeded');
+  });
+
+  it('TestRendersTableHeadersWhenRowsPresent', () => {
+    const initial: ThrottleEventRow[] = [
+      {
+        eventId: 'r-1',
+        companyId: 'co-1',
+        companyName: 'Acme',
+        kind: 'rate_limit_pause',
+        firedAt: new Date('2026-05-02T10:00:00Z'),
+        payload: {},
+      },
+    ];
+    const html = renderToString(<ThrottleEventsTable initialRows={initial} />);
+    // The header row pulls headers.{time, company, kind, payload}
+    // from next-intl; the mock echoes the key. Headers only render
+    // in the non-empty branch.
+    expect(html).toContain('headers.time');
+    expect(html).toContain('headers.company');
+    expect(html).toContain('headers.kind');
+    expect(html).toContain('headers.payload');
   });
 });
