@@ -126,7 +126,7 @@ export function ThrottleEventsTable({
         ) : null}
       </header>
       {rows.length === 0 ? (
-        <div className="px-4 py-10 text-center text-text-3 text-[12.5px]">
+        <div className="px-4 py-5 text-center text-text-3 text-[12px]">
           {t('throttleEventsEmpty')}
         </div>
       ) : (
