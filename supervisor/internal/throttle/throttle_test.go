@@ -153,6 +153,56 @@ func TestDecisionComposition_PauseWinsOverBudget(t *testing.T) {
 	}
 }
 
+// TestBudgetPredicate_InvalidCostNumericReturnsZero — when Cost24hUsd
+// carries an invalid (Valid=false) Numeric, numericToFloat short-
+// circuits to (0, nil) and evaluateBudget treats current spend as $0.
+// Covers the numericToFloat !Valid branch reached only via a
+// state-row-with-NULL-cost (no agent_instances rows yet).
+func TestBudgetPredicate_InvalidCostNumericReturnsZero(t *testing.T) {
+	state := store.GetCompanyThrottleStateRow{
+		DailyBudgetUsd: numericFromFloat(t, 1.00),
+		Cost24hUsd:     pgtype.Numeric{Valid: false},
+	}
+	d, err := evaluateBudget(state, numericFromFloat(t, 0.10))
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !d.Allowed {
+		t.Errorf("expected Allowed=true (Cost24hUsd treated as 0); got %+v", d)
+	}
+}
+
+// TestBudgetPredicate_NaNCostFlowsThroughAsZero — pgtype.Numeric with
+// NaN doesn't error from Float64Value (NaN flows through); evaluateBudget
+// computes current+estimated>budget where current=NaN, which is false
+// under IEEE-754 NaN semantics, so the gate allows. Covers the
+// numericToFloat code path without forcing an error.
+func TestBudgetPredicate_NaNCostFlowsThroughAsZero(t *testing.T) {
+	state := store.GetCompanyThrottleStateRow{
+		DailyBudgetUsd: numericFromFloat(t, 1.00),
+		Cost24hUsd:     pgtype.Numeric{Valid: true, NaN: true},
+	}
+	d, err := evaluateBudget(state, numericFromFloat(t, 0.10))
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	// NaN comparisons are always false; "current+estimated > budget"
+	// with current=NaN evaluates as false → Allowed=true.
+	if !d.Allowed {
+		t.Errorf("expected Allowed=true (NaN flows through, comparison false); got %+v", d)
+	}
+}
+
+// TestUUIDStringEmptyForInvalid — pins the uuidString invalid-input
+// branch. Used by insertEventAndNotify; the production call sites
+// always pass Valid UUIDs but the helper is defensive.
+func TestUUIDStringEmptyForInvalid(t *testing.T) {
+	got := uuidString(pgtype.UUID{Valid: false})
+	if got != "" {
+		t.Errorf("uuidString(invalid) = %q; want empty", got)
+	}
+}
+
 func TestNotifyPayloadShape(t *testing.T) {
 	// emitNotify constructs the payload with these four fields.
 	// Verify the JSON shape so the dashboard SSE bridge consumer

@@ -133,6 +133,52 @@ func TestParseCreateTicketArgsRejectsMalformedJSON(t *testing.T) {
 	}
 }
 
+// TestBuildCreateTicketMetadata_EmptyReturnsBraces — args.Metadata empty
+// → b="{}" so InsertChatTicket gets a valid JSONB literal.
+func TestBuildCreateTicketMetadata_EmptyReturnsBraces(t *testing.T) {
+	b, res := buildCreateTicketMetadata(CreateTicketArgs{})
+	if res != nil {
+		t.Fatalf("expected nil Result; got %+v", res)
+	}
+	if string(b) != "{}" {
+		t.Errorf("metadata = %q; want {}", string(b))
+	}
+}
+
+// TestBuildCreateTicketMetadata_PopulatedRoundTrips — non-empty
+// Metadata round-trips through json.Marshal cleanly.
+func TestBuildCreateTicketMetadata_PopulatedRoundTrips(t *testing.T) {
+	b, res := buildCreateTicketMetadata(CreateTicketArgs{
+		Metadata: map[string]any{"priority": "high", "labels": []string{"bug"}},
+	})
+	if res != nil {
+		t.Fatalf("expected nil Result; got %+v", res)
+	}
+	if !strings.Contains(string(b), `"priority":"high"`) {
+		t.Errorf("metadata round-trip missing priority: %s", b)
+	}
+}
+
+// TestBuildCreateTicketMetadata_RejectsUnmarshallable — a Metadata
+// payload that contains an unmarshallable value (channels are not
+// json-marshallable per encoding/json's contract) surfaces as a
+// validation_failed Result. In production CreateTicketArgs.Metadata
+// is constructed from json.Unmarshal so this branch is unreachable
+// from operator input, but the helper's defensive shape is pinned
+// here so a future caller-introduced regression is caught.
+func TestBuildCreateTicketMetadata_RejectsUnmarshallable(t *testing.T) {
+	args := CreateTicketArgs{
+		Metadata: map[string]any{"chan": make(chan int)},
+	}
+	b, res := buildCreateTicketMetadata(args)
+	if res == nil {
+		t.Fatalf("expected validation Result; got bytes=%q", string(b))
+	}
+	if !strings.Contains(res.Message, "invalid metadata") {
+		t.Errorf("Message %q missing 'invalid metadata'", res.Message)
+	}
+}
+
 // TestEditTicketRejectsMissingTicketID covers edit_ticket validation:
 // ticket_id is required.
 func TestEditTicketRejectsMissingTicketID(t *testing.T) {
