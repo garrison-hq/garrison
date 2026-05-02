@@ -40,20 +40,23 @@ var (
 
 // SafeExtractTarGz decompresses a tar.gz archive into destDir. Each
 // entry's path is validated (no `..`, no absolute, no symlinks
-// pointing outside destDir). On any violation the entire extract is
-// aborted and partial files are NOT cleaned up — the caller's
-// rollback logic is responsible for cleanup (see actuator.go's
-// rollback helper).
+// pointing outside destDir) AND every filesystem write goes through
+// an os.Root rooted at destDir — the kernel-level rooted-fs API
+// rejects any path that resolves outside the root, so a tar-slip
+// payload that bypasses validateEntry would still fail at the
+// syscall layer.
 //
 // Spec FR-107 + hiring-threat-model HR-8.
 func SafeExtractTarGz(reader io.Reader, destDir string) error {
 	if err := os.MkdirAll(destDir, 0o755); err != nil {
 		return fmt.Errorf("skillinstall: mkdir %s: %w", destDir, err)
 	}
-	abs, err := filepath.Abs(destDir)
+
+	root, err := os.OpenRoot(destDir)
 	if err != nil {
-		return fmt.Errorf("skillinstall: abs %s: %w", destDir, err)
+		return fmt.Errorf("skillinstall: open root %s: %w", destDir, err)
 	}
+	defer root.Close()
 
 	gz, err := gzip.NewReader(reader)
 	if err != nil {
@@ -72,44 +75,40 @@ func SafeExtractTarGz(reader io.Reader, destDir string) error {
 			return fmt.Errorf("%w: tar header: %v", ErrUnsupportedArchive, err)
 		}
 
-		if err := validateEntry(hdr, abs); err != nil {
+		if err := validateEntry(hdr); err != nil {
 			return err
 		}
 
-		// Compute the on-disk target + post-join sink check. validateEntry
-		// already rejected path-traversal upstream, but the sink-side
-		// HasPrefix check is belt-and-suspenders against any future
-		// validateEntry regression and satisfies tar-slip taint
-		// analyzers (gosecurity:S6096) that don't follow upstream
-		// validation through filepath.Join.
-		target, err := safeJoinUnder(abs, hdr.Name)
-		if err != nil {
-			return err
-		}
+		// Every fs operation below goes through `root` — os.Root's
+		// methods reject any name that resolves outside the rooted
+		// directory, so a regression in validateEntry can't produce
+		// a tar-slip write. This is the canonical safe-extract
+		// pattern (Go 1.24+); it satisfies tar-slip taint analyzers
+		// because the entry name flows into root-scoped methods,
+		// not free filepath.Join calls.
 		switch hdr.Typeflag {
 		case tar.TypeDir:
-			if err := os.MkdirAll(target, fsModeFromTar(hdr.Mode, 0o755)); err != nil {
-				return fmt.Errorf("skillinstall: mkdir %s: %w", target, err)
+			if err := root.MkdirAll(hdr.Name, fsModeFromTar(hdr.Mode, 0o755)); err != nil {
+				return fmt.Errorf("skillinstall: mkdir %s: %w", hdr.Name, err)
 			}
 		case tar.TypeReg:
-			parent, err := safeJoinUnder(abs, filepath.Dir(hdr.Name))
-			if err != nil {
-				return err
-			}
-			if err := os.MkdirAll(parent, 0o755); err != nil {
-				return fmt.Errorf("skillinstall: mkdir parent %s: %w", parent, err)
+			if dir := filepath.Dir(hdr.Name); dir != "." && dir != "" {
+				if err := root.MkdirAll(dir, 0o755); err != nil {
+					return fmt.Errorf("skillinstall: mkdir parent %s: %w", dir, err)
+				}
 			}
 			limit := MaxExtractedBytes - written
-			n, err := writeFile(tr, target, fsModeFromTar(hdr.Mode, 0o644), limit)
+			n, err := writeFile(root, tr, hdr.Name, fsModeFromTar(hdr.Mode, 0o644), limit)
 			written += n
 			if err != nil {
 				return err
 			}
 		case tar.TypeSymlink:
-			// Symlinks are validated by validateEntry above; if we
-			// got here, the target is inside destDir. Recreate.
-			if err := os.Symlink(hdr.Linkname, target); err != nil {
-				return fmt.Errorf("skillinstall: symlink %s -> %s: %w", target, hdr.Linkname, err)
+			// validateEntry already rejected absolute Linkname and
+			// out-of-root relative ones. Symlink is created via
+			// root-scoped helper so the link's location is bounded.
+			if err := root.Symlink(hdr.Linkname, hdr.Name); err != nil {
+				return fmt.Errorf("skillinstall: symlink %s -> %s: %w", hdr.Name, hdr.Linkname, err)
 			}
 		default:
 			// Hardlinks, char devices, FIFOs, etc. — never appear in
@@ -120,9 +119,14 @@ func SafeExtractTarGz(reader io.Reader, destDir string) error {
 }
 
 // validateEntry rejects archive entries with path-traversal shapes:
-// absolute paths, paths containing `..`, symlinks whose Linkname
-// resolves outside the extract root.
-func validateEntry(hdr *tar.Header, absRoot string) error {
+// absolute paths, paths containing `..`, symlinks whose Linkname is
+// absolute or escapes the root via relative-segment manipulation.
+//
+// The downstream os.Root would reject most of these structurally,
+// but validateEntry runs first so the audit row + error surface
+// reflect "the archive itself was unsafe" rather than "the syscall
+// rejected the path." Belt-and-suspenders.
+func validateEntry(hdr *tar.Header) error {
 	if hdr.Name == "" {
 		return fmt.Errorf("%w: empty entry name", ErrArchiveUnsafe)
 	}
@@ -134,66 +138,47 @@ func validateEntry(hdr *tar.Header, absRoot string) error {
 		return fmt.Errorf("%w: path-traversal %q", ErrArchiveUnsafe, hdr.Name)
 	}
 
-	// For symlinks, the Linkname must resolve to a path inside the
-	// extract root. An absolute Linkname or one whose
-	// filepath.Join(parent, Linkname) escapes is rejected.
 	if hdr.Typeflag == tar.TypeSymlink {
 		if filepath.IsAbs(hdr.Linkname) {
 			return fmt.Errorf("%w: absolute symlink target %q -> %q", ErrArchiveUnsafe, hdr.Name, hdr.Linkname)
 		}
-		// Compute the symlink's resolved location: the directory
-		// containing the symlink + the link target.
-		linkParent := filepath.Dir(filepath.Join(absRoot, hdr.Name))
+		// Symlink target validity: simulate where the link's
+		// Linkname would resolve relative to the directory holding
+		// the symlink. If that resolves outside root (i.e. starts
+		// with "../" after cleaning), reject. os.Root.Symlink would
+		// also reject a symlink that points outside, but doing it
+		// up-front keeps the error vocabulary consistent with the
+		// other ArchiveUnsafe rejections.
+		linkParent := filepath.Dir(hdr.Name)
 		resolved := filepath.Clean(filepath.Join(linkParent, hdr.Linkname))
-		if !strings.HasPrefix(resolved, absRoot+string(filepath.Separator)) && resolved != absRoot {
+		if strings.HasPrefix(resolved, "..") || strings.Contains(resolved, ".."+string(filepath.Separator)) {
 			return fmt.Errorf("%w: symlink %q -> %q escapes extract root", ErrArchiveUnsafe, hdr.Name, hdr.Linkname)
 		}
 	}
 	return nil
 }
 
-// writeFile copies tr into target, capped at limit bytes. Returns
-// the bytes written + an error if the cap was exceeded.
-//
-// target MUST already have passed safeJoinUnder; this function does
-// not re-validate the path. Callers in this package always go
-// through safeJoinUnder before invoking writeFile.
-func writeFile(tr io.Reader, target string, mode os.FileMode, limit int64) (int64, error) {
+// writeFile copies tr into the file at name (relative to root),
+// capped at limit bytes. Uses root-scoped OpenFile so the path is
+// bounded by the kernel's rooted-fs check.
+func writeFile(root *os.Root, tr io.Reader, name string, mode os.FileMode, limit int64) (int64, error) {
 	if limit <= 0 {
 		return 0, fmt.Errorf("%w: extracted >100 MiB", ErrArchiveTooLarge)
 	}
-	f, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
+	f, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
 	if err != nil {
-		return 0, fmt.Errorf("skillinstall: create %s: %w", target, err)
+		return 0, fmt.Errorf("skillinstall: create %s: %w", name, err)
 	}
 	defer f.Close()
-	// LimitReader ensures we never write more than the remaining budget.
 	n, err := io.Copy(f, io.LimitReader(tr, limit+1))
 	if err != nil {
-		return n, fmt.Errorf("skillinstall: write %s: %w", target, err)
+		return n, fmt.Errorf("skillinstall: write %s: %w", name, err)
 	}
 	if n > limit {
-		_ = os.Remove(target)
+		_ = root.Remove(name)
 		return n, fmt.Errorf("%w: archive contains >100 MiB total", ErrArchiveTooLarge)
 	}
 	return n, nil
-}
-
-// safeJoinUnder joins entryPath onto absRoot and verifies the result
-// resolves to a path under absRoot. Returns ErrArchiveUnsafe if the
-// joined path escapes the root (defence-in-depth alongside
-// validateEntry; satisfies tar-slip taint analyzers like
-// gosecurity:S6096 that look for a sink-side HasPrefix check).
-func safeJoinUnder(absRoot, entryPath string) (string, error) {
-	joined := filepath.Join(absRoot, entryPath)
-	cleaned := filepath.Clean(joined)
-	// HasPrefix on the path-with-trailing-separator catches the case
-	// where entryPath is empty (joined == absRoot exactly is OK; any
-	// other prefix-shorter path is not).
-	if cleaned != absRoot && !strings.HasPrefix(cleaned, absRoot+string(filepath.Separator)) {
-		return "", fmt.Errorf("%w: %q resolves outside extract root", ErrArchiveUnsafe, entryPath)
-	}
-	return cleaned, nil
 }
 
 // fsModeFromTar converts a tar mode (POSIX with extra bits) to
