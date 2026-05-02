@@ -80,7 +80,7 @@ export default async function HygienePage({
   ]);
 
   return (
-    <div className="px-6 py-5 space-y-5 max-w-[1600px] mx-auto">
+    <div className="w-full px-6 py-5 space-y-5 max-w-[1600px] mx-auto">
       <header className="space-y-1">
         <h1 className="text-text-1 text-2xl font-semibold tracking-tight">
           {navT('hygiene')}
