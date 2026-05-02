@@ -290,30 +290,19 @@ func evaluateAndWrite(ctx context.Context, deps Deps, transitionID, ticketID, ag
 
 	drawers, triples, palaceErr := deps.Palace.Query(ctx, ticketIDText, palaceWing, queryWin)
 
-	// M6 T012: optional ticket-keyed KG query. The listener feeds the
-	// result (or nil + err) into EvaluationInput so the M6 evaluator
-	// path can fire missing_kg_facts on empty KG state. Skipped when
-	// the operator hasn't wired the callback (deps.KGFactsQuery is
-	// nil) — predicate falls back to "not computed" via the
-	// evaluator's nil-check.
-	var kgFacts []PalaceTriple
-	var kgFactsErr error
-	if deps.KGFactsQuery != nil {
-		kgFacts, kgFactsErr = deps.KGFactsQuery(ctx, ticketIDText)
-	}
-
-	status := Evaluate(EvaluationInput{
-		TicketIDText:        ticketIDText,
-		RunWindowStart:      win.StartedAt.Time,
-		RunWindowEnd:        windowEnd,
-		PalaceWing:          palaceWing,
-		Drawers:             drawers,
-		KGTriples:           triples,
-		PalaceErr:           palaceErr,
-		ThinDiaryThreshold:  deps.ThinDiaryThreshold,
-		KGFactsForTicket:    kgFacts,
-		KGFactsForTicketErr: kgFactsErr,
-	})
+	kgFacts, kgFactsErr := resolveKGFactsForEvaluator(ctx, deps, ticketIDText)
+	status := Evaluate(buildEvaluationInput(buildEvaluationInputArgs{
+		TicketIDText: ticketIDText,
+		WindowStart:  win.StartedAt.Time,
+		WindowEnd:    windowEnd,
+		PalaceWing:   palaceWing,
+		Drawers:      drawers,
+		KGTriples:    triples,
+		PalaceErr:    palaceErr,
+		Threshold:    deps.ThinDiaryThreshold,
+		KGFacts:      kgFacts,
+		KGFactsErr:   kgFactsErr,
+	}))
 
 	// Terminal-write discipline per FR-217: use a detached ctx plus the
 	// TerminalWriteGrace cap so a shutdown mid-evaluation doesn't orphan
@@ -393,3 +382,54 @@ func uuidText(u pgtype.UUID) string {
 }
 
 func ptr[T any](v T) *T { return &v }
+
+// resolveKGFactsForEvaluator runs deps.KGFactsQuery if it's wired and
+// returns the result tuple in the shape EvaluationInput expects.
+// Pulled out of evaluateAndWrite so the M6 T012 wiring is testable
+// without standing up the full listener loop. nil callback returns
+// (nil, nil) — evaluator's nil-check then skips the missing_kg_facts
+// predicate.
+func resolveKGFactsForEvaluator(
+	ctx context.Context,
+	deps Deps,
+	ticketIDText string,
+) ([]PalaceTriple, error) {
+	if deps.KGFactsQuery == nil {
+		return nil, nil
+	}
+	return deps.KGFactsQuery(ctx, ticketIDText)
+}
+
+// buildEvaluationInputArgs is the input shape for buildEvaluationInput.
+// Named-arg struct keeps the helper's signature readable as the
+// EvaluationInput surface grows.
+type buildEvaluationInputArgs struct {
+	TicketIDText string
+	WindowStart  time.Time
+	WindowEnd    time.Time
+	PalaceWing   string
+	Drawers      []PalaceDrawer
+	KGTriples    []PalaceTriple
+	PalaceErr    error
+	Threshold    int
+	KGFacts      []PalaceTriple
+	KGFactsErr   error
+}
+
+// buildEvaluationInput composes the EvaluationInput literal the
+// evaluator consumes. Pure function; no I/O. Pulled out so the
+// M6-extended struct shape is unit-testable end-to-end.
+func buildEvaluationInput(args buildEvaluationInputArgs) EvaluationInput {
+	return EvaluationInput{
+		TicketIDText:        args.TicketIDText,
+		RunWindowStart:      args.WindowStart,
+		RunWindowEnd:        args.WindowEnd,
+		PalaceWing:          args.PalaceWing,
+		Drawers:             args.Drawers,
+		KGTriples:           args.KGTriples,
+		PalaceErr:           args.PalaceErr,
+		ThinDiaryThreshold:  args.Threshold,
+		KGFactsForTicket:    args.KGFacts,
+		KGFactsForTicketErr: args.KGFactsErr,
+	}
+}
