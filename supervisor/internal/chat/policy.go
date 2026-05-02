@@ -42,6 +42,16 @@ type ChatPolicy struct {
 	// re-fire it on every subsequent tool_use detection.
 	ceilingFired bool
 
+	// M6 T011: per-turn ticket-creation ceiling. Counts only
+	// mcp__garrison-mutate__create_ticket invocations (NOT all
+	// tool calls); fires ChatErrorTicketCreationCeilingReached when
+	// exceeded. Independent of ToolCallCeiling — both can trigger in
+	// the same turn but ToolCallCeiling wins by ordering (checked
+	// first in handleToolUseBlockStart).
+	MaxTicketsPerTurn          int
+	ticketCreationCount        int
+	ticketCreationCeilingFired bool
+
 	// runtime state populated as the stream is consumed
 	deltaSeq int
 	// messageBlock increments on each claude message_start. The
@@ -76,14 +86,19 @@ func NewChatPolicy(deps Deps, sessionID, messageID pgtype.UUID) *ChatPolicy {
 	if ceiling <= 0 {
 		ceiling = 50 // M5.3 default per FR-530
 	}
+	maxTickets := deps.MaxTicketsPerTurn
+	if maxTickets <= 0 {
+		maxTickets = 10 // M6 T011 default per FR-004 / spec
+	}
 	return &ChatPolicy{
-		Pool:            deps.Pool,
-		Queries:         deps.Queries,
-		Logger:          deps.Logger,
-		SessionID:       sessionID,
-		MessageID:       messageID,
-		GraceWrite:      deps.TerminalWriteGrace,
-		ToolCallCeiling: ceiling,
+		Pool:              deps.Pool,
+		Queries:           deps.Queries,
+		Logger:            deps.Logger,
+		SessionID:         sessionID,
+		MessageID:         messageID,
+		GraceWrite:        deps.TerminalWriteGrace,
+		ToolCallCeiling:   ceiling,
+		MaxTicketsPerTurn: maxTickets,
 	}
 }
 
@@ -183,6 +198,50 @@ func (p *ChatPolicy) handleToolUseBlockStart(ctx context.Context, raw []byte) {
 	p.toolCallCount++
 	p.emitToolUseFromRaw(ctx, raw)
 	p.maybeFireToolCallCeiling(ctx)
+	// M6 T011: post-emit, increment + check the ticket-creation
+	// ceiling if this was a create_ticket call. Tool-call ceiling
+	// already fired (above) wins by precedence; we still count
+	// here so the counter is accurate even if both fire.
+	if isCreateTicketBlockStart(raw) {
+		p.ticketCreationCount++
+		p.maybeFireTicketCreationCeiling(ctx)
+	}
+}
+
+// isCreateTicketBlockStart inspects the raw content_block_start bytes
+// for the canonical claude tool-name shape that points at the M5.3
+// garrison-mutate.create_ticket verb. Substring match (vs. JSON parse)
+// is safe because the tool-name is unambiguous and this is a hot path.
+func isCreateTicketBlockStart(raw []byte) bool {
+	return bytes.Contains(raw, []byte(`"name":"mcp__garrison-mutate__create_ticket"`)) ||
+		bytes.Contains(raw, []byte(`"name": "mcp__garrison-mutate__create_ticket"`))
+}
+
+func (p *ChatPolicy) maybeFireTicketCreationCeiling(ctx context.Context) {
+	if p.ticketCreationCount <= p.MaxTicketsPerTurn || p.ticketCreationCeilingFired {
+		return
+	}
+	p.ticketCreationCeilingFired = true
+	// Only set bailReason if no prior ceiling has already claimed it
+	// (tool-call ceiling wins on order; first-set wins).
+	if p.bailReason == "" {
+		p.bailReason = ChatErrorTicketCreationCeilingReached
+	}
+	p.Logger.Warn("chat: per-turn ticket-creation ceiling exceeded",
+		"session_id", uuidString(p.SessionID),
+		"message_id", uuidString(p.MessageID),
+		"ceiling", p.MaxTicketsPerTurn,
+		"observed", p.ticketCreationCount,
+	)
+	if p.Pool == nil {
+		return
+	}
+	if err := EmitAssistantError(ctx, p.Pool, p.MessageID,
+		ChatErrorTicketCreationCeilingReached,
+		fmt.Sprintf("per-turn ticket-creation ceiling (%d) exceeded; terminating turn", p.MaxTicketsPerTurn),
+	); err != nil {
+		p.Logger.Warn("chat: EmitAssistantError ticket-creation ceiling failed", "err", err)
+	}
 }
 
 func (p *ChatPolicy) emitScrubIfPossible(ctx context.Context, seq int) {

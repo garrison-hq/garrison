@@ -131,13 +131,22 @@
     "suspectedSecret": "suspected-secret",
     "openFlags": "open flags",
     "noFlags": "no open flags",
+    "tabsLabel": "Hygiene scope",
+    "tabFailures": "Agent failures",
+    "tabAudit": "Operator audit",
+    "tabAll": "All",
+    "throttleEventsHeader": "throttle events",
+    "throttleEventsEmpty": "No throttle events recorded yet.",
     "headers": {
       "time": "time",
       "dept": "dept",
       "transition": "transition",
       "flag": "flag",
       "detail": "detail",
-      "ticket": "ticket"
+      "ticket": "ticket",
+      "company": "company",
+      "kind": "kind",
+      "payload": "payload"
     }
   },
   "ticketDetail": {

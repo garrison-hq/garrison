@@ -797,3 +797,124 @@ func TestLoadM5_4_AcceptsExplicitDashboardAPIPort(t *testing.T) {
 		t.Errorf("DashboardAPIPort = %d; want 9090", cfg.DashboardAPIPort)
 	}
 }
+
+// -------- M6 T013 env-var parsing -----------------------------------------
+
+// TestM6EnvVarsParseDefaults — when none of the M6 env vars are set,
+// the config carries the documented defaults.
+func TestM6EnvVarsParseDefaults(t *testing.T) {
+	clearAll(t)
+	t.Setenv("GARRISON_DATABASE_URL", validDBURL)
+	t.Setenv("GARRISON_FAKE_AGENT_CMD", validFakeCmd)
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.MaxTicketsPerTurn != 10 {
+		t.Errorf("MaxTicketsPerTurn = %d; want 10", cfg.MaxTicketsPerTurn)
+	}
+	if cfg.ThinDiaryThreshold != 200 {
+		t.Errorf("ThinDiaryThreshold = %d; want 200", cfg.ThinDiaryThreshold)
+	}
+	if cfg.DefaultSpawnCostUSD != "0.05" {
+		t.Errorf("DefaultSpawnCostUSD = %q; want 0.05", cfg.DefaultSpawnCostUSD)
+	}
+	if cfg.RateLimitBackOff != 60*time.Second {
+		t.Errorf("RateLimitBackOff = %v; want 60s", cfg.RateLimitBackOff)
+	}
+	if cfg.FinalizeResultGrace != 3*time.Second {
+		t.Errorf("FinalizeResultGrace = %v; want 3s", cfg.FinalizeResultGrace)
+	}
+}
+
+// TestM6EnvVarsParseOverrides — every env var is honoured when set
+// to a valid value.
+func TestM6EnvVarsParseOverrides(t *testing.T) {
+	clearAll(t)
+	t.Setenv("GARRISON_DATABASE_URL", validDBURL)
+	t.Setenv("GARRISON_FAKE_AGENT_CMD", validFakeCmd)
+	t.Setenv("GARRISON_CHAT_MAX_TICKETS_PER_TURN", "5")
+	t.Setenv("GARRISON_HYGIENE_THIN_DIARY_THRESHOLD", "150")
+	t.Setenv("GARRISON_DEFAULT_SPAWN_COST_USD", "0.20")
+	t.Setenv("GARRISON_RATE_LIMIT_BACK_OFF_SECONDS", "120")
+	t.Setenv("GARRISON_FINALIZE_RESULT_GRACE", "5s")
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.MaxTicketsPerTurn != 5 {
+		t.Errorf("MaxTicketsPerTurn = %d; want 5", cfg.MaxTicketsPerTurn)
+	}
+	if cfg.ThinDiaryThreshold != 150 {
+		t.Errorf("ThinDiaryThreshold = %d; want 150", cfg.ThinDiaryThreshold)
+	}
+	if cfg.DefaultSpawnCostUSD != "0.20" {
+		t.Errorf("DefaultSpawnCostUSD = %q; want 0.20", cfg.DefaultSpawnCostUSD)
+	}
+	if cfg.RateLimitBackOff != 120*time.Second {
+		t.Errorf("RateLimitBackOff = %v; want 120s", cfg.RateLimitBackOff)
+	}
+	if cfg.FinalizeResultGrace != 5*time.Second {
+		t.Errorf("FinalizeResultGrace = %v; want 5s", cfg.FinalizeResultGrace)
+	}
+}
+
+// TestM6EnvVarsRejectInvalidMaxTickets — 0 or negative values are
+// rejected (the per-turn ceiling must be at least 1).
+func TestM6EnvVarsRejectInvalidMaxTickets(t *testing.T) {
+	for _, v := range []string{"0", "-1"} {
+		t.Run("v="+v, func(t *testing.T) {
+			clearAll(t)
+			t.Setenv("GARRISON_DATABASE_URL", validDBURL)
+			t.Setenv("GARRISON_FAKE_AGENT_CMD", validFakeCmd)
+			t.Setenv("GARRISON_CHAT_MAX_TICKETS_PER_TURN", v)
+			if _, err := config.Load(); err == nil {
+				t.Errorf("expected error for value %q", v)
+			}
+		})
+	}
+}
+
+// TestM6EnvVarsRejectInvalidCostUSD — negative cost is rejected.
+func TestM6EnvVarsRejectInvalidCostUSD(t *testing.T) {
+	clearAll(t)
+	t.Setenv("GARRISON_DATABASE_URL", validDBURL)
+	t.Setenv("GARRISON_FAKE_AGENT_CMD", validFakeCmd)
+	t.Setenv("GARRISON_DEFAULT_SPAWN_COST_USD", "-0.10")
+	if _, err := config.Load(); err == nil {
+		t.Error("expected error for negative cost")
+	}
+}
+
+// TestM6EnvVarsRejectInvalidBackOff — zero seconds is rejected
+// (the back-off must be > 0 to be meaningful).
+func TestM6EnvVarsRejectInvalidBackOff(t *testing.T) {
+	clearAll(t)
+	t.Setenv("GARRISON_DATABASE_URL", validDBURL)
+	t.Setenv("GARRISON_FAKE_AGENT_CMD", validFakeCmd)
+	t.Setenv("GARRISON_RATE_LIMIT_BACK_OFF_SECONDS", "0")
+	if _, err := config.Load(); err == nil {
+		t.Error("expected error for back-off=0")
+	}
+}
+
+// TestM6EnvVarsParseFinalizeGraceDuration — valid duration shapes are
+// accepted; "3s", "500ms", "0s" all parse cleanly.
+func TestM6EnvVarsParseFinalizeGraceDuration(t *testing.T) {
+	for _, v := range []string{"3s", "500ms", "0s"} {
+		t.Run("v="+v, func(t *testing.T) {
+			clearAll(t)
+			t.Setenv("GARRISON_DATABASE_URL", validDBURL)
+			t.Setenv("GARRISON_FAKE_AGENT_CMD", validFakeCmd)
+			t.Setenv("GARRISON_FINALIZE_RESULT_GRACE", v)
+			cfg, err := config.Load()
+			if err != nil {
+				t.Fatalf("Load %q: %v", v, err)
+			}
+			want, _ := time.ParseDuration(v)
+			if cfg.FinalizeResultGrace != want {
+				t.Errorf("FinalizeResultGrace = %v; want %v", cfg.FinalizeResultGrace, want)
+			}
+		})
+	}
+}

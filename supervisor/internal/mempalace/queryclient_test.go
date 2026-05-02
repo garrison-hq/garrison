@@ -265,3 +265,216 @@ func isValidUTF8(s string) bool {
 	}
 	return true
 }
+
+// -------- M6 T012 KgQueryByTicketID --------------------------------------
+
+// TestKgQueryByTicketID_ReturnsEmptyWhenNoTriples — sidecar response
+// with zero triples for the supplied ticket → empty slice + nil error.
+func TestKgQueryByTicketID_ReturnsEmptyWhenNoTriples(t *testing.T) {
+	payload := `{"triples":[]}`
+	fake := &fakeQueryExec{stdout: []byte(initOK + drawerToolCallResponse(payload))}
+	c := newQueryClientWithFake(fake)
+
+	got, err := c.KgQueryByTicketID(context.Background(), "ticket_no_triples")
+	if err != nil {
+		t.Fatalf("KgQueryByTicketID err: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("len=%d; want 0", len(got))
+	}
+	if !strings.Contains(fake.stdins[0], `"name":"mempalace_kg_query"`) {
+		t.Errorf("stdin missing kg_query tool_call: %s", fake.stdins[0])
+	}
+	if !strings.Contains(fake.stdins[0], `"subject":"ticket_no_triples"`) {
+		t.Errorf("stdin missing subject filter: %s", fake.stdins[0])
+	}
+}
+
+// TestKgQueryByTicketID_ParsesSidecarResponse — sidecar returns triples
+// where the ticket id appears as either subject or object; the client
+// keeps both and discards triples that don't reference the ticket.
+func TestKgQueryByTicketID_ParsesSidecarResponse(t *testing.T) {
+	target := "ticket_target"
+	payload := `{"triples":[
+        {"id":"t1","subject":"agent_x","predicate":"completed","object":"` + target + `","written_at":"2026-05-02T10:00:00Z"},
+        {"id":"t2","subject":"` + target + `","predicate":"shipped_in","object":"deploy_42","written_at":"2026-05-02T11:00:00Z"},
+        {"id":"t3","subject":"unrelated","predicate":"x","object":"y","written_at":"2026-05-02T09:00:00Z"}
+    ]}`
+	fake := &fakeQueryExec{stdout: []byte(initOK + drawerToolCallResponse(payload))}
+	c := newQueryClientWithFake(fake)
+
+	got, err := c.KgQueryByTicketID(context.Background(), target)
+	if err != nil {
+		t.Fatalf("KgQueryByTicketID err: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("len=%d; want 2 (filtered ticket_target as subject OR object)", len(got))
+	}
+	for _, tr := range got {
+		if tr.Subject != target && tr.Object != target {
+			t.Errorf("triple does not reference target: %+v", tr)
+		}
+	}
+}
+
+// TestKgQueryByTicketID_EmptyTicketIDShortCircuits — empty input is
+// a no-op (avoids a wasted docker exec for an unset ticket). Returns
+// (nil, nil) without touching Exec.
+func TestKgQueryByTicketID_EmptyTicketIDShortCircuits(t *testing.T) {
+	fake := &fakeQueryExec{}
+	c := newQueryClientWithFake(fake)
+	got, err := c.KgQueryByTicketID(context.Background(), "")
+	if err != nil {
+		t.Fatalf("KgQueryByTicketID(\"\"): %v", err)
+	}
+	if got != nil {
+		t.Errorf("got %v; want nil", got)
+	}
+	if len(fake.stdins) != 0 {
+		t.Errorf("Exec called %d times; want 0 (short-circuit)", len(fake.stdins))
+	}
+}
+
+// TestKgQueryByTicketID_MissingPalaceConfigReturnsErr — missing
+// container or palace path returns ErrSidecarUnreachable without
+// invoking Exec.
+func TestKgQueryByTicketID_MissingPalaceConfigReturnsErr(t *testing.T) {
+	c := &QueryClient{} // no Container/PalacePath/Exec
+	_, err := c.KgQueryByTicketID(context.Background(), "ticket_x")
+	if err == nil {
+		t.Fatal("expected error for unconfigured QueryClient")
+	}
+	if !errors.Is(err, ErrSidecarUnreachable) {
+		t.Errorf("error %v should wrap ErrSidecarUnreachable", err)
+	}
+}
+
+// TestRecentDrawers_MissingConfigReturnsErr / _PropagatesDockerExecError
+// pin the same defensive shape RecentDrawers shares with the M6
+// KgQueryByTicketID extraction (the error-format-string constant
+// extraction in T012's cleanup made these lines part of the new-code
+// period, so we cover them here even though the logic predates M6).
+func TestRecentDrawers_MissingConfigReturnsErr(t *testing.T) {
+	c := &QueryClient{} // no Container/PalacePath/Exec
+	_, err := c.RecentDrawers(context.Background(), 10)
+	if err == nil {
+		t.Fatal("expected error for unconfigured QueryClient")
+	}
+	if !errors.Is(err, ErrSidecarUnreachable) {
+		t.Errorf("error %v should wrap ErrSidecarUnreachable", err)
+	}
+}
+
+func TestRecentDrawers_NoExecReturnsErr(t *testing.T) {
+	c := &QueryClient{MempalaceContainer: "x", PalacePath: "/y"}
+	_, err := c.RecentDrawers(context.Background(), 10)
+	if err == nil || !errors.Is(err, ErrSidecarUnreachable) {
+		t.Errorf("expected ErrSidecarUnreachable; got %v", err)
+	}
+}
+
+func TestRecentKGTriples_MissingConfigReturnsErr(t *testing.T) {
+	c := &QueryClient{}
+	_, err := c.RecentKGTriples(context.Background(), 10)
+	if err == nil || !errors.Is(err, ErrSidecarUnreachable) {
+		t.Errorf("expected ErrSidecarUnreachable; got %v", err)
+	}
+}
+
+func TestRecentKGTriples_NoExecReturnsErr(t *testing.T) {
+	c := &QueryClient{MempalaceContainer: "x", PalacePath: "/y"}
+	_, err := c.RecentKGTriples(context.Background(), 10)
+	if err == nil || !errors.Is(err, ErrSidecarUnreachable) {
+		t.Errorf("expected ErrSidecarUnreachable; got %v", err)
+	}
+}
+
+// TestKgQueryByTicketID_PropagatesDockerExecError — exec failure
+// surfaces as ErrSidecarUnreachable wrapping the underlying error.
+func TestKgQueryByTicketID_PropagatesDockerExecError(t *testing.T) {
+	fake := &fakeQueryExec{err: errors.New("docker exec died")}
+	c := newQueryClientWithFake(fake)
+	_, err := c.KgQueryByTicketID(context.Background(), "ticket_x")
+	if err == nil {
+		t.Fatal("expected error from Exec failure")
+	}
+	if !errors.Is(err, ErrSidecarUnreachable) {
+		t.Errorf("error %v should wrap ErrSidecarUnreachable", err)
+	}
+}
+
+// TestKgQueryByTicketID_NoExecReturnsErr — pins the Exec==nil guard
+// distinct from MissingPalaceConfig (which short-circuits earlier on
+// container/path). Container + Path set, Exec nil → ErrSidecarUnreachable.
+func TestKgQueryByTicketID_NoExecReturnsErr(t *testing.T) {
+	c := &QueryClient{MempalaceContainer: "x", PalacePath: "/y"}
+	_, err := c.KgQueryByTicketID(context.Background(), "ticket_x")
+	if err == nil || !errors.Is(err, ErrSidecarUnreachable) {
+		t.Errorf("expected ErrSidecarUnreachable; got %v", err)
+	}
+}
+
+// TestKgQueryByTicketID_PropagatesParseError — sidecar returns junk
+// bytes that don't decode as MCP framing; client surfaces
+// ErrSidecarUnreachable wrapping the parse error.
+func TestKgQueryByTicketID_PropagatesParseError(t *testing.T) {
+	fake := &fakeQueryExec{stdout: []byte("not even close to MCP json\n")}
+	c := newQueryClientWithFake(fake)
+	_, err := c.KgQueryByTicketID(context.Background(), "ticket_x")
+	if err == nil {
+		t.Fatal("expected parse error")
+	}
+	if !errors.Is(err, ErrSidecarUnreachable) {
+		t.Errorf("error %v should wrap ErrSidecarUnreachable", err)
+	}
+}
+
+// TestKgQueryByTicketID_DefaultTimeoutWhenZero — Timeout==0 falls
+// through to the 10s default; the client still completes the call
+// against the fake. Pinning this branch keeps the default-timeout
+// line out of the new-coverage denominator regression list.
+func TestKgQueryByTicketID_DefaultTimeoutWhenZero(t *testing.T) {
+	payload := `{"triples":[]}`
+	fake := &fakeQueryExec{stdout: []byte(initOK + drawerToolCallResponse(payload))}
+	c := &QueryClient{
+		MempalaceContainer: "x",
+		PalacePath:         "/y",
+		Exec:               fake,
+		// Timeout intentionally zero — exercises the default-fallback branch.
+	}
+	got, err := c.KgQueryByTicketID(context.Background(), "ticket_x")
+	if err != nil {
+		t.Fatalf("KgQueryByTicketID with default timeout: %v", err)
+	}
+	if got != nil && len(got) != 0 {
+		t.Errorf("expected empty result; got %v", got)
+	}
+}
+
+// TestRecentKGTriples_PropagatesDockerExecError — exec failure path
+// (line currently uncovered in M6 new-code period).
+func TestRecentKGTriples_PropagatesDockerExecError(t *testing.T) {
+	fake := &fakeQueryExec{err: errors.New("docker exec died")}
+	c := newQueryClientWithFake(fake)
+	_, err := c.RecentKGTriples(context.Background(), 10)
+	if err == nil {
+		t.Fatal("expected error from Exec failure")
+	}
+	if !errors.Is(err, ErrSidecarUnreachable) {
+		t.Errorf("error %v should wrap ErrSidecarUnreachable", err)
+	}
+}
+
+// TestRecentKGTriples_PropagatesParseError — sidecar emits non-MCP
+// bytes; client surfaces ErrSidecarUnreachable.
+func TestRecentKGTriples_PropagatesParseError(t *testing.T) {
+	fake := &fakeQueryExec{stdout: []byte("garbage\n")}
+	c := newQueryClientWithFake(fake)
+	_, err := c.RecentKGTriples(context.Background(), 10)
+	if err == nil {
+		t.Fatal("expected parse error")
+	}
+	if !errors.Is(err, ErrSidecarUnreachable) {
+		t.Errorf("error %v should wrap ErrSidecarUnreachable", err)
+	}
+}

@@ -22,6 +22,17 @@ export type FailureMode =
   | 'sandbox_escape'
   | 'suspected_secret_emitted';
 
+// M6 — three-tab strip. Drives a row-shape filter at the query
+// level so the SQL never returns rows the active tab would hide.
+//   - failures: agent failure-mode rows. Excludes operator_initiated
+//     rows AND clean rows (clean rows are already excluded by the
+//     base WHERE clause; the filter additionally rejects
+//     operator_initiated).
+//   - audit:    only operator_initiated rows (the operator-drag
+//     audit trail; M4 / FR-027).
+//   - all:      every non-clean row (the existing M4 behaviour).
+export type HygieneTabFilter = 'failures' | 'audit' | 'all';
+
 const FINALIZE_PATH_STATUSES = [
   'finalize_never_called',
   'finalize_failed',
@@ -38,6 +49,10 @@ export interface HygieneFilter {
    *  (or unset). Pre-M4 rows have NULL category and surface as
    *  'unknown' on read; passing 'unknown' filters those rows. */
   patternCategory?: string;
+  /** M6 / T016: three-tab strip filter. Defaults to 'failures' on
+   *  the dashboard page; explicit 'all' replicates the pre-M6
+   *  behaviour. */
+  tab?: HygieneTabFilter;
   page?: number;
   pageSize?: number;
 }
@@ -124,6 +139,14 @@ export async function fetchHygieneRows(
   } else if (filter.patternCategory) {
     patternCategoryClause = sql`AND tt.suspected_secret_pattern_category = ${filter.patternCategory}`;
   }
+
+  // M6 / T016 — three-tab strip filter.
+  let tabClause = sql``;
+  if (filter.tab === 'failures') {
+    tabClause = sql`AND tt.hygiene_status <> 'operator_initiated'`;
+  } else if (filter.tab === 'audit') {
+    tabClause = sql`AND tt.hygiene_status = 'operator_initiated'`;
+  }
   const rowsResult = await appDb.execute<{
     transition_id: string;
     ticket_id: string;
@@ -154,6 +177,7 @@ export async function fetchHygieneRows(
       ${statusInClause}
       ${filter.departmentSlug ? sql`AND d.slug = ${filter.departmentSlug}` : sql``}
       ${patternCategoryClause}
+      ${tabClause}
     ORDER BY tt.at DESC
     LIMIT ${pageSize} OFFSET ${offset}
   `);
@@ -167,6 +191,7 @@ export async function fetchHygieneRows(
       AND tt.hygiene_status NOT IN ('clean', '')
       ${statusInClause}
       ${filter.departmentSlug ? sql`AND d.slug = ${filter.departmentSlug}` : sql``}
+      ${tabClause}
   `);
 
   return {

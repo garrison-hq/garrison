@@ -2,6 +2,7 @@ package hygiene
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"sync"
@@ -110,6 +111,101 @@ func TestRunSweepRespectsShutdown(t *testing.T) {
 }
 
 // TestIntervalValue — microsecond math.
+// TestResolveKGFactsForEvaluator_NilCallbackReturnsNilNil — the M6
+// T012 listener wiring leaves the missing_kg_facts predicate
+// unsignalled when the operator hasn't wired KGFactsQuery (production
+// fallthrough on the M2.x code path). The evaluator's nil-check then
+// skips the predicate.
+func TestResolveKGFactsForEvaluator_NilCallbackReturnsNilNil(t *testing.T) {
+	deps := Deps{KGFactsQuery: nil}
+	facts, err := resolveKGFactsForEvaluator(context.Background(), deps, "ticket_x")
+	if err != nil {
+		t.Fatalf("expected nil err; got %v", err)
+	}
+	if facts != nil {
+		t.Errorf("expected nil facts slice; got %v", facts)
+	}
+}
+
+// TestResolveKGFactsForEvaluator_PassesTicketIDToCallback — wired
+// callback receives the same ticket id text the listener uses for
+// the palace-side query.
+func TestResolveKGFactsForEvaluator_PassesTicketIDToCallback(t *testing.T) {
+	var received string
+	stub := []PalaceTriple{{Subject: "ticket_y", Predicate: "p", Object: "o"}}
+	deps := Deps{
+		KGFactsQuery: func(_ context.Context, ticketID string) ([]PalaceTriple, error) {
+			received = ticketID
+			return stub, nil
+		},
+	}
+	got, err := resolveKGFactsForEvaluator(context.Background(), deps, "ticket_y")
+	if err != nil {
+		t.Fatalf("expected nil err; got %v", err)
+	}
+	if received != "ticket_y" {
+		t.Errorf("callback received ticket id = %q; want ticket_y", received)
+	}
+	if len(got) != 1 || got[0].Subject != "ticket_y" {
+		t.Errorf("returned facts = %v; want stub passthrough", got)
+	}
+}
+
+// TestResolveKGFactsForEvaluator_PropagatesCallbackError — sidecar
+// failure surfaces via the err return so the evaluator's
+// missing_kg_facts predicate skips per the soft-gates posture
+// (Constitution IV).
+func TestResolveKGFactsForEvaluator_PropagatesCallbackError(t *testing.T) {
+	deps := Deps{
+		KGFactsQuery: func(_ context.Context, _ string) ([]PalaceTriple, error) {
+			return nil, errors.New("sidecar boom")
+		},
+	}
+	_, err := resolveKGFactsForEvaluator(context.Background(), deps, "ticket_x")
+	if err == nil {
+		t.Fatal("expected error propagation; got nil")
+	}
+}
+
+// TestBuildEvaluationInputCarriesAllFields pins the evaluator-input
+// composition the M6 listener wiring builds. Each field round-trips
+// through buildEvaluationInput unchanged.
+func TestBuildEvaluationInputCarriesAllFields(t *testing.T) {
+	now := time.Now()
+	args := buildEvaluationInputArgs{
+		TicketIDText: "ticket_z",
+		WindowStart:  now.Add(-1 * time.Hour),
+		WindowEnd:    now,
+		PalaceWing:   "wing_eng",
+		Drawers:      []PalaceDrawer{{Wing: "wing_eng", Body: "x"}},
+		KGTriples:    []PalaceTriple{{Subject: "a"}},
+		PalaceErr:    errors.New("x"),
+		Threshold:    200,
+		KGFacts:      []PalaceTriple{{Subject: "b"}},
+		KGFactsErr:   errors.New("y"),
+	}
+	in := buildEvaluationInput(args)
+	if in.TicketIDText != "ticket_z" || in.PalaceWing != "wing_eng" {
+		t.Errorf("fields not threaded: %+v", in)
+	}
+	if in.ThinDiaryThreshold != 200 {
+		t.Errorf("threshold not threaded; got %d", in.ThinDiaryThreshold)
+	}
+	if len(in.KGFactsForTicket) != 1 || in.KGFactsForTicket[0].Subject != "b" {
+		t.Errorf("KGFactsForTicket not threaded: %+v", in.KGFactsForTicket)
+	}
+	if in.KGFactsForTicketErr == nil {
+		t.Error("KGFactsForTicketErr not threaded")
+	}
+	if in.PalaceErr == nil {
+		t.Error("PalaceErr not threaded")
+	}
+	if !in.RunWindowStart.Equal(args.WindowStart) || !in.RunWindowEnd.Equal(args.WindowEnd) {
+		t.Errorf("run window not threaded: got [%v, %v]; want [%v, %v]",
+			in.RunWindowStart, in.RunWindowEnd, args.WindowStart, args.WindowEnd)
+	}
+}
+
 func TestIntervalValue(t *testing.T) {
 	got := intervalValue(5 * time.Second)
 	if !got.Valid {

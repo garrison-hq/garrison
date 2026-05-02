@@ -237,3 +237,147 @@ func TestEvaluateFinalizeOutcomeLegacyPassthrough(t *testing.T) {
 		t.Error("IsFinalizeExitReason(completed) = false; want true — happy path needs finalize routing")
 	}
 }
+
+// -------- M6 T012 thin_diary + missing_kg_facts predicates ----------------
+
+// TestThinDiaryPredicate_BelowThreshold — 50-char body with threshold
+// 200 → StatusThinDiary fires. Default M6 threshold is 200; spec
+// FR-014 / Open Q3.
+func TestThinDiaryPredicate_BelowThreshold(t *testing.T) {
+	start, end := baseWindow()
+	mid := start.Add(1 * time.Minute)
+	short := "short " + ticketIDText() // <200 chars
+	got := Evaluate(EvaluationInput{
+		TicketIDText:       ticketIDText(),
+		RunWindowStart:     start,
+		RunWindowEnd:       end,
+		PalaceWing:         "wing_frontend_engineer",
+		ThinDiaryThreshold: 200,
+		Drawers: []PalaceDrawer{
+			{Wing: "wing_frontend_engineer", Body: short, CreatedAt: mid},
+		},
+	})
+	if got != StatusThinDiary {
+		t.Errorf("got %s; want %s", got, StatusThinDiary)
+	}
+}
+
+// TestThinDiaryPredicate_AtThreshold — body length exactly equal to the
+// threshold does NOT fire (predicate uses strict less-than).
+func TestThinDiaryPredicate_AtThreshold(t *testing.T) {
+	start, end := baseWindow()
+	mid := start.Add(1 * time.Minute)
+	body := strings.Repeat("a", 200-len(ticketIDText())) + ticketIDText()
+	if len(body) != 200 {
+		t.Fatalf("fixture mismatch: body len=%d; want 200", len(body))
+	}
+	got := Evaluate(EvaluationInput{
+		TicketIDText:       ticketIDText(),
+		RunWindowStart:     start,
+		RunWindowEnd:       end,
+		PalaceWing:         "wing_frontend_engineer",
+		ThinDiaryThreshold: 200,
+		Drawers: []PalaceDrawer{
+			{Wing: "wing_frontend_engineer", Body: body, CreatedAt: mid},
+		},
+		KGFactsForTicket: []PalaceTriple{
+			{Subject: ticketIDText(), Predicate: "x", Object: "y"},
+		},
+	})
+	if got == StatusThinDiary {
+		t.Errorf("at-threshold body should NOT fire ThinDiary (strict less-than); got %s", got)
+	}
+}
+
+// TestThinDiaryPredicate_AboveThreshold — body well above the threshold
+// + non-empty kg → StatusClean.
+func TestThinDiaryPredicate_AboveThreshold(t *testing.T) {
+	start, end := baseWindow()
+	mid := start.Add(1 * time.Minute)
+	body := strings.Repeat("x", 500) + ticketIDText()
+	got := Evaluate(EvaluationInput{
+		TicketIDText:       ticketIDText(),
+		RunWindowStart:     start,
+		RunWindowEnd:       end,
+		PalaceWing:         "wing_frontend_engineer",
+		ThinDiaryThreshold: 200,
+		Drawers: []PalaceDrawer{
+			{Wing: "wing_frontend_engineer", Body: body, CreatedAt: mid},
+		},
+		KGFactsForTicket: []PalaceTriple{
+			{Subject: ticketIDText(), Predicate: "x", Object: "y"},
+		},
+	})
+	if got != StatusClean {
+		t.Errorf("got %s; want %s", got, StatusClean)
+	}
+}
+
+// TestThinDiaryPredicate_OverridesBy_MissingKgFacts — 50-char body +
+// empty KG → StatusThinDiary wins by precedence (thin_diary checked
+// before missing_kg_facts).
+func TestThinDiaryPredicate_OverridesBy_MissingKgFacts(t *testing.T) {
+	start, end := baseWindow()
+	mid := start.Add(1 * time.Minute)
+	short := "short " + ticketIDText()
+	got := Evaluate(EvaluationInput{
+		TicketIDText:       ticketIDText(),
+		RunWindowStart:     start,
+		RunWindowEnd:       end,
+		PalaceWing:         "wing_frontend_engineer",
+		ThinDiaryThreshold: 200,
+		Drawers: []PalaceDrawer{
+			{Wing: "wing_frontend_engineer", Body: short, CreatedAt: mid},
+		},
+		// Empty KGFactsForTicket would otherwise fire missing_kg_facts.
+	})
+	if got != StatusThinDiary {
+		t.Errorf("got %s; want %s (thin_diary precedence)", got, StatusThinDiary)
+	}
+}
+
+// TestMissingKgFactsEvaluator_FiresWhenKgEmpty — body above threshold +
+// 0 triples in KGFactsForTicket → StatusMissingKgFacts.
+func TestMissingKgFactsEvaluator_FiresWhenKgEmpty(t *testing.T) {
+	start, end := baseWindow()
+	mid := start.Add(1 * time.Minute)
+	body := strings.Repeat("x", 300) + ticketIDText()
+	got := Evaluate(EvaluationInput{
+		TicketIDText:       ticketIDText(),
+		RunWindowStart:     start,
+		RunWindowEnd:       end,
+		PalaceWing:         "wing_frontend_engineer",
+		ThinDiaryThreshold: 200,
+		Drawers: []PalaceDrawer{
+			{Wing: "wing_frontend_engineer", Body: body, CreatedAt: mid},
+		},
+		KGFactsForTicket: []PalaceTriple{}, // empty
+	})
+	if got != StatusMissingKgFacts {
+		t.Errorf("got %s; want %s", got, StatusMissingKgFacts)
+	}
+}
+
+// TestMissingKgFactsEvaluator_DoesNotFireWhenKgPopulated — body above
+// threshold + 1+ triple → StatusClean.
+func TestMissingKgFactsEvaluator_DoesNotFireWhenKgPopulated(t *testing.T) {
+	start, end := baseWindow()
+	mid := start.Add(1 * time.Minute)
+	body := strings.Repeat("x", 300) + ticketIDText()
+	got := Evaluate(EvaluationInput{
+		TicketIDText:       ticketIDText(),
+		RunWindowStart:     start,
+		RunWindowEnd:       end,
+		PalaceWing:         "wing_frontend_engineer",
+		ThinDiaryThreshold: 200,
+		Drawers: []PalaceDrawer{
+			{Wing: "wing_frontend_engineer", Body: body, CreatedAt: mid},
+		},
+		KGFactsForTicket: []PalaceTriple{
+			{Subject: ticketIDText(), Predicate: "completed", Object: "y"},
+		},
+	})
+	if got != StatusClean {
+		t.Errorf("got %s; want %s", got, StatusClean)
+	}
+}

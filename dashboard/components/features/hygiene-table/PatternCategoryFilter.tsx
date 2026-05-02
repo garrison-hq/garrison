@@ -26,8 +26,21 @@ export function PatternCategoryFilter() {
   // also returns rows from other modes to NULL category, but
   // filtering by category only makes sense when the filter
   // narrows to the secret-emitted bucket.
-  if (mode && mode !== 'suspected_secret_emitted') {
-    return null;
+  //
+  // When irrelevant, we render an empty placeholder of the same
+  // height instead of returning null — that keeps the page from
+  // resizing as the operator clicks between failure-mode chips
+  // (the row above) which can flip the relevance of this filter
+  // back and forth.
+  const irrelevant = !!mode && mode !== 'suspected_secret_emitted';
+  if (irrelevant) {
+    return (
+      <div
+        aria-hidden
+        className="h-7"
+        data-testid="pattern-category-filter-placeholder"
+      />
+    );
   }
 
   function setCategory(category: PatternCategory | 'all') {

@@ -10,15 +10,18 @@ export async function HygieneTable({
   emptyDescription: string;
 }>) {
   if (rows.length === 0) {
+    // Parent section owns the card's min-h so the page never
+    // resizes across filter switches; here we just center the
+    // empty-state copy in whatever space the flex parent gives us.
     return (
-      <div className="px-4 py-10 text-center text-text-3 text-[12.5px]">
+      <div className="h-full px-4 py-10 text-center text-text-3 text-[12.5px] flex items-center justify-center">
         {emptyDescription}
       </div>
     );
   }
   const t = await getTranslations('hygieneMeta.headers');
   return (
-    <div className="overflow-x-auto">
+    <div className="overflow-x-auto h-full">
       <table className="w-full">
         <colgroup>
           <col style={{ width: 180 }} />

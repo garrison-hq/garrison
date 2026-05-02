@@ -37,6 +37,10 @@ type CreateTicketArgs struct {
 	AcceptanceCriteria string         `json:"acceptance_criteria,omitempty"`
 	ColumnSlug         string         `json:"column_slug,omitempty"`
 	Metadata           map[string]any `json:"metadata,omitempty"`
+	// M6 T010: parent_ticket_id (UUID-shaped string) links this child
+	// to a parent ticket. Validation: parent must exist, share the
+	// child's department_id, and not be in column_slug='done'.
+	ParentTicketID string `json:"parent_ticket_id,omitempty"`
 }
 
 // realCreateTicketHandler implements garrison-mutate.create_ticket.
@@ -44,20 +48,9 @@ type CreateTicketArgs struct {
 // args captured in args_jsonb; ticket can be deleted but downstream
 // effects survive.
 func realCreateTicketHandler(ctx context.Context, deps Deps, raw json.RawMessage) (Result, error) {
-	var args CreateTicketArgs
-	if err := json.Unmarshal(raw, &args); err != nil {
-		return validationFailure("create_ticket: parse args: " + err.Error()), nil
-	}
-	args.Objective = strings.TrimSpace(args.Objective)
-	args.DepartmentSlug = strings.TrimSpace(args.DepartmentSlug)
-	if args.Objective == "" {
-		return validationFailure("create_ticket: objective is required"), nil
-	}
-	if len(args.Objective) > 10000 {
-		return validationFailure("create_ticket: objective exceeds 10000 chars"), nil
-	}
-	if args.DepartmentSlug == "" {
-		return validationFailure("create_ticket: department_slug is required"), nil
+	args, validationRes := parseCreateTicketArgs(raw)
+	if validationRes != nil {
+		return *validationRes, nil
 	}
 
 	tx, err := deps.Pool.Begin(ctx)
@@ -67,27 +60,32 @@ func realCreateTicketHandler(ctx context.Context, deps Deps, raw json.RawMessage
 	defer func() { _ = tx.Rollback(ctx) }()
 	q := store.New(tx)
 
-	deptID, err := q.SelectDepartmentIDBySlug(ctx, args.DepartmentSlug)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return resourceNotFound("create_ticket: department %q not found", args.DepartmentSlug),
-				writeFailureAudit(ctx, deps, "create_ticket", args, ErrResourceNotFound, 3, "")
-		}
-		return Result{}, fmt.Errorf("create_ticket: lookup department: %w", err)
+	deptID, deptRes, deptErr := lookupCreateTicketDept(ctx, q, deps, args)
+	if deptErr != nil {
+		return Result{}, deptErr
+	}
+	if deptRes != nil {
+		return *deptRes, nil
 	}
 
-	metadataJSON := []byte("{}")
-	if len(args.Metadata) > 0 {
-		metadataJSON, err = json.Marshal(args.Metadata)
-		if err != nil {
-			return validationFailure("create_ticket: invalid metadata: " + err.Error()), nil
-		}
+	metadataJSON, metaRes := buildCreateTicketMetadata(args)
+	if metaRes != nil {
+		return *metaRes, nil
 	}
 
 	columnSlug := strings.TrimSpace(args.ColumnSlug)
 	if columnSlug == "" {
 		columnSlug = "todo"
 	}
+
+	parentTicketID, parentRes, parentErr := resolveParentTicketID(ctx, q, args.ParentTicketID, deptID)
+	if parentErr != nil {
+		return Result{}, parentErr
+	}
+	if parentRes != nil {
+		return *parentRes, nil
+	}
+
 	ticket, err := q.InsertChatTicket(ctx, store.InsertChatTicketParams{
 		DepartmentID:            deptID,
 		Objective:               args.Objective,
@@ -95,6 +93,7 @@ func realCreateTicketHandler(ctx context.Context, deps Deps, raw json.RawMessage
 		ColumnSlug:              columnSlug,
 		Metadata:                metadataJSON,
 		CreatedViaChatSessionID: deps.ChatSessionID,
+		ParentTicketID:          parentTicketID,
 	})
 	if err != nil {
 		return Result{}, fmt.Errorf("create_ticket: insert ticket: %w", err)
@@ -152,6 +151,110 @@ type EditTicketArgs struct {
 // realEditTicketHandler implements garrison-mutate.edit_ticket. Tier 2
 // reversibility: diff captured in audit (before/after for each changed
 // field).
+// parseCreateTicketArgs unmarshals + trims + validates the create_ticket
+// args. Returns (args, nil) on a valid input or (zero, validation Result)
+// when the caller should short-circuit. Pulled out of
+// realCreateTicketHandler to keep that function below the SonarCloud
+// cognitive-complexity threshold per the M6 retro § "what the spec got
+// wrong".
+func parseCreateTicketArgs(raw json.RawMessage) (CreateTicketArgs, *Result) {
+	var args CreateTicketArgs
+	if err := json.Unmarshal(raw, &args); err != nil {
+		r := validationFailure("create_ticket: parse args: " + err.Error())
+		return CreateTicketArgs{}, &r
+	}
+	args.Objective = strings.TrimSpace(args.Objective)
+	args.DepartmentSlug = strings.TrimSpace(args.DepartmentSlug)
+	if args.Objective == "" {
+		r := validationFailure("create_ticket: objective is required")
+		return CreateTicketArgs{}, &r
+	}
+	if len(args.Objective) > 10000 {
+		r := validationFailure("create_ticket: objective exceeds 10000 chars")
+		return CreateTicketArgs{}, &r
+	}
+	if args.DepartmentSlug == "" {
+		r := validationFailure("create_ticket: department_slug is required")
+		return CreateTicketArgs{}, &r
+	}
+	return args, nil
+}
+
+// lookupCreateTicketDept resolves the department slug to an ID,
+// returning a not-found Result + a transport error from any unexpected
+// SQL failure. Pulled out for cognitive-complexity reasons.
+func lookupCreateTicketDept(ctx context.Context, q *store.Queries, deps Deps, args CreateTicketArgs) (pgtype.UUID, *Result, error) {
+	deptID, err := q.SelectDepartmentIDBySlug(ctx, args.DepartmentSlug)
+	if err == nil {
+		return deptID, nil, nil
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		r := resourceNotFound("create_ticket: department %q not found", args.DepartmentSlug)
+		// writeFailureAudit returns its own error, which the caller
+		// propagates as the verb's transport-error return.
+		return pgtype.UUID{}, &r, writeFailureAudit(ctx, deps, "create_ticket", args, ErrResourceNotFound, 3, "")
+	}
+	return pgtype.UUID{}, nil, fmt.Errorf("create_ticket: lookup department: %w", err)
+}
+
+// buildCreateTicketMetadata json-marshals args.Metadata. Returns
+// (jsonBytes, nil) on success or (nil, validation Result) on a marshal
+// failure (operator-typed structures that don't round-trip through
+// encoding/json).
+func buildCreateTicketMetadata(args CreateTicketArgs) ([]byte, *Result) {
+	if len(args.Metadata) == 0 {
+		return []byte("{}"), nil
+	}
+	b, err := json.Marshal(args.Metadata)
+	if err != nil {
+		r := validationFailure("create_ticket: invalid metadata: " + err.Error())
+		return nil, &r
+	}
+	return b, nil
+}
+
+// resolveParentTicketID validates the M6 T010 parent_ticket_id arg.
+// Returns:
+//   - parentTicketID (pgtype.UUID): valid (or zero-value) UUID for the
+//     create_ticket INSERT.
+//   - validationResult (*Result): non-nil on a user-facing validation
+//     failure (UUID parse / not found / cross-dept / closed parent).
+//   - err (error): non-nil only on a transport-level lookup failure
+//     (caller surfaces as %w).
+//
+// Pulled out of realCreateTicketHandler to keep that function below
+// SonarCloud's cognitive-complexity threshold per the M6 retro § "what
+// the spec got wrong".
+func resolveParentTicketID(ctx context.Context, q *store.Queries, raw string, deptID pgtype.UUID) (pgtype.UUID, *Result, error) {
+	var zero pgtype.UUID
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return zero, nil, nil
+	}
+	var parentTicketID pgtype.UUID
+	if err := parentTicketID.Scan(trimmed); err != nil {
+		r := validationFailure("create_ticket: parent_ticket_id is not a valid UUID")
+		return zero, &r, nil
+	}
+	parent, err := q.GetTicketByID(ctx, parentTicketID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			r := validationFailure("create_ticket: parent_ticket_id refers to a ticket that does not exist")
+			return zero, &r, nil
+		}
+		return zero, nil, fmt.Errorf("create_ticket: lookup parent ticket: %w", err)
+	}
+	if parent.DepartmentID != deptID {
+		r := validationFailure("create_ticket: parent_ticket_id is in a different department")
+		return zero, &r, nil
+	}
+	if parent.ColumnSlug == "done" {
+		r := validationFailure("create_ticket: parent_ticket_id is already closed")
+		return zero, &r, nil
+	}
+	return parentTicketID, nil, nil
+}
+
 func realEditTicketHandler(ctx context.Context, deps Deps, raw json.RawMessage) (Result, error) {
 	var args EditTicketArgs
 	if err := json.Unmarshal(raw, &args); err != nil {

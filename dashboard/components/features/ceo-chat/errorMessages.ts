@@ -78,6 +78,15 @@ export const CHAT_ERROR_DISPLAY: Record<string, ChatErrorDisplay> = {
     headline: 'Supervisor restarted',
     body: 'The supervisor restarted before this turn finished. Send another message in a new thread.',
   },
+  // M6 / T011 — per-turn ticket-creation ceiling. The chat policy
+  // bails when the assistant tries to create more than
+  // GARRISON_CHAT_MAX_TICKETS_PER_TURN tickets in a single turn
+  // (default 10). Surfaces the operator-facing instruction to
+  // start a fresh thread to keep decomposing.
+  ticket_creation_ceiling_reached: {
+    headline: 'Ticket-creation ceiling reached',
+    body: 'Per-turn ticket-creation ceiling reached. Start a new thread to keep decomposing.',
+  },
 };
 
 // MCP errors arrive as mcp_<server>_<status> (e.g. mcp_postgres_failed).

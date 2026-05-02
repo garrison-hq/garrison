@@ -90,9 +90,11 @@ type ChatSession struct {
 }
 
 type Company struct {
-	ID        pgtype.UUID
-	Name      string
-	CreatedAt pgtype.Timestamptz
+	ID             pgtype.UUID
+	Name           string
+	CreatedAt      pgtype.Timestamptz
+	DailyBudgetUsd pgtype.Numeric
+	PauseUntil     pgtype.Timestamptz
 }
 
 type Department struct {
@@ -139,6 +141,14 @@ type SecretMetadatum struct {
 	RotationProvider string
 }
 
+type ThrottleEvent struct {
+	ID        pgtype.UUID
+	CompanyID pgtype.UUID
+	Kind      string
+	FiredAt   pgtype.Timestamptz
+	Payload   []byte
+}
+
 type Ticket struct {
 	ID                      pgtype.UUID
 	DepartmentID            pgtype.UUID
@@ -149,6 +159,7 @@ type Ticket struct {
 	Metadata                []byte
 	Origin                  string
 	CreatedViaChatSessionID pgtype.UUID
+	ParentTicketID          pgtype.UUID
 }
 
 type TicketTransition struct {

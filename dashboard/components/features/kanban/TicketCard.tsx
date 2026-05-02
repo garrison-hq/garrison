@@ -1,3 +1,7 @@
+'use client';
+
+import type { MouseEvent } from 'react';
+import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { relativeTime, formatIsoFull } from '@/lib/format/relativeTime';
 import type { TicketCardRow } from '@/lib/queries/kanban';
@@ -15,8 +19,23 @@ import type { TicketCardRow } from '@/lib/queries/kanban';
 //  - Assignee (when present) renders below the title as muted
 //    mono text — every card carries the same shape; if no agent
 //    is assigned the row is omitted rather than showing an em-dash.
+//
+// M6 / T017 — when ticket.parentTicketId is set, render a small
+// parent chip on the header row. The chip MUST NOT be a nested
+// <Link> — `<a>` inside `<a>` is invalid HTML and React 19's
+// Link strictness reports the regression. We use a button that
+// stops the parent-card click + programmatically routes via
+// useRouter.
 
 export function TicketCard({ ticket }: Readonly<{ ticket: TicketCardRow }>) {
+  const router = useRouter();
+  const onParentClick = (e: MouseEvent<HTMLButtonElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (ticket.parentTicketId) {
+      router.push(`/tickets/${ticket.parentTicketId}`);
+    }
+  };
   return (
     <Link
       href={`/tickets/${ticket.id}`}
@@ -24,9 +43,21 @@ export function TicketCard({ ticket }: Readonly<{ ticket: TicketCardRow }>) {
       data-testid="ticket-card"
     >
       <div className="flex items-center justify-between gap-2 mb-1.5">
-        <span className="font-mono text-[10.5px] text-text-3 tracking-tight">
-          {ticket.id.slice(0, 8)}
-        </span>
+        <div className="flex items-center gap-2 min-w-0">
+          <span className="font-mono text-[10.5px] text-text-3 tracking-tight">
+            {ticket.id.slice(0, 8)}
+          </span>
+          {ticket.parentTicketId ? (
+            <button
+              type="button"
+              onClick={onParentClick}
+              className="font-mono text-[10.5px] text-text-3 hover:text-text-1 tracking-tight cursor-pointer"
+              data-testid="ticket-parent-chip"
+            >
+              parent: {ticket.parentTicketId.slice(0, 8)}
+            </button>
+          ) : null}
+        </div>
         <span
           className="font-mono text-[10.5px] text-text-3 font-tabular"
           title={`updated ${formatIsoFull(ticket.createdAt)}`}

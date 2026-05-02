@@ -41,6 +41,13 @@ export interface CreateTicketParams {
   /** Target column the ticket lands in. Defaults to the
    *  department's source column (typically 'todo'). */
   targetColumn?: string;
+  /** M6 / T017 — optional parent ticket id for chat-driven
+   *  decomposition. The /tickets/new form does NOT expose a
+   *  parent-picker; this is API-only. Mirrors the supervisor-side
+   *  garrison-mutate.create_ticket parent_ticket_id arg
+   *  (T010). When set, the action validates same-department
+   *  membership and rejects mismatches. */
+  parentTicketId?: string;
 }
 
 export interface MoveTicketParams {
@@ -102,6 +109,35 @@ export async function createTicket(params: CreateTicketParams): Promise<{ ticket
   const deptId = await resolveDeptId(params.deptSlug);
   const targetColumn = params.targetColumn ?? 'todo';
 
+  // M6 / T017 — parent-ticket validation mirrors the supervisor-side
+  // garrison-mutate.create_ticket verb: read the parent's
+  // department_id, reject if it differs from the child's. Cross-dept
+  // decomposition is intentionally rejected — keep parent/child pairs
+  // within a single department's workflow. Operator-driven
+  // /tickets/new does NOT pass parentTicketId; this branch only fires
+  // on programmatic callers.
+  if (params.parentTicketId !== undefined) {
+    const parentRows = await appDb
+      .select({ deptId: tickets.departmentId })
+      .from(tickets)
+      .where(eq(tickets.id, params.parentTicketId))
+      .limit(1);
+    if (parentRows.length === 0) {
+      throw new ConflictError(
+        ConflictKind.AlreadyExists,
+        undefined,
+        'parent_ticket_id refers to a ticket that does not exist',
+      );
+    }
+    if (parentRows[0].deptId !== deptId) {
+      throw new ConflictError(
+        ConflictKind.AlreadyExists,
+        undefined,
+        'parent_ticket_id is in a different department',
+      );
+    }
+  }
+
   const ticketId = await appDb.transaction(async (tx) => {
     const tx2 = tx as unknown as MutationTx;
 
@@ -113,6 +149,7 @@ export async function createTicket(params: CreateTicketParams): Promise<{ ticket
         acceptanceCriteria: params.acceptanceCriteria ?? null,
         columnSlug: targetColumn,
         origin: 'operator',
+        parentTicketId: params.parentTicketId ?? null,
       })
       .returning({ id: tickets.id });
     const ticketId = inserted[0].id;
@@ -122,6 +159,7 @@ export async function createTicket(params: CreateTicketParams): Promise<{ ticket
       ticketId,
       deptSlug: params.deptSlug,
       targetColumn,
+      parentTicketId: params.parentTicketId ?? null,
     });
 
     await emitPgNotify(tx2, 'work.ticket.created', outbox.id);

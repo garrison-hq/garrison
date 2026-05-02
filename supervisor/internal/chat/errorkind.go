@@ -54,11 +54,19 @@ const (
 	// so the chat_messages.error_kind and the chat_mutation_audit.outcome
 	// CHECK constraint stay in lock-step.
 	ErrorToolCallCeilingReached ErrorKind = "tool_call_ceiling_reached"
+
+	// M6 T011 — per-turn ticket-creation ceiling. Independent of
+	// the tool-call ceiling but mirrors its lifecycle / SSE shape.
+	ErrorTicketCreationCeilingReached ErrorKind = "ticket_creation_ceiling_reached"
 )
 
 // ChatErrorToolCallCeilingReached is the alias used by the policy /
 // transport for emitting the M5.3 ceiling SSE error frame.
 const ChatErrorToolCallCeilingReached = ErrorToolCallCeilingReached
+
+// ChatErrorTicketCreationCeilingReached is the M6 ticket-creation
+// ceiling error kind alias (FR-004 / FR-005).
+const ChatErrorTicketCreationCeilingReached = ErrorTicketCreationCeilingReached
 
 // BuildMCPErrorKind composes the mcp_<server>_<status> form for the
 // MCP-health bail path (FR-031). server is the MCP server name from

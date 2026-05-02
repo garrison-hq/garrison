@@ -12,7 +12,7 @@ import (
 )
 
 const getTicketByID = `-- name: GetTicketByID :one
-SELECT id, department_id, objective, created_at, column_slug, acceptance_criteria, metadata, origin, created_via_chat_session_id FROM tickets WHERE id = $1
+SELECT id, department_id, objective, created_at, column_slug, acceptance_criteria, metadata, origin, created_via_chat_session_id, parent_ticket_id FROM tickets WHERE id = $1
 `
 
 func (q *Queries) GetTicketByID(ctx context.Context, id pgtype.UUID) (Ticket, error) {
@@ -28,6 +28,7 @@ func (q *Queries) GetTicketByID(ctx context.Context, id pgtype.UUID) (Ticket, er
 		&i.Metadata,
 		&i.Origin,
 		&i.CreatedViaChatSessionID,
+		&i.ParentTicketID,
 	)
 	return i, err
 }
@@ -54,10 +55,10 @@ func (q *Queries) GetTicketColumnAndDept(ctx context.Context, id pgtype.UUID) (G
 const insertChatTicket = `-- name: InsertChatTicket :one
 INSERT INTO tickets (
     department_id, objective, acceptance_criteria, column_slug,
-    metadata, origin, created_via_chat_session_id
+    metadata, origin, created_via_chat_session_id, parent_ticket_id
 )
-VALUES ($1, $2, $3, $4, $5, 'ceo_chat', $6)
-RETURNING id, department_id, objective, created_at, column_slug, acceptance_criteria, metadata, origin, created_via_chat_session_id
+VALUES ($1, $2, $3, $4, $5, 'ceo_chat', $6, $7)
+RETURNING id, department_id, objective, created_at, column_slug, acceptance_criteria, metadata, origin, created_via_chat_session_id, parent_ticket_id
 `
 
 type InsertChatTicketParams struct {
@@ -67,6 +68,7 @@ type InsertChatTicketParams struct {
 	ColumnSlug              string
 	Metadata                []byte
 	CreatedViaChatSessionID pgtype.UUID
+	ParentTicketID          pgtype.UUID
 }
 
 // M5.3 garrison-mutate.create_ticket. Writes a ticket row with
@@ -78,6 +80,10 @@ type InsertChatTicketParams struct {
 // pass NULL to mean "use default"; the verb resolves "todo" / "{}"
 // before calling rather than relying on COALESCE-on-cast SQL that
 // confuses sqlc's parameter-name inference.
+// M6 T010: parent_ticket_id passes through as a NULLABLE sentinel; verb
+// handler validates same-department + non-closed parent BEFORE calling
+// this query (cross-table CHECK can't enforce both; verb error message
+// has to be operator-readable anyway).
 func (q *Queries) InsertChatTicket(ctx context.Context, arg InsertChatTicketParams) (Ticket, error) {
 	row := q.db.QueryRow(ctx, insertChatTicket,
 		arg.DepartmentID,
@@ -86,6 +92,7 @@ func (q *Queries) InsertChatTicket(ctx context.Context, arg InsertChatTicketPara
 		arg.ColumnSlug,
 		arg.Metadata,
 		arg.CreatedViaChatSessionID,
+		arg.ParentTicketID,
 	)
 	var i Ticket
 	err := row.Scan(
@@ -98,6 +105,7 @@ func (q *Queries) InsertChatTicket(ctx context.Context, arg InsertChatTicketPara
 		&i.Metadata,
 		&i.Origin,
 		&i.CreatedViaChatSessionID,
+		&i.ParentTicketID,
 	)
 	return i, err
 }
@@ -105,7 +113,7 @@ func (q *Queries) InsertChatTicket(ctx context.Context, arg InsertChatTicketPara
 const insertTicket = `-- name: InsertTicket :one
 INSERT INTO tickets (department_id, objective)
 VALUES ($1, $2)
-RETURNING id, department_id, objective, created_at, column_slug, acceptance_criteria, metadata, origin, created_via_chat_session_id
+RETURNING id, department_id, objective, created_at, column_slug, acceptance_criteria, metadata, origin, created_via_chat_session_id, parent_ticket_id
 `
 
 type InsertTicketParams struct {
@@ -126,6 +134,7 @@ func (q *Queries) InsertTicket(ctx context.Context, arg InsertTicketParams) (Tic
 		&i.Metadata,
 		&i.Origin,
 		&i.CreatedViaChatSessionID,
+		&i.ParentTicketID,
 	)
 	return i, err
 }

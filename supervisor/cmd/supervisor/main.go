@@ -23,6 +23,7 @@ import (
 	"github.com/garrison-hq/garrison/supervisor/internal/pgdb"
 	"github.com/garrison-hq/garrison/supervisor/internal/spawn"
 	"github.com/garrison-hq/garrison/supervisor/internal/store"
+	"github.com/garrison-hq/garrison/supervisor/internal/throttle"
 	"github.com/garrison-hq/garrison/supervisor/internal/vault"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -224,6 +225,18 @@ func runDaemon() int {
 		return exitCode
 	}
 
+	// M6 T014: throttle deps shared between spawn-prep gate (T007) and
+	// pipeline OnRateLimit actuator (T008). Pool=nil short-circuits the
+	// gate to "allow" so M2.x integration tests + chaos suites that
+	// don't seed company budgets stay green.
+	throttleDeps := throttle.Deps{
+		Pool:                pool,
+		Logger:              logger,
+		DefaultSpawnCostUSD: parseDefaultSpawnCost(cfg.DefaultSpawnCostUSD),
+		RateLimitBackOff:    cfg.RateLimitBackOff,
+		Now:                 time.Now,
+	}
+
 	spawnDeps := spawn.Deps{
 		Pool:               pool,
 		Queries:            queries,
@@ -250,6 +263,9 @@ func runDaemon() int {
 		// M2.3 — vault client + customer scope for secret injection.
 		Vault:      vaultClient,
 		CustomerID: cfg.CustomerID(),
+		// M6 T014 — result-grace + throttle gate.
+		FinalizeResultGrace: cfg.FinalizeResultGrace,
+		Throttle:            throttleDeps,
 	}
 
 	dispatcher := buildDispatcher(spawnDeps)
@@ -308,6 +324,19 @@ func runDaemon() int {
 	// TerminalWriteGrace per FR-217. GARRISON_DISABLE_PALACE_BOOTSTRAP
 	// gates these off alongside the bootstrap itself (same test-hook).
 	if !cfg.UseFakeAgent && !cfg.DisablePalaceBootstrap {
+		// M6 T012 / T013: ticket-keyed kg_query callback feeds the
+		// listener's missing_kg_facts predicate. Constructs a fresh
+		// QueryClient that shares the docker-exec wiring with
+		// sharedPalaceClient (same DockerExec interface, same
+		// container, same palace path). Returns a slice typed as
+		// hygiene.PalaceTriple = mempalace.Triple via the alias the
+		// hygiene package re-exports.
+		palaceQueryClient := mempalace.NewQueryClient(
+			sharedPalaceClient.Exec,
+			cfg.MempalaceContainer,
+			cfg.PalacePath,
+			logger,
+		)
 		hygieneDeps := hygiene.Deps{
 			DSN:                cfg.AgentMempalaceDSN(),
 			Dialer:             pgdb.NewRealDialer(),
@@ -318,6 +347,28 @@ func runDaemon() int {
 			SweepInterval:      cfg.HygieneSweepInterval,
 			TerminalWriteGrace: spawn.TerminalWriteGrace,
 			Channels:           []string{EngineeringQAReviewChannel, "work.ticket.transitioned.engineering.qa_review.done"},
+			ThinDiaryThreshold: cfg.ThinDiaryThreshold,
+			KGFactsQuery: func(qctx context.Context, ticketIDText string) ([]hygiene.PalaceTriple, error) {
+				kg, err := palaceQueryClient.KgQueryByTicketID(qctx, ticketIDText)
+				if err != nil {
+					return nil, err
+				}
+				// QueryClient.KGTriple is the dashboard-shaped triple
+				// type (carries optional SourceTicketID + WrittenAt);
+				// hygiene.PalaceTriple is an alias for mempalace.Triple
+				// (the legacy M2.2 shape). Map field-by-field so the
+				// hygiene evaluator can scan subject/object/valid_from.
+				out := make([]hygiene.PalaceTriple, 0, len(kg))
+				for _, k := range kg {
+					out = append(out, hygiene.PalaceTriple{
+						Subject:   k.Subject,
+						Predicate: k.Predicate,
+						Object:    k.Object,
+						ValidFrom: k.WrittenAt,
+					})
+				}
+				return out, nil
+			},
 		}
 		g.Go(func() error {
 			return hygiene.RunListener(gctx, hygieneDeps)
@@ -355,6 +406,8 @@ func runDaemon() int {
 		// the chat container is on a different network alias than the
 		// supervisor (the dev/compose case).
 		ChatInternalDatabaseURL: chatInternalDatabaseURL(cfg),
+		// M6 T014 — per-turn ticket-creation ceiling.
+		MaxTicketsPerTurn: cfg.MaxTicketsPerTurn,
 	}
 	if err := chat.RunRestartSweep(ctx, chatDeps); err != nil {
 		logger.Warn("chat: restart sweep failed; continuing", "err", err)
@@ -556,6 +609,21 @@ func chatInternalDatabaseURL(cfg *config.Config) string {
 		return v
 	}
 	return cfg.DatabaseURL
+}
+
+// parseDefaultSpawnCost converts the cfg.DefaultSpawnCostUSD decimal
+// string into a pgtype.Numeric for the throttle gate's per-spawn cost
+// estimate. Invalid values fall back to the documented $0.05 default
+// (matches config.Load's default + the M6 spec).
+func parseDefaultSpawnCost(v string) pgtype.Numeric {
+	var n pgtype.Numeric
+	if v == "" {
+		v = "0.05"
+	}
+	if err := n.Scan(v); err != nil {
+		_ = n.Scan("0.05")
+	}
+	return n
 }
 
 // startDashboardAPIServerIfWired registers the dashboardapi server's

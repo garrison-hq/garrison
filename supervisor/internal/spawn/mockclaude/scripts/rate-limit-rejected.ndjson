@@ -1,0 +1,15 @@
+# M6 T009 rate-limit-rejected fixture — engineer spawn that emits a
+# claude rate_limit_event with status=rejected mid-stream. The
+# supervisor's pipeline.OnRateLimit observes the event and the M6
+# T008 onRateLimitRejected closure fires throttle.FirePause in a
+# short independent tx (companies.pause_until UPDATE +
+# throttle_events INSERT + work.throttle.event pg_notify). The
+# in-flight spawn keeps running per FR-043; this fixture lets it
+# emit a result event afterwards so the test can observe both
+# the actuator side-effects AND the spawn's terminal classification.
+#init-mcp-servers [{"name":"postgres","status":"connected"},{"name":"mempalace","status":"connected"},{"name":"finalize","status":"connected"}]
+{"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","content":[{"type":"text","text":"Working on the ticket."}]}}
+{"type":"rate_limit_event","session_id":"mock-session-m6-rl-rejected","uuid":"rl-1","rate_limit_info":{"status":"rejected","resetsAt":1700000000,"rateLimitType":"input","utilization":1.0,"isUsingOverage":false,"surpassedThreshold":1.0}}
+#sleep 200ms
+#finalize-tool-use-ok 1 {"ticket_id":"{{TICKET_ID}}","outcome":"M6 T009 rate-limit-rejected fixture — engineer kept running after the rate-limit event per FR-043","diary_entry":{"rationale":"Validating the rate-limit actuator: the supervisor wrote pause_until + a throttle_events row + emitted work.throttle.event when the rejected event landed; the in-flight spawn was unaffected and continued to finalize.","artifacts":[],"blockers":[],"discoveries":[]},"kg_triples":[{"subject":"agent_instance_mock","predicate":"completed","object":"ticket_{{TICKET_ID}}","valid_from":"now"}]}
+{"type":"result","subtype":"success","is_error":false,"duration_ms":1200,"duration_api_ms":900,"total_cost_usd":0.041,"stop_reason":"end_turn","terminal_reason":"completed","result":"Finalized","session_id":"mock-session-m6-rl-rejected","permission_denials":[]}

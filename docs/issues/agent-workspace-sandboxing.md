@@ -1,6 +1,11 @@
 # Agent workspace sandboxing — standalone issue
 
-**Status**: tracked for post-M2.3 (vault) work.
+**Status**: **scope-merged with M7 (2026-05-02)**. The Docker-per-agent
+resolution lands as part of M7's hiring-flow + per-agent custom-skills
+work — the container is the natural skill-install boundary, so resolving
+the runtime + the install actuator in the same milestone gives one
+coherent ship instead of two halves wired together later. See
+`docs/research/m7-spike.md` §4 for the merged scope.
 **Surfaced**: 2026-04-24, post-UUID-fix haiku validation run.
 **Scope**: separate from M2.3 vault threat model; see "Relationship to vault" below.
 
@@ -41,11 +46,17 @@ This is not a finalize-schema problem, a prompt problem, or a pgmcp problem. It 
 
 The M2.3 milestone should land the vault without taking on sandboxing scope. M2.3's acceptance tests should explicitly note that workspace isolation is NOT tested by M2.3 and is a separate concern.
 
-## Planned resolution: Docker-per-agent (post-M2.3)
+## Planned resolution: Docker-per-agent (in M7)
 
-After M2.3 ships, introduce per-agent Docker containers for agent subprocess execution. The supervisor spawns a container rather than a direct `claude` subprocess; the container has:
+**Originally** scoped as a post-M2.3 standalone work item; **2026-05-02
+moved into M7** because M7 introduces per-agent custom skills and the
+container is the natural skill-install boundary. The supervisor spawns a
+container rather than a direct `claude` subprocess; the container has:
 
 - Its own rootfs or bind-mounted workspace tempdir as `/workspace` (cwd)
+- A bind-mount of `/var/lib/garrison/skills/<agent-id>/` into
+  `/workspace/.claude/skills` for per-agent installed skills (see
+  `docs/research/m7-spike.md` §4)
 - Host filesystem hidden
 - Network policy controlling what external APIs the agent can reach
 - Env vars for vault-injected secrets (the vault injects into the container, not the host process)
@@ -56,9 +67,17 @@ This solves all three concerns above:
 - Diary-vs-reality consistency: paths in the container are unambiguous (the only `changes/` that exists is the workspace's)
 - QA cross-check: less load-bearing when paths can't diverge, but the QA agent.md can still be tightened
 
-## Interim mitigations (before M2.3 + Docker)
+The base image is M5.1's `garrison-claude:m5` (already proven for the chat
+runtime) extended with the agent's installed skills. Adding `POST
+/containers/create` to the docker-socket-proxy allow-list is a one-time
+threat-model amendment that lands with M7 — see M7 spike §4 Q6.
 
-If you want to keep running compliance experiments on the host before the containerization work lands:
+## Interim mitigations (until M7 ships)
+
+The original three options below stand for any compliance experiments
+between now and M7. M2.3 → M5.4 all shipped on the original direct-exec
+runtime; Option A (`chdir` into workspace tempdir) was never wired in but
+remains the cheapest stop-gap if you need it before M7.
 
 - **Option A**: `chdir` the supervisor subprocess into the workspace tempdir before spawning claude. One-line change in `internal/spawn` (probably `spawn.go`'s `exec.Cmd.Dir` field). Doesn't prevent absolute-path writes but eliminates the "fallback cwd is operator home" problem.
 - **Option B**: Run experiments as a different OS user with no meaningful home directory (e.g. a `garrison-test` user). Quick to set up, doesn't solve the fundamental problem but contains blast radius.

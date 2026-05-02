@@ -21,6 +21,11 @@ export type TicketCreatedEvent = {
   ticketId: string;
   deptSlug: string;
   targetColumn: string;
+  /** M6 / T017 — parent ticket id for chat-driven decomposition.
+   *  Null for top-level (operator-initiated) creates. Surfaces in
+   *  the activity feed and in the per-ticket audit trail so a
+   *  decomposition is traceable from kanban → activity. */
+  parentTicketId?: string | null;
 };
 
 export type TicketMovedEvent = {

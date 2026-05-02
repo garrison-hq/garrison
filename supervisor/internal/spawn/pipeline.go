@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"syscall"
+	"time"
 
 	"github.com/garrison-hq/garrison/supervisor/internal/claudeproto"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -164,6 +165,13 @@ type FinalizePolicy struct {
 	// closure was passed as a separate Run() parameter; the Policy
 	// refactor consolidates lifecycle state into the policy struct.
 	bailFn func(reason string)
+
+	// M6 T008: rate-limit actuator closure. Stored on the policy
+	// struct (not the finalizeHook) so non-finalize-expected roles
+	// also benefit from the per-company pause when claude rejects
+	// requests for budget reasons. Nil disables the actuator (test
+	// paths + back-compat).
+	onRateLimitRejected func(ctx context.Context, e claudeproto.RateLimitEvent)
 }
 
 // finalizeHook is the internal wiring for T006/T007. It bundles the
@@ -181,6 +189,19 @@ type finalizeHook struct {
 	// toolUseInputs maps tool_use_id → raw input JSON so OnUser can
 	// forward the original payload to OnCommit without re-parsing.
 	toolUseInputs map[string][]byte
+
+	// M6 T006: result-grace fields. resultGrace > 0 enables the
+	// deferred-commit path — handleFinalizeToolResult marks Committed
+	// = true + stashes the validated payload + sets pendingCommit, but
+	// does NOT call onCommit immediately. Run() consumes the pending-
+	// commit signal, waits up to resultGrace for the result event to
+	// land naturally (so result.TotalCostUSD is populated), and then
+	// fires onCommit. resultGrace == 0 preserves the M2.2.1 synchronous
+	// commit shape for tests + flows that don't carry a Deps with the
+	// new field set.
+	resultGrace    time.Duration
+	pendingCommit  bool
+	pendingPayload json.RawMessage
 }
 
 // FinalizeDeps is the public constructor argument Run accepts. Expected
@@ -190,12 +211,32 @@ type finalizeHook struct {
 type FinalizeDeps struct {
 	Expected bool
 	State    *FinalizeState
-	// OnCommit is invoked synchronously from the stream parser on the
-	// first successful finalize_ticket tool_result. Returning a non-nil
-	// error is logged at error level and translates to
-	// ExitFinalizeCommitFailed downstream; the stream parser continues
-	// reading either way. payload carries the raw input that validated.
+	// OnCommit is invoked from the stream parser on the first successful
+	// finalize_ticket tool_result. Returning a non-nil error is logged
+	// at error level and translates to ExitFinalizeCommitFailed downstream;
+	// the stream parser continues reading either way. payload carries the
+	// raw input that validated.
+	//
+	// M6 T006: when ResultGrace > 0, OnCommit fires AFTER Run observes
+	// either result.ResultSeen=true or the grace window expires. This
+	// closes the cost-telemetry blind-spot (docs/issues/cost-telemetry-
+	// blind-spot.md): the OnCommit callback reads result.TotalCostUSD
+	// at firing time, so the deferred firing means the callback sees
+	// the populated cost value instead of the empty pre-result string.
 	OnCommit func(payload json.RawMessage) error
+	// ResultGrace is the post-commit grace window the pipeline waits
+	// for the result event to arrive. Zero preserves M2.2.1 synchronous
+	// commit semantics; positive values enable the deferred-commit path.
+	// spawn.Deps.FinalizeResultGrace flows here at construction time.
+	ResultGrace time.Duration
+	// M6 T008: OnRateLimitRejected fires when a rate_limit_event lands
+	// with Status == "rejected". spawn.go wires a closure that opens a
+	// short independent tx and calls throttle.FirePause; tests inject
+	// a recording closure to verify the actuator fires only on
+	// rejected (not on warn/using_overage). Nil disables the actuator
+	// (back-compat shape for existing tests + non-rate-limit-aware
+	// flows).
+	OnRateLimitRejected func(ctx context.Context, e claudeproto.RateLimitEvent)
 }
 
 // isFinalizeToolName matches either the bare tool name or Claude's
@@ -406,21 +447,7 @@ func (p *FinalizePolicy) handleFinalizeToolResult(tr claudeproto.ToolResultSumma
 	)
 
 	if body.Ok {
-		// Fire the commit callback with the original tool_use input.
-		payload := p.finalize.toolUseInputs[tr.ToolUseID]
-		p.finalize.state.Committed = true
-		if p.finalize.onCommit != nil {
-			if err := p.finalize.onCommit(payload); err != nil {
-				// Commit callback failures (T007 rollbacks, etc.) are
-				// logged here; T007's WriteFinalize writes the matching
-				// terminal row via its own error paths so we don't
-				// double-book.
-				p.logger.Error("finalize onCommit returned error",
-					"instance_id", uuidString(p.instanceID),
-					"ticket_id", uuidString(p.ticketID),
-					"err", err)
-			}
-		}
+		p.handleFinalizeOK(tr.ToolUseID)
 		return
 	}
 
@@ -437,7 +464,35 @@ func (p *FinalizePolicy) handleFinalizeToolResult(tr claudeproto.ToolResultSumma
 	}
 }
 
-func (p *FinalizePolicy) OnRateLimit(_ context.Context, e claudeproto.RateLimitEvent) {
+// handleFinalizeOK is the M6 T006 commit branch extracted out of
+// handleFinalizeToolResult: it sets Committed=true and either fires
+// onCommit synchronously (M2.2.1 semantics, ResultGrace == 0) or
+// stashes the payload for Run() to fire later (M6 deferred-commit
+// path). Pulled into its own method to keep the parent's cognitive
+// complexity within the linter ceiling.
+func (p *FinalizePolicy) handleFinalizeOK(toolUseID string) {
+	payload := p.finalize.toolUseInputs[toolUseID]
+	p.finalize.state.Committed = true
+	if p.finalize.resultGrace > 0 && p.finalize.onCommit != nil {
+		p.finalize.pendingCommit = true
+		p.finalize.pendingPayload = payload
+		return
+	}
+	if p.finalize.onCommit == nil {
+		return
+	}
+	if err := p.finalize.onCommit(payload); err != nil {
+		// Commit callback failures (T007 rollbacks, etc.) are logged
+		// here; T007's WriteFinalize writes the matching terminal row
+		// via its own error paths so we don't double-book.
+		p.logger.Error("finalize onCommit returned error",
+			"instance_id", uuidString(p.instanceID),
+			"ticket_id", uuidString(p.ticketID),
+			"err", err)
+	}
+}
+
+func (p *FinalizePolicy) OnRateLimit(ctx context.Context, e claudeproto.RateLimitEvent) {
 	p.logger.Warn("claude rate_limit_event",
 		"instance_id", uuidString(p.instanceID),
 		"session_id", e.SessionID,
@@ -448,6 +503,17 @@ func (p *FinalizePolicy) OnRateLimit(_ context.Context, e claudeproto.RateLimitE
 		"utilization", e.Info.Utilization,
 		"is_using_overage", e.Info.IsUsingOverage,
 		"surpassed_threshold", e.Info.SurpassedThreshold)
+
+	// M6 T008: fire the rate-limit-pause actuator only on hard rejection.
+	// "warn" / "using_overage" are observational; "rejected" means claude
+	// refused the request and the supervisor should pause spawns for
+	// this company until the back-off elapses. The actuator runs in a
+	// short independent tx (composed by spawn.go) so it doesn't block
+	// the in-flight stream read; FirePause failures are logged at warn
+	// level and the in-flight spawn keeps running per FR-043.
+	if e.Info.Status == "rejected" && p.onRateLimitRejected != nil {
+		p.onRateLimitRejected(ctx, e)
+	}
 }
 
 func (p *FinalizePolicy) OnResult(_ context.Context, e claudeproto.ResultEvent) {
@@ -574,32 +640,183 @@ func Run(
 		return Result{}, errors.New("pipeline: policy is required")
 	}
 
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 0, 64<<10), stdoutBufferMax)
+	// M6 T006: pump the scanner output through a channel so the main
+	// loop can select on (a) a new stream line, (b) a grace-window
+	// timer that fires after a finalize commit deferred its onCommit
+	// callback, and (c) ctx cancellation. Pre-M6 the scanner ran
+	// directly inline; that shape couldn't compose a wait because
+	// scanner.Scan() blocks on the read syscall, leaving no opening
+	// for a timer or context check between events.
+	scannerCtx, cancelScanner := context.WithCancel(ctx)
+	defer cancelScanner()
+	streamEvents := startScannerPump(scannerCtx, stdout)
 
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-		// Copy the scanner's internal buffer — claudeproto keeps the Raw
-		// slice for logging, and the scanner reuses its buffer on the next
-		// call.
-		buf := make([]byte, len(line))
-		copy(buf, line)
+	fp, _ := policy.(*FinalizePolicy) // nil for non-finalize policies
+	loop := &runLoop{policy: policy, fp: fp, logger: logger}
+	defer loop.stop()
 
-		if err := dispatchStreamLine(ctx, buf, policy, logger); err != nil {
-			return policy.Result(), err
+	for {
+		done, res, err := loop.step(ctx, streamEvents)
+		if done {
+			return res, err
 		}
-		// On bail we keep draining so we collect any follow-on events the
-		// subprocess may emit before it exits — but stop on the next
-		// read error, which is how the drain naturally terminates once
-		// the process dies.
 	}
-	if err := scanner.Err(); err != nil && !errors.Is(err, io.EOF) {
-		return policy.Result(), fmt.Errorf("pipeline: scan: %w", err)
+}
+
+// scanItem is the unit produced by startScannerPump's goroutine; line
+// carries a non-zero claude-stream NDJSON line, err carries a scanner
+// failure (non-nil error from scanner.Err()).
+type scanItem struct {
+	line []byte
+	err  error
+}
+
+// startScannerPump runs the bufio.Scanner read loop on a dedicated
+// goroutine and yields each non-empty line on the returned channel. The
+// channel closes when the scanner reaches EOF or the supplied ctx is
+// cancelled (defensive: callers cancel after Run returns so the
+// goroutine isn't leaked when production stdout is held open by a
+// stalled child process).
+func startScannerPump(ctx context.Context, stdout io.Reader) <-chan scanItem {
+	streamEvents := make(chan scanItem, 1)
+	go func() {
+		defer close(streamEvents)
+		scanner := bufio.NewScanner(stdout)
+		scanner.Buffer(make([]byte, 0, 64<<10), stdoutBufferMax)
+		for scanner.Scan() {
+			line := scanner.Bytes()
+			if len(line) == 0 {
+				continue
+			}
+			buf := make([]byte, len(line))
+			copy(buf, line)
+			select {
+			case streamEvents <- scanItem{line: buf}:
+			case <-ctx.Done():
+				return
+			}
+		}
+		if err := scanner.Err(); err != nil && !errors.Is(err, io.EOF) {
+			select {
+			case streamEvents <- scanItem{err: err}:
+			case <-ctx.Done():
+			}
+		}
+	}()
+	return streamEvents
+}
+
+// graceTickInterval is the periodic re-check cadence inside the
+// post-deferred-commit grace window. 50ms balances responsiveness
+// against scheduler overhead — the deferred commit fires when either
+// the result event lands or the grace window expires; the ticker is
+// the watchdog for the latter when the scanner is starved.
+const graceTickInterval = 50 * time.Millisecond
+
+// runLoop holds Run's mutable per-call state so the select-loop body
+// can be extracted into step() without each branch passing 6+ args.
+// ctx is intentionally NOT a field — it's passed to each step() call
+// per Go's idiomatic ctx-as-first-parameter rule.
+type runLoop struct {
+	policy  Policy
+	fp      *FinalizePolicy
+	logger  *slog.Logger
+	graceCh <-chan time.Time
+	ticker  *time.Ticker
+}
+
+// step runs one iteration of the post-scanner select loop. Returns
+// (done=true, ...) when Run should return to its caller; (done=false,
+// ...) when the loop should keep iterating. Pulled out of Run so the
+// per-branch logic is straight-line code rather than a deeply nested
+// select.
+func (l *runLoop) step(ctx context.Context, streamEvents <-chan scanItem) (bool, Result, error) {
+	var tickC <-chan time.Time
+	if l.ticker != nil {
+		tickC = l.ticker.C
 	}
-	return policy.Result(), nil
+	select {
+	case sr, ok := <-streamEvents:
+		return l.onStream(ctx, sr, ok)
+	case <-l.graceCh:
+		// Grace window expired. Fire pending commit (cost may still
+		// be NULL — that's the FR-021 failure-mode contract).
+		l.firePending()
+		return true, l.policy.Result(), nil
+	case <-tickC:
+		// Periodic re-check during the grace window. If the result
+		// event landed via a stream-events tick we may have already
+		// fired the commit; this branch covers the edge where the
+		// scanner is starved (claude paused) and we want a
+		// 50-ms-bounded re-check loop per the task spec.
+		if l.fp != nil && l.fp.HasPendingCommit() && l.policy.Result().ResultSeen {
+			l.firePending()
+			return true, l.policy.Result(), nil
+		}
+		return false, Result{}, nil
+	case <-ctx.Done():
+		// SIGTERM. Fire any pending commit so we don't drop the audit
+		// row, but preserve the ctx err for the caller.
+		l.firePending()
+		return true, l.policy.Result(), ctx.Err()
+	}
+}
+
+// onStream handles one item from the scanner-pump channel. Returns
+// (done=true, ...) on EOF, scan error, or dispatch error; otherwise
+// inspects whether the policy just deferred a commit and, if so, either
+// fires it immediately (result already seen) or arms the grace window.
+func (l *runLoop) onStream(ctx context.Context, sr scanItem, ok bool) (bool, Result, error) {
+	if !ok {
+		// Scanner exited (EOF or read error already drained).
+		l.firePending()
+		return true, l.policy.Result(), nil
+	}
+	if sr.err != nil {
+		l.firePending()
+		return true, l.policy.Result(), fmt.Errorf("pipeline: scan: %w", sr.err)
+	}
+	if err := dispatchStreamLine(ctx, sr.line, l.policy, l.logger); err != nil {
+		l.firePending()
+		return true, l.policy.Result(), err
+	}
+	if l.fp != nil && l.fp.HasPendingCommit() {
+		if l.policy.Result().ResultSeen {
+			l.firePending()
+			return true, l.policy.Result(), nil
+		}
+		l.armGraceTimer()
+	}
+	return false, Result{}, nil
+}
+
+// armGraceTimer starts the deferred-commit grace window + 50ms
+// re-check ticker on first observation of a pending commit. Subsequent
+// calls are no-ops (the grace channel stays armed until a return path
+// takes it).
+func (l *runLoop) armGraceTimer() {
+	if l.graceCh != nil || l.fp == nil || l.fp.finalize == nil {
+		return
+	}
+	l.graceCh = time.After(l.fp.finalize.resultGrace)
+	l.ticker = time.NewTicker(graceTickInterval)
+}
+
+// firePending fires a deferred onCommit if one is queued. Errors are
+// already logged inside FirePendingCommit; we ignore the return so an
+// error doesn't shadow the in-flight ctx error or scanner error.
+func (l *runLoop) firePending() {
+	if l.fp != nil && l.fp.HasPendingCommit() {
+		_ = l.fp.FirePendingCommit()
+	}
+}
+
+// stop releases the grace ticker. Idempotent; safe to call from defer.
+func (l *runLoop) stop() {
+	if l.ticker != nil {
+		l.ticker.Stop()
+		l.ticker = nil
+	}
 }
 
 // NewFinalizePolicy constructs the FinalizePolicy the scanner loop
@@ -628,13 +845,48 @@ func NewFinalizePolicy(
 	}
 	if finalize.Expected && finalize.State != nil {
 		r.finalize = &finalizeHook{
-			state:    finalize.State,
-			onCommit: finalize.OnCommit,
-			onBail:   onBail,
+			state:       finalize.State,
+			onCommit:    finalize.OnCommit,
+			onBail:      onBail,
+			resultGrace: finalize.ResultGrace,
 		}
 		finalize.State.Expected = true
 	}
+	r.onRateLimitRejected = finalize.OnRateLimitRejected
 	return r
+}
+
+// HasPendingCommit reports whether handleFinalizeToolResult observed a
+// successful finalize tool_result but deferred firing onCommit per the
+// M6 T006 result-grace window. Run() polls this between scanner reads
+// to drive the post-commit wait. Returns false when no finalize hook
+// is wired (non-finalize-expected roles).
+func (p *FinalizePolicy) HasPendingCommit() bool {
+	return p.finalize != nil && p.finalize.pendingCommit
+}
+
+// FirePendingCommit fires the deferred onCommit callback with the
+// stashed payload. Caller-driven (Run() invokes it once result.ResultSeen
+// observes true OR the grace window expires). Idempotent: clearing the
+// pendingCommit flag on entry guarantees a second call is a no-op even
+// if the first fired the callback. Errors from onCommit are logged here
+// (mirroring the M2.2.1 synchronous-commit error-handling shape).
+func (p *FinalizePolicy) FirePendingCommit() error {
+	if p.finalize == nil || !p.finalize.pendingCommit {
+		return nil
+	}
+	p.finalize.pendingCommit = false
+	if p.finalize.onCommit == nil {
+		return nil
+	}
+	if err := p.finalize.onCommit(p.finalize.pendingPayload); err != nil {
+		p.logger.Error("finalize onCommit returned error (deferred path)",
+			"instance_id", uuidString(p.instanceID),
+			"ticket_id", uuidString(p.ticketID),
+			"err", err)
+		return err
+	}
+	return nil
 }
 
 // dispatchStreamLine routes one stream-json line through claudeproto
