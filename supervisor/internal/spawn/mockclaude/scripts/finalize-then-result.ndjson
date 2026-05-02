@@ -1,0 +1,11 @@
+# M6 T006 finalize-then-result fixture — exercises the result-grace window.
+# Order matches how real claude paces the success path: assistant text →
+# finalize tool_use ok=true → (claude pauses) → result event → exit.
+# The supervisor's deferred-onCommit path waits up to FinalizeResultGrace
+# for the result event so total_cost_usd is populated when the row is
+# written.
+#init-mcp-servers [{"name":"postgres","status":"connected"},{"name":"mempalace","status":"connected"},{"name":"finalize","status":"connected"}]
+{"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","content":[{"type":"text","text":"Composing finalize payload."}]}}
+#finalize-tool-use-ok 1 {"ticket_id":"{{TICKET_ID}}","outcome":"M6 T006 fixture — finalize lands then result follows after grace tick","diary_entry":{"rationale":"Validates the cost-telemetry blind-spot fix: result event arrives after finalize, supervisor defers onCommit so total_cost_usd is populated.","artifacts":["changes/m6-t006-{{TICKET_ID}}.md"],"blockers":[],"discoveries":[]},"kg_triples":[{"subject":"agent_instance_mock","predicate":"completed","object":"ticket_{{TICKET_ID}}","valid_from":"now"}]}
+#sleep 500ms
+{"type":"result","subtype":"success","is_error":false,"duration_ms":1450,"duration_api_ms":1100,"total_cost_usd":0.047,"stop_reason":"end_turn","terminal_reason":"completed","result":"Finalized","session_id":"mock-session-m6-t006","permission_denials":[]}

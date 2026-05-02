@@ -5,11 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/garrison-hq/garrison/supervisor/internal/claudeproto"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -791,5 +794,193 @@ func TestFinalizeObserverLogsEveryToolUse(t *testing.T) {
 	}
 	if !strings.Contains(logs, `"error_type":"schema"`) {
 		t.Errorf("log line missing error_type field:\n%s", logs)
+	}
+}
+
+// -------- M6 T006 result-grace window ----------------------------------
+
+// TestFinalizeResultGracePostsHonestCost validates the cost-telemetry
+// blind-spot fix (docs/issues/cost-telemetry-blind-spot.md). The fixture
+// emits the finalize tool_result before the result event with a delay
+// between them; the deferred-onCommit path waits up to ResultGrace for
+// result.ResultSeen=true so onCommit observes a populated TotalCostUSD
+// instead of the empty pre-result string.
+func TestFinalizeResultGracePostsHonestCost(t *testing.T) {
+	const toolUseID = "tu-grace-cost"
+	const inputJSON = `{"ticket_id":"00000000-0000-0000-0000-000000000001","outcome":"x","diary_entry":{"rationale":"y","artifacts":[],"blockers":[],"discoveries":[]},"kg_triples":[]}`
+	assistantLine := fmt.Sprintf(
+		`{"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","content":[{"type":"tool_use","id":"%s","name":"finalize_ticket","input":%s}]}}`,
+		toolUseID, inputJSON,
+	)
+	finalizeOKLine := fmt.Sprintf(
+		`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"%s","is_error":false,"content":[{"type":"text","text":"{\"ok\":true,\"attempt\":1}"}]}]}}`,
+		toolUseID,
+	)
+	resultLine := `{"type":"result","subtype":"success","is_error":false,"duration_ms":1450,"duration_api_ms":1100,"total_cost_usd":0.047,"stop_reason":"end_turn","terminal_reason":"completed","result":"Finalized","session_id":"sess-grace-cost"}`
+
+	pr, pw := io.Pipe()
+	t.Cleanup(func() { _ = pw.Close() })
+
+	result := &Result{}
+	finalizeState := &FinalizeState{}
+
+	var commitCount atomic.Int32
+	var costAtCommit atomic.Pointer[string]
+	var resultSeenAtCommit atomic.Bool
+	onCommit := func(_ json.RawMessage) error {
+		commitCount.Add(1)
+		cost := result.TotalCostUSD
+		costAtCommit.Store(&cost)
+		resultSeenAtCommit.Store(result.ResultSeen)
+		return nil
+	}
+	policy := NewFinalizePolicy(discardLogger(), pgtype.UUID{}, pgtype.UUID{}, result,
+		FinalizeDeps{
+			Expected:    true,
+			State:       finalizeState,
+			OnCommit:    onCommit,
+			ResultGrace: 2 * time.Second,
+		}, nil)
+
+	runDone := make(chan error, 1)
+	go func() {
+		_, err := Run(context.Background(), pr, policy, discardLogger())
+		runDone <- err
+	}()
+
+	// Phase 1: write init + assistant + finalize tool_result. The
+	// deferred-commit path should mark Committed=true but NOT fire
+	// onCommit yet because resultGrace > 0 and the result event
+	// hasn't landed.
+	if _, err := fmt.Fprintln(pw, fixtureInit); err != nil {
+		t.Fatalf("write init: %v", err)
+	}
+	if _, err := fmt.Fprintln(pw, assistantLine); err != nil {
+		t.Fatalf("write assistant: %v", err)
+	}
+	if _, err := fmt.Fprintln(pw, finalizeOKLine); err != nil {
+		t.Fatalf("write finalize ok: %v", err)
+	}
+
+	// Wait briefly so the scanner consumes the lines and the deferred-
+	// commit branch is taken. Confirm onCommit has NOT fired yet.
+	for i := 0; i < 20 && !finalizeState.Committed; i++ {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !finalizeState.Committed {
+		t.Fatalf("expected Committed=true after finalize tool_result")
+	}
+	if commitCount.Load() != 0 {
+		t.Errorf("onCommit fired before result event arrived (count=%d)", commitCount.Load())
+	}
+
+	// Phase 2: send the result event after a small delay; close the
+	// pipe so the scanner reaches EOF and Run returns.
+	time.Sleep(150 * time.Millisecond)
+	if _, err := fmt.Fprintln(pw, resultLine); err != nil {
+		t.Fatalf("write result: %v", err)
+	}
+	if err := pw.Close(); err != nil {
+		t.Fatalf("close pipe: %v", err)
+	}
+
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run did not return within 3s")
+	}
+
+	if commitCount.Load() != 1 {
+		t.Errorf("expected onCommit to fire exactly once; got %d", commitCount.Load())
+	}
+	cost := costAtCommit.Load()
+	if cost == nil || *cost == "" {
+		t.Errorf("expected non-empty cost at commit time; got %v", cost)
+	}
+	if !resultSeenAtCommit.Load() {
+		t.Error("expected ResultSeen=true at commit time")
+	}
+}
+
+// TestFinalizeResultGraceTimesOutGracefully validates the failure-mode
+// contract: when no result event arrives within ResultGrace, onCommit
+// fires anyway with cost still empty. Mirrors the FR-021 promise that
+// the gate doesn't extend SIGTERM grace nor block the spawn-cleanup
+// path indefinitely.
+func TestFinalizeResultGraceTimesOutGracefully(t *testing.T) {
+	const toolUseID = "tu-grace-timeout"
+	const inputJSON = `{"ticket_id":"00000000-0000-0000-0000-000000000002","outcome":"x","diary_entry":{"rationale":"y","artifacts":[],"blockers":[],"discoveries":[]},"kg_triples":[]}`
+	assistantLine := fmt.Sprintf(
+		`{"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","content":[{"type":"tool_use","id":"%s","name":"finalize_ticket","input":%s}]}}`,
+		toolUseID, inputJSON,
+	)
+	finalizeOKLine := fmt.Sprintf(
+		`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"%s","is_error":false,"content":[{"type":"text","text":"{\"ok\":true,\"attempt\":1}"}]}]}}`,
+		toolUseID,
+	)
+
+	pr, pw := io.Pipe()
+	t.Cleanup(func() { _ = pw.Close() })
+
+	result := &Result{}
+	finalizeState := &FinalizeState{}
+
+	var commitCount atomic.Int32
+	var resultSeenAtCommit atomic.Bool
+	onCommit := func(_ json.RawMessage) error {
+		commitCount.Add(1)
+		resultSeenAtCommit.Store(result.ResultSeen)
+		return nil
+	}
+
+	const grace = 200 * time.Millisecond
+	policy := NewFinalizePolicy(discardLogger(), pgtype.UUID{}, pgtype.UUID{}, result,
+		FinalizeDeps{
+			Expected:    true,
+			State:       finalizeState,
+			OnCommit:    onCommit,
+			ResultGrace: grace,
+		}, nil)
+
+	runDone := make(chan error, 1)
+	start := time.Now()
+	go func() {
+		_, err := Run(context.Background(), pr, policy, discardLogger())
+		runDone <- err
+	}()
+
+	if _, err := fmt.Fprintln(pw, fixtureInit); err != nil {
+		t.Fatalf("write init: %v", err)
+	}
+	if _, err := fmt.Fprintln(pw, assistantLine); err != nil {
+		t.Fatalf("write assistant: %v", err)
+	}
+	if _, err := fmt.Fprintln(pw, finalizeOKLine); err != nil {
+		t.Fatalf("write finalize ok: %v", err)
+	}
+	// Do NOT send result event. Run should fire onCommit after the
+	// grace window elapses + return; the scanner will be unblocked
+	// when t.Cleanup closes pw at test exit.
+
+	select {
+	case err := <-runDone:
+		elapsed := time.Since(start)
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if commitCount.Load() != 1 {
+			t.Errorf("expected onCommit to fire exactly once; got %d", commitCount.Load())
+		}
+		if resultSeenAtCommit.Load() {
+			t.Error("expected ResultSeen=false at commit time (no result event)")
+		}
+		if elapsed > grace+500*time.Millisecond {
+			t.Errorf("Run took %v; want close to grace window (%v)", elapsed, grace)
+		}
+	case <-time.After(grace + 1*time.Second):
+		t.Fatalf("Run did not return within grace+1s")
 	}
 }

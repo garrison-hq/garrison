@@ -141,6 +141,15 @@ type Deps struct {
 	Palace               *mempalace.Client
 	FinalizeWriteTimeout time.Duration
 
+	// M6 T006: result-event grace window. Post-finalize-commit, the
+	// pipeline defers the onCommit callback for up to this duration
+	// to give Claude time to emit its `result` event so total_cost_usd
+	// is populated when the row is written. Closes the cost-telemetry
+	// blind-spot documented at docs/issues/cost-telemetry-blind-spot.md.
+	// Zero preserves M2.2.1 synchronous-commit semantics; production
+	// wires from config.FinalizeResultGrace (default 3s).
+	FinalizeResultGrace time.Duration
+
 	// M2.3: vault client (Fetcher interface so tests can inject a mock).
 	// CustomerID scopes grant queries and audit rows to this deployment's
 	// company row (D6.3 / OQ-2). Both are wired from config in cmd/supervisor.
@@ -750,9 +759,10 @@ func runRealClaude(
 		defer close(pipelineDone)
 		result = Result{}
 		policy := NewFinalizePolicy(logger, instanceID, ticketUUID, &result, FinalizeDeps{
-			Expected: finalizeExpected,
-			State:    finalizeState,
-			OnCommit: onCommit,
+			Expected:    finalizeExpected,
+			State:       finalizeState,
+			OnCommit:    onCommit,
+			ResultGrace: deps.FinalizeResultGrace,
 		}, onBail)
 		result, pipelineErr = Run(execCtx, stdout, policy, logger)
 	}()
