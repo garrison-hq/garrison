@@ -96,6 +96,36 @@ func TestFetchRateLimited(t *testing.T) {
 	}
 }
 
+// TestFetchRateLimitedWithinBudget — first response is 429 with a
+// short Retry-After; second attempt succeeds. Covers the retry-loop
+// success-after-retry path.
+func TestFetchRateLimitedWithinBudget(t *testing.T) {
+	wantBody := []byte("post-retry tarball bytes")
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			w.Header().Set("Retry-After", "1") // 1s, well under 30s budget
+			http.Error(w, "slow down", http.StatusTooManyRequests)
+			return
+		}
+		_, _ = w.Write(wantBody)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := NewSkillsShClient(srv.URL, srv.Client())
+	body, _, err := c.Fetch(context.Background(), "foo", "1.0.0")
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if string(body) != string(wantBody) {
+		t.Errorf("body mismatch")
+	}
+	if calls != 2 {
+		t.Errorf("calls=%d; want 2 (retry should fire)", calls)
+	}
+}
+
 // TestFetchServerError — registry returns 5xx; client surfaces
 // ErrRegistryServerError (distinct from Unreachable).
 func TestFetchServerError(t *testing.T) {
