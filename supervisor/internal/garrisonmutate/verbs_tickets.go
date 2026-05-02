@@ -37,6 +37,10 @@ type CreateTicketArgs struct {
 	AcceptanceCriteria string         `json:"acceptance_criteria,omitempty"`
 	ColumnSlug         string         `json:"column_slug,omitempty"`
 	Metadata           map[string]any `json:"metadata,omitempty"`
+	// M6 T010: parent_ticket_id (UUID-shaped string) links this child
+	// to a parent ticket. Validation: parent must exist, share the
+	// child's department_id, and not be in column_slug='done'.
+	ParentTicketID string `json:"parent_ticket_id,omitempty"`
 }
 
 // realCreateTicketHandler implements garrison-mutate.create_ticket.
@@ -88,6 +92,30 @@ func realCreateTicketHandler(ctx context.Context, deps Deps, raw json.RawMessage
 	if columnSlug == "" {
 		columnSlug = "todo"
 	}
+
+	// M6 T010: validate parent_ticket_id if supplied. Cross-table CHECK
+	// can't enforce same-department + non-closed; verb error messages
+	// need to be operator-readable anyway.
+	var parentTicketID pgtype.UUID
+	if trimmed := strings.TrimSpace(args.ParentTicketID); trimmed != "" {
+		if err := parentTicketID.Scan(trimmed); err != nil {
+			return validationFailure("create_ticket: parent_ticket_id is not a valid UUID"), nil
+		}
+		parent, err := q.GetTicketByID(ctx, parentTicketID)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return validationFailure("create_ticket: parent_ticket_id refers to a ticket that does not exist"), nil
+			}
+			return Result{}, fmt.Errorf("create_ticket: lookup parent ticket: %w", err)
+		}
+		if parent.DepartmentID != deptID {
+			return validationFailure("create_ticket: parent_ticket_id is in a different department"), nil
+		}
+		if parent.ColumnSlug == "done" {
+			return validationFailure("create_ticket: parent_ticket_id is already closed"), nil
+		}
+	}
+
 	ticket, err := q.InsertChatTicket(ctx, store.InsertChatTicketParams{
 		DepartmentID:            deptID,
 		Objective:               args.Objective,
@@ -95,6 +123,7 @@ func realCreateTicketHandler(ctx context.Context, deps Deps, raw json.RawMessage
 		ColumnSlug:              columnSlug,
 		Metadata:                metadataJSON,
 		CreatedViaChatSessionID: deps.ChatSessionID,
+		ParentTicketID:          parentTicketID,
 	})
 	if err != nil {
 		return Result{}, fmt.Errorf("create_ticket: insert ticket: %w", err)
