@@ -6,6 +6,7 @@ import {
   type HygieneTabFilter,
 } from '@/lib/queries/hygiene';
 import { listThrottleEvents } from '@/lib/queries/throttle';
+import { Chip } from '@/components/ui/Chip';
 import { HygieneTable } from '@/components/features/hygiene-table/HygieneTable';
 import { HygieneTabStripClient } from '@/components/features/hygiene-table/HygieneTabStripClient';
 import { ThrottleEventsTable } from '@/components/features/hygiene-table/ThrottleEventsTable';
@@ -81,12 +82,9 @@ export default async function HygienePage({
   return (
     <div className="px-6 py-5 space-y-5 max-w-[1600px] mx-auto">
       <header className="space-y-1">
-        <div className="flex items-center justify-between">
-          <h1 className="text-text-1 text-2xl font-semibold tracking-tight">
-            {navT('hygiene')}
-          </h1>
-          <RefreshButton />
-        </div>
+        <h1 className="text-text-1 text-2xl font-semibold tracking-tight">
+          {navT('hygiene')}
+        </h1>
         <p className="text-text-3 text-xs">
           <span className="font-mono font-tabular">{counts.total}</span>{' '}
           {metaT('open')}
@@ -108,9 +106,9 @@ export default async function HygienePage({
           <span className="text-text-3 text-[10.5px] uppercase tracking-[0.08em] font-medium">
             {metaT('openFlags')}
           </span>
-          <span className="text-text-3 text-[11px] font-mono font-tabular">
-            {hygiene.rows.length}
-          </span>
+          <Chip>{hygiene.rows.length}</Chip>
+          <div className="flex-1" />
+          <RefreshButton />
         </header>
         <HygieneTable rows={hygiene.rows} emptyDescription={t('empty')} />
       </section>

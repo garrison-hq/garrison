@@ -116,9 +116,7 @@ export function ThrottleEventsTable({
         <span className="text-text-3 text-[10.5px] uppercase tracking-[0.08em] font-medium">
           {t('throttleEventsHeader')}
         </span>
-        <span className="text-text-3 text-[11px] font-mono font-tabular">
-          {rows.length}
-        </span>
+        <Chip>{rows.length}</Chip>
         {lastError ? (
           <span className="text-warn text-[10.5px] font-mono ml-auto">
             {lastError}
