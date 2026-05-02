@@ -10,15 +10,19 @@ export async function HygieneTable({
   emptyDescription: string;
 }>) {
   if (rows.length === 0) {
+    // min-h matches roughly the height of 6 populated rows so the
+    // page doesn't resize when the operator switches between
+    // failure-mode chips (a high-row mode collapsing to zero would
+    // otherwise jump the layout up by hundreds of px).
     return (
-      <div className="px-4 py-10 text-center text-text-3 text-[12.5px]">
+      <div className="px-4 py-10 text-center text-text-3 text-[12.5px] min-h-[240px] flex items-center justify-center">
         {emptyDescription}
       </div>
     );
   }
   const t = await getTranslations('hygieneMeta.headers');
   return (
-    <div className="overflow-x-auto">
+    <div className="overflow-x-auto min-h-[240px]">
       <table className="w-full">
         <colgroup>
           <col style={{ width: 180 }} />
