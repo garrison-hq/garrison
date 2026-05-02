@@ -193,6 +193,70 @@ func TestBudgetPredicate_NaNCostFlowsThroughAsZero(t *testing.T) {
 	}
 }
 
+// outOfRangeNumeric returns a pgtype.Numeric whose Exp pushes
+// Float64Value's strconv.ParseFloat past math.MaxFloat64, making
+// the conversion return (Float8{Valid:false}, error). Used to
+// pin numericToFloat's error wrapping (the only call shape that
+// actually triggers an error from pgx's Numeric encoder).
+func outOfRangeNumeric() pgtype.Numeric {
+	return pgtype.Numeric{
+		Int:   big.NewInt(1),
+		Exp:   1_000_000,
+		Valid: true,
+	}
+}
+
+// TestNumericToFloat_PropagatesParseError pins numericToFloat's
+// `return 0, err` branch — reachable only when n.Valid=true AND
+// pgx's Float64Value returns (Float8{}, err) (out-of-range exp).
+func TestNumericToFloat_PropagatesParseError(t *testing.T) {
+	_, err := numericToFloat(outOfRangeNumeric())
+	if err == nil {
+		t.Fatal("expected error from out-of-range numeric")
+	}
+}
+
+// TestBudgetPredicate_PropagatesCurrentParseError covers the
+// "evaluateBudget: parse current" wrapper — fires when the
+// rolling-24h Numeric is structurally valid but Float64Value
+// can't reduce it to a float.
+func TestBudgetPredicate_PropagatesCurrentParseError(t *testing.T) {
+	state := store.GetCompanyThrottleStateRow{
+		DailyBudgetUsd: numericFromFloat(t, 1.00),
+		Cost24hUsd:     outOfRangeNumeric(),
+	}
+	_, err := evaluateBudget(state, numericFromFloat(t, 0.10))
+	if err == nil {
+		t.Fatal("expected error from out-of-range Cost24hUsd")
+	}
+}
+
+// TestBudgetPredicate_PropagatesEstimatedParseError covers the
+// "evaluateBudget: parse estimated" wrapper.
+func TestBudgetPredicate_PropagatesEstimatedParseError(t *testing.T) {
+	state := store.GetCompanyThrottleStateRow{
+		DailyBudgetUsd: numericFromFloat(t, 1.00),
+		Cost24hUsd:     numericFromFloat(t, 0.10),
+	}
+	_, err := evaluateBudget(state, outOfRangeNumeric())
+	if err == nil {
+		t.Fatal("expected error from out-of-range estimated")
+	}
+}
+
+// TestBudgetPredicate_PropagatesBudgetParseError covers the
+// "evaluateBudget: parse budget" wrapper.
+func TestBudgetPredicate_PropagatesBudgetParseError(t *testing.T) {
+	state := store.GetCompanyThrottleStateRow{
+		DailyBudgetUsd: outOfRangeNumeric(),
+		Cost24hUsd:     numericFromFloat(t, 0.10),
+	}
+	_, err := evaluateBudget(state, numericFromFloat(t, 0.10))
+	if err == nil {
+		t.Fatal("expected error from out-of-range DailyBudgetUsd")
+	}
+}
+
 // TestUUIDStringEmptyForInvalid — pins the uuidString invalid-input
 // branch. Used by insertEventAndNotify; the production call sites
 // always pass Valid UUIDs but the helper is defensive.

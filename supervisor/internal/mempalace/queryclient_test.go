@@ -402,3 +402,79 @@ func TestKgQueryByTicketID_PropagatesDockerExecError(t *testing.T) {
 		t.Errorf("error %v should wrap ErrSidecarUnreachable", err)
 	}
 }
+
+// TestKgQueryByTicketID_NoExecReturnsErr — pins the Exec==nil guard
+// distinct from MissingPalaceConfig (which short-circuits earlier on
+// container/path). Container + Path set, Exec nil → ErrSidecarUnreachable.
+func TestKgQueryByTicketID_NoExecReturnsErr(t *testing.T) {
+	c := &QueryClient{MempalaceContainer: "x", PalacePath: "/y"}
+	_, err := c.KgQueryByTicketID(context.Background(), "ticket_x")
+	if err == nil || !errors.Is(err, ErrSidecarUnreachable) {
+		t.Errorf("expected ErrSidecarUnreachable; got %v", err)
+	}
+}
+
+// TestKgQueryByTicketID_PropagatesParseError — sidecar returns junk
+// bytes that don't decode as MCP framing; client surfaces
+// ErrSidecarUnreachable wrapping the parse error.
+func TestKgQueryByTicketID_PropagatesParseError(t *testing.T) {
+	fake := &fakeQueryExec{stdout: []byte("not even close to MCP json\n")}
+	c := newQueryClientWithFake(fake)
+	_, err := c.KgQueryByTicketID(context.Background(), "ticket_x")
+	if err == nil {
+		t.Fatal("expected parse error")
+	}
+	if !errors.Is(err, ErrSidecarUnreachable) {
+		t.Errorf("error %v should wrap ErrSidecarUnreachable", err)
+	}
+}
+
+// TestKgQueryByTicketID_DefaultTimeoutWhenZero — Timeout==0 falls
+// through to the 10s default; the client still completes the call
+// against the fake. Pinning this branch keeps the default-timeout
+// line out of the new-coverage denominator regression list.
+func TestKgQueryByTicketID_DefaultTimeoutWhenZero(t *testing.T) {
+	payload := `{"triples":[]}`
+	fake := &fakeQueryExec{stdout: []byte(initOK + drawerToolCallResponse(payload))}
+	c := &QueryClient{
+		MempalaceContainer: "x",
+		PalacePath:         "/y",
+		Exec:               fake,
+		// Timeout intentionally zero — exercises the default-fallback branch.
+	}
+	got, err := c.KgQueryByTicketID(context.Background(), "ticket_x")
+	if err != nil {
+		t.Fatalf("KgQueryByTicketID with default timeout: %v", err)
+	}
+	if got != nil && len(got) != 0 {
+		t.Errorf("expected empty result; got %v", got)
+	}
+}
+
+// TestRecentKGTriples_PropagatesDockerExecError — exec failure path
+// (line currently uncovered in M6 new-code period).
+func TestRecentKGTriples_PropagatesDockerExecError(t *testing.T) {
+	fake := &fakeQueryExec{err: errors.New("docker exec died")}
+	c := newQueryClientWithFake(fake)
+	_, err := c.RecentKGTriples(context.Background(), 10)
+	if err == nil {
+		t.Fatal("expected error from Exec failure")
+	}
+	if !errors.Is(err, ErrSidecarUnreachable) {
+		t.Errorf("error %v should wrap ErrSidecarUnreachable", err)
+	}
+}
+
+// TestRecentKGTriples_PropagatesParseError — sidecar emits non-MCP
+// bytes; client surfaces ErrSidecarUnreachable.
+func TestRecentKGTriples_PropagatesParseError(t *testing.T) {
+	fake := &fakeQueryExec{stdout: []byte("garbage\n")}
+	c := newQueryClientWithFake(fake)
+	_, err := c.RecentKGTriples(context.Background(), 10)
+	if err == nil {
+		t.Fatal("expected parse error")
+	}
+	if !errors.Is(err, ErrSidecarUnreachable) {
+		t.Errorf("error %v should wrap ErrSidecarUnreachable", err)
+	}
+}
