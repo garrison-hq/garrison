@@ -23,6 +23,7 @@ import (
 	"github.com/garrison-hq/garrison/supervisor/internal/mcpconfig"
 	"github.com/garrison-hq/garrison/supervisor/internal/mempalace"
 	"github.com/garrison-hq/garrison/supervisor/internal/store"
+	"github.com/garrison-hq/garrison/supervisor/internal/throttle"
 	"github.com/garrison-hq/garrison/supervisor/internal/vault"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -150,6 +151,13 @@ type Deps struct {
 	// wires from config.FinalizeResultGrace (default 3s).
 	FinalizeResultGrace time.Duration
 
+	// M6 T007: throttle gate dependencies. Constructed once at
+	// supervisor boot (cmd/supervisor/main.go) and shared with the
+	// pipeline OnRateLimit observer (T008). Zero-value Deps disables
+	// the gate (Pool=nil short-circuits Check); used by M2.x
+	// integration tests + chaos suites that don't seed company rows.
+	Throttle throttle.Deps
+
 	// M2.3: vault client (Fetcher interface so tests can inject a mock).
 	// CustomerID scopes grant queries and audit rows to this deployment's
 	// company row (D6.3 / OQ-2). Both are wired from config in cmd/supervisor.
@@ -204,6 +212,12 @@ func Spawn(ctx context.Context, deps Deps, eventID pgtype.UUID, roleSlug string)
 		roleSlug = "engineer" // M1/M2.1 back-compat default for fake-agent test paths
 	}
 	prep, err := prepareSpawn(ctx, deps, eventID, roleSlug)
+	// M6 T007: throttle deferral is not an error from the dispatcher's
+	// perspective — it's a "leave event_outbox unprocessed and try again
+	// next poll" signal that mirrors the concurrency-cap-deferred path.
+	if errors.Is(err, ErrSpawnDeferred) {
+		return nil
+	}
 	if err != nil || prep.done {
 		return err
 	}
@@ -271,6 +285,46 @@ func prepareSpawn(ctx context.Context, deps Deps, eventID pgtype.UUID, roleSlug 
 			"running", running,
 		)
 		return spawnPrep{done: true}, nil
+	}
+
+	// M6 T007: throttle gate. Companies opt-in via daily_budget_usd
+	// (set by the operator); pause_until is set by OnRateLimit (T008).
+	// Both are NULL by default so the gate is fully back-compat — the
+	// CheckThrottle helper short-circuits to "allow" when the deps
+	// pool is nil (test/back-compat path).
+	if dept.CompanyID.Valid && deps.Throttle.Pool != nil {
+		decision, err := throttle.Check(ctx, deps.Throttle, q, dept.CompanyID)
+		if err != nil {
+			_ = tx.Rollback(ctx)
+			return spawnPrep{}, fmt.Errorf("spawn: throttle.Check: %w", err)
+		}
+		if !decision.Allowed {
+			// Audit: budget defer fires the throttle_events row + notify
+			// here; rate-limit pause was already audited by OnRateLimit
+			// when the rate-limit event landed (T008 wires that path).
+			if decision.Kind == throttle.KindCompanyBudgetExceeded {
+				if err := throttle.FireBudgetDefer(ctx, q, dept.CompanyID,
+					/* current */ pgtype.Numeric{},
+					/* estimated */ deps.Throttle.DefaultSpawnCostUSD,
+					/* budget */ pgtype.Numeric{},
+				); err != nil {
+					deps.Logger.Warn("throttle: FireBudgetDefer failed; deferring without audit",
+						"event_id", formatUUID(eventID),
+						"company_id", formatUUID(dept.CompanyID),
+						"err", err,
+					)
+				}
+			}
+			if err := tx.Commit(ctx); err != nil {
+				return spawnPrep{}, fmt.Errorf("spawn: commit throttle audit: %w", err)
+			}
+			deps.Logger.Info("defer: throttle gate",
+				"event_id", formatUUID(eventID),
+				"company_id", formatUUID(dept.CompanyID),
+				"kind", decision.Kind,
+			)
+			return spawnPrep{}, ErrSpawnDeferred
+		}
 	}
 
 	instanceID, err := q.InsertRunningInstance(ctx, store.InsertRunningInstanceParams{
