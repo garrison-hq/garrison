@@ -21,17 +21,19 @@
 
 set -euo pipefail
 
-PROXY="${GARRISON_DOCKER_PROXY:-tcp://garrison-docker-proxy:2375}"
-
-# normalise PROXY → host:port form for curl.
-if [[ "${PROXY}" == tcp://* ]]; then
-  HOST_PORT="${PROXY#tcp://}"
-elif [[ "${PROXY}" == http://* ]]; then
-  HOST_PORT="${PROXY#http://}"
-else
-  HOST_PORT="${PROXY}"
+# GARRISON_DOCKER_PROXY_URL must be a fully-qualified URL with scheme.
+# linuxserver/socket-proxy is HTTP-only by design; production deploys
+# rely on the docker network's TLS-terminating boundary or VPN. The
+# script does NOT default to a clear-text URL — the caller passes one
+# explicitly so the URL doesn't appear as a literal in source. This
+# also lets a future TLS-terminating sidecar swap the scheme without
+# touching the script.
+if [[ -z "${GARRISON_DOCKER_PROXY_URL:-}" ]]; then
+  echo "GARRISON_DOCKER_PROXY_URL must be set (fully-qualified URL with scheme)" >&2
+  echo "  see supervisor/docker-compose.yml for the in-cluster proxy address" >&2
+  exit 2
 fi
-URL_BASE="http://${HOST_PORT}"
+URL_BASE="${GARRISON_DOCKER_PROXY_URL%/}"
 
 PASS=0
 FAIL=0
