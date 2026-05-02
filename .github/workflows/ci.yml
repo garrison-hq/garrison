@@ -230,7 +230,17 @@ jobs:
       # viewport doesn't already pin. Re-run all three locally
       # before a release.
       - name: Run Playwright integration suite
-        run: bunx playwright@1.59.1 test --project=chromium-1280
+        # Invokes the workspace-installed binary directly. The earlier
+        # `bunx playwright@1.59.1 test` form fetched a second copy of
+        # @playwright/test through bunx's package cache, so the test
+        # runner saw two distinct @playwright/test instances and refused
+        # to register `test.describe()` calls (PR #13 → main CI break,
+        # 2026-05-01). Using `./node_modules/.bin/playwright` keeps
+        # everything resolving through the lockfile-pinned 1.59.1 copy
+        # in dashboard/node_modules; no bunx involvement, no Sonar
+        # bash:S7634-family warning either (this isn't an install
+        # command — it's an already-installed binary running).
+        run: ./node_modules/.bin/playwright test --project=chromium-1280
       # Path A — server-side V8 coverage. The Playwright harness
       # spawns the dashboard with NODE_V8_COVERAGE; this step
       # converts those profiles to lcov via v8-to-istanbul.
