@@ -107,6 +107,12 @@ type Deps struct {
 	// at the cmd/supervisor wiring layer.
 	ToolCallCeiling int
 
+	// MaxTicketsPerTurn caps the per-turn invocations of
+	// mcp__garrison-mutate__create_ticket (M6 T011, spec FR-004/005).
+	// Independent of ToolCallCeiling — both can fire in the same turn.
+	// Default 10 if unset; tuned via GARRISON_CHAT_MAX_TICKETS_PER_TURN.
+	MaxTicketsPerTurn int
+
 	// ShutdownSignalGrace bounds the SIGTERM-to-SIGKILL escalation
 	// window for the chat docker subprocess. AGENTS.md concurrency
 	// rule 7. Reused from spawn.ShutdownSignalGrace.
