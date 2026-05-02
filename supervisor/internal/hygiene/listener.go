@@ -52,6 +52,21 @@ type Deps struct {
 	// ctx cancellation (FR-217). Inherits spawn.TerminalWriteGrace.
 	TerminalWriteGrace time.Duration
 
+	// M6 T012 / T013: ThinDiaryThreshold > 0 enables the M6 evaluator
+	// path (StatusThinDiary + StatusMissingKgFacts supersede the
+	// legacy StatusThin / StatusMissingKG vocabulary). Production
+	// wires from cfg.ThinDiaryThreshold (default 200).
+	ThinDiaryThreshold int
+
+	// M6 T012: KGFactsQuery is an optional ticket-keyed kg_query
+	// callback that returns the KG triples mentioning the supplied
+	// ticket id text. When set, the listener calls it post-palace-
+	// query and feeds the result into EvaluationInput.
+	// KGFactsForTicket so the M6 missing_kg_facts predicate can
+	// fire on truly empty KG state. Nil disables the predicate
+	// (predicate skips per evaluator.go's nil-check).
+	KGFactsQuery func(ctx context.Context, ticketIDText string) ([]PalaceTriple, error)
+
 	// Channels lists the LISTEN channels to subscribe to. M2.2 registers
 	// exactly ["work.ticket.transitioned.engineering.in_dev.qa_review",
 	// "work.ticket.transitioned.engineering.qa_review.done"] but the slice
@@ -275,14 +290,29 @@ func evaluateAndWrite(ctx context.Context, deps Deps, transitionID, ticketID, ag
 
 	drawers, triples, palaceErr := deps.Palace.Query(ctx, ticketIDText, palaceWing, queryWin)
 
+	// M6 T012: optional ticket-keyed KG query. The listener feeds the
+	// result (or nil + err) into EvaluationInput so the M6 evaluator
+	// path can fire missing_kg_facts on empty KG state. Skipped when
+	// the operator hasn't wired the callback (deps.KGFactsQuery is
+	// nil) — predicate falls back to "not computed" via the
+	// evaluator's nil-check.
+	var kgFacts []PalaceTriple
+	var kgFactsErr error
+	if deps.KGFactsQuery != nil {
+		kgFacts, kgFactsErr = deps.KGFactsQuery(ctx, ticketIDText)
+	}
+
 	status := Evaluate(EvaluationInput{
-		TicketIDText:   ticketIDText,
-		RunWindowStart: win.StartedAt.Time,
-		RunWindowEnd:   windowEnd,
-		PalaceWing:     palaceWing,
-		Drawers:        drawers,
-		KGTriples:      triples,
-		PalaceErr:      palaceErr,
+		TicketIDText:        ticketIDText,
+		RunWindowStart:      win.StartedAt.Time,
+		RunWindowEnd:        windowEnd,
+		PalaceWing:          palaceWing,
+		Drawers:             drawers,
+		KGTriples:           triples,
+		PalaceErr:           palaceErr,
+		ThinDiaryThreshold:  deps.ThinDiaryThreshold,
+		KGFactsForTicket:    kgFacts,
+		KGFactsForTicketErr: kgFactsErr,
 	})
 
 	// Terminal-write discipline per FR-217: use a detached ctx plus the

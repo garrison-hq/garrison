@@ -199,9 +199,13 @@ func Evaluate(in EvaluationInput) Status {
 		if len(matchingDiary.Body) < in.ThinDiaryThreshold {
 			return StatusThinDiary
 		}
-		// Sidecar failure → skip the missing_kg_facts predicate per
-		// the soft-gates posture (Constitution IV).
-		if in.KGFactsForTicketErr == nil && len(in.KGFactsForTicket) == 0 {
+		// Fire missing_kg_facts only when the caller actually
+		// populated the KG-facts result (non-nil slice, even if
+		// empty). nil means "not computed by this caller" — skip
+		// the predicate rather than misfire.  Sidecar-failure
+		// (KGFactsForTicketErr != nil) skips per the soft-gates
+		// posture (Constitution IV).
+		if in.KGFactsForTicket != nil && in.KGFactsForTicketErr == nil && len(in.KGFactsForTicket) == 0 {
 			return StatusMissingKgFacts
 		}
 		return StatusClean

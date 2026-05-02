@@ -324,6 +324,19 @@ func runDaemon() int {
 	// TerminalWriteGrace per FR-217. GARRISON_DISABLE_PALACE_BOOTSTRAP
 	// gates these off alongside the bootstrap itself (same test-hook).
 	if !cfg.UseFakeAgent && !cfg.DisablePalaceBootstrap {
+		// M6 T012 / T013: ticket-keyed kg_query callback feeds the
+		// listener's missing_kg_facts predicate. Constructs a fresh
+		// QueryClient that shares the docker-exec wiring with
+		// sharedPalaceClient (same DockerExec interface, same
+		// container, same palace path). Returns a slice typed as
+		// hygiene.PalaceTriple = mempalace.Triple via the alias the
+		// hygiene package re-exports.
+		palaceQueryClient := mempalace.NewQueryClient(
+			sharedPalaceClient.Exec,
+			cfg.MempalaceContainer,
+			cfg.PalacePath,
+			logger,
+		)
 		hygieneDeps := hygiene.Deps{
 			DSN:                cfg.AgentMempalaceDSN(),
 			Dialer:             pgdb.NewRealDialer(),
@@ -334,6 +347,28 @@ func runDaemon() int {
 			SweepInterval:      cfg.HygieneSweepInterval,
 			TerminalWriteGrace: spawn.TerminalWriteGrace,
 			Channels:           []string{EngineeringQAReviewChannel, "work.ticket.transitioned.engineering.qa_review.done"},
+			ThinDiaryThreshold: cfg.ThinDiaryThreshold,
+			KGFactsQuery: func(qctx context.Context, ticketIDText string) ([]hygiene.PalaceTriple, error) {
+				kg, err := palaceQueryClient.KgQueryByTicketID(qctx, ticketIDText)
+				if err != nil {
+					return nil, err
+				}
+				// QueryClient.KGTriple is the dashboard-shaped triple
+				// type (carries optional SourceTicketID + WrittenAt);
+				// hygiene.PalaceTriple is an alias for mempalace.Triple
+				// (the legacy M2.2 shape). Map field-by-field so the
+				// hygiene evaluator can scan subject/object/valid_from.
+				out := make([]hygiene.PalaceTriple, 0, len(kg))
+				for _, k := range kg {
+					out = append(out, hygiene.PalaceTriple{
+						Subject:   k.Subject,
+						Predicate: k.Predicate,
+						Object:    k.Object,
+						ValidFrom: k.WrittenAt,
+					})
+				}
+				return out, nil
+			},
 		}
 		g.Go(func() error {
 			return hygiene.RunListener(gctx, hygieneDeps)
