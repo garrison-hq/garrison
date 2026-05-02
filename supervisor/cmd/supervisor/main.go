@@ -23,6 +23,7 @@ import (
 	"github.com/garrison-hq/garrison/supervisor/internal/pgdb"
 	"github.com/garrison-hq/garrison/supervisor/internal/spawn"
 	"github.com/garrison-hq/garrison/supervisor/internal/store"
+	"github.com/garrison-hq/garrison/supervisor/internal/throttle"
 	"github.com/garrison-hq/garrison/supervisor/internal/vault"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -224,6 +225,18 @@ func runDaemon() int {
 		return exitCode
 	}
 
+	// M6 T014: throttle deps shared between spawn-prep gate (T007) and
+	// pipeline OnRateLimit actuator (T008). Pool=nil short-circuits the
+	// gate to "allow" so M2.x integration tests + chaos suites that
+	// don't seed company budgets stay green.
+	throttleDeps := throttle.Deps{
+		Pool:                pool,
+		Logger:              logger,
+		DefaultSpawnCostUSD: parseDefaultSpawnCost(cfg.DefaultSpawnCostUSD),
+		RateLimitBackOff:    cfg.RateLimitBackOff,
+		Now:                 time.Now,
+	}
+
 	spawnDeps := spawn.Deps{
 		Pool:               pool,
 		Queries:            queries,
@@ -250,6 +263,9 @@ func runDaemon() int {
 		// M2.3 — vault client + customer scope for secret injection.
 		Vault:      vaultClient,
 		CustomerID: cfg.CustomerID(),
+		// M6 T014 — result-grace + throttle gate.
+		FinalizeResultGrace: cfg.FinalizeResultGrace,
+		Throttle:            throttleDeps,
 	}
 
 	dispatcher := buildDispatcher(spawnDeps)
@@ -355,6 +371,8 @@ func runDaemon() int {
 		// the chat container is on a different network alias than the
 		// supervisor (the dev/compose case).
 		ChatInternalDatabaseURL: chatInternalDatabaseURL(cfg),
+		// M6 T014 — per-turn ticket-creation ceiling.
+		MaxTicketsPerTurn: cfg.MaxTicketsPerTurn,
 	}
 	if err := chat.RunRestartSweep(ctx, chatDeps); err != nil {
 		logger.Warn("chat: restart sweep failed; continuing", "err", err)
@@ -556,6 +574,21 @@ func chatInternalDatabaseURL(cfg *config.Config) string {
 		return v
 	}
 	return cfg.DatabaseURL
+}
+
+// parseDefaultSpawnCost converts the cfg.DefaultSpawnCostUSD decimal
+// string into a pgtype.Numeric for the throttle gate's per-spawn cost
+// estimate. Invalid values fall back to the documented $0.05 default
+// (matches config.Load's default + the M6 spec).
+func parseDefaultSpawnCost(v string) pgtype.Numeric {
+	var n pgtype.Numeric
+	if v == "" {
+		v = "0.05"
+	}
+	if err := n.Scan(v); err != nil {
+		_ = n.Scan("0.05")
+	}
+	return n
 }
 
 // startDashboardAPIServerIfWired registers the dashboardapi server's
