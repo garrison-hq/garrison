@@ -316,3 +316,49 @@ func TestKgQueryByTicketID_ParsesSidecarResponse(t *testing.T) {
 		}
 	}
 }
+
+// TestKgQueryByTicketID_EmptyTicketIDShortCircuits — empty input is
+// a no-op (avoids a wasted docker exec for an unset ticket). Returns
+// (nil, nil) without touching Exec.
+func TestKgQueryByTicketID_EmptyTicketIDShortCircuits(t *testing.T) {
+	fake := &fakeQueryExec{}
+	c := newQueryClientWithFake(fake)
+	got, err := c.KgQueryByTicketID(context.Background(), "")
+	if err != nil {
+		t.Fatalf("KgQueryByTicketID(\"\"): %v", err)
+	}
+	if got != nil {
+		t.Errorf("got %v; want nil", got)
+	}
+	if len(fake.stdins) != 0 {
+		t.Errorf("Exec called %d times; want 0 (short-circuit)", len(fake.stdins))
+	}
+}
+
+// TestKgQueryByTicketID_MissingPalaceConfigReturnsErr — missing
+// container or palace path returns ErrSidecarUnreachable without
+// invoking Exec.
+func TestKgQueryByTicketID_MissingPalaceConfigReturnsErr(t *testing.T) {
+	c := &QueryClient{} // no Container/PalacePath/Exec
+	_, err := c.KgQueryByTicketID(context.Background(), "ticket_x")
+	if err == nil {
+		t.Fatal("expected error for unconfigured QueryClient")
+	}
+	if !errors.Is(err, ErrSidecarUnreachable) {
+		t.Errorf("error %v should wrap ErrSidecarUnreachable", err)
+	}
+}
+
+// TestKgQueryByTicketID_PropagatesDockerExecError — exec failure
+// surfaces as ErrSidecarUnreachable wrapping the underlying error.
+func TestKgQueryByTicketID_PropagatesDockerExecError(t *testing.T) {
+	fake := &fakeQueryExec{err: errors.New("docker exec died")}
+	c := newQueryClientWithFake(fake)
+	_, err := c.KgQueryByTicketID(context.Background(), "ticket_x")
+	if err == nil {
+		t.Fatal("expected error from Exec failure")
+	}
+	if !errors.Is(err, ErrSidecarUnreachable) {
+		t.Errorf("error %v should wrap ErrSidecarUnreachable", err)
+	}
+}

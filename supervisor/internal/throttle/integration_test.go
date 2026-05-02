@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"math/big"
+	"strings"
 	"testing"
 	"time"
 
@@ -278,5 +279,111 @@ func TestSpawnAllowedAfterPauseExpires(t *testing.T) {
 	}
 	if !d.Allowed {
 		t.Errorf("expected allow after pause expires; got %+v", d)
+	}
+}
+
+// TestFirePauseWritesPauseUntilAndAuditRow exercises throttle.FirePause
+// end-to-end against a real Postgres testcontainer. T008's OnRateLimit
+// closure invokes FirePause inside an independent tx; this test pins
+// the contract of that fire (UPDATE companies.pause_until + INSERT
+// throttle_events + pg_notify on work.throttle.event).
+func TestFirePauseWritesPauseUntilAndAuditRow(t *testing.T) {
+	pool := testdb.Start(t)
+	ctx := context.Background()
+	truncateAll(t, ctx, pool)
+
+	var companyID pgtype.UUID
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO companies (id, name) VALUES (gen_random_uuid(), 'fire-pause-co') RETURNING id
+	`).Scan(&companyID); err != nil {
+		t.Fatalf("insert company: %v", err)
+	}
+
+	deps := throttle.Deps{
+		Pool:                pool,
+		Logger:              slog.Default(),
+		DefaultSpawnCostUSD: numericFromCents(5),
+		RateLimitBackOff:    60 * time.Second,
+		Now:                 time.Now,
+	}
+
+	notifyCh := listenForNotify(t, ctx, pool, throttle.ChannelThrottleEvent)
+
+	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		return throttle.FirePause(ctx, deps, store.New(tx), companyID, throttle.RateLimitDetail{
+			Status:        "rejected",
+			RateLimitType: "input",
+			TotalCostUSD:  "0.42",
+		})
+	}); err != nil {
+		t.Fatalf("FirePause: %v", err)
+	}
+
+	// pause_until written?
+	var pauseUntil pgtype.Timestamptz
+	if err := pool.QueryRow(ctx,
+		`SELECT pause_until FROM companies WHERE id = $1`, companyID,
+	).Scan(&pauseUntil); err != nil {
+		t.Fatalf("read pause_until: %v", err)
+	}
+	if !pauseUntil.Valid {
+		t.Fatalf("pause_until not set on companies row")
+	}
+	if !pauseUntil.Time.After(time.Now()) {
+		t.Errorf("pause_until = %v should be in the future", pauseUntil.Time)
+	}
+
+	// throttle_events row written?
+	q := store.New(pool)
+	rows, err := q.ListThrottleEventsByCompany(ctx, store.ListThrottleEventsByCompanyParams{
+		CompanyID: companyID,
+		Limit:     5,
+	})
+	if err != nil {
+		t.Fatalf("ListThrottleEventsByCompany: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d; want 1", len(rows))
+	}
+	if rows[0].Kind != throttle.KindRateLimitPause {
+		t.Errorf("kind = %q; want %q", rows[0].Kind, throttle.KindRateLimitPause)
+	}
+
+	// notify observed?
+	select {
+	case body := <-notifyCh:
+		if !strings.Contains(body, throttle.KindRateLimitPause) {
+			t.Errorf("notify body missing kind: %s", body)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("notify never arrived")
+	}
+}
+
+// TestCheckPropagatesQueryError forces a malformed query path: a NULL
+// company id causes GetCompanyThrottleState to return pgx.ErrNoRows.
+// throttle.Check should propagate that as a wrapped error rather than
+// silently treating an unknown company as 'allow'.
+func TestCheckPropagatesQueryError(t *testing.T) {
+	pool := testdb.Start(t)
+	ctx := context.Background()
+	truncateAll(t, ctx, pool)
+
+	deps := throttle.Deps{
+		Pool:                pool,
+		Logger:              slog.Default(),
+		DefaultSpawnCostUSD: numericFromCents(5),
+		RateLimitBackOff:    60 * time.Second,
+		Now:                 time.Now,
+	}
+	// A random UUID that doesn't match any company row.
+	bogus := pgtype.UUID{Valid: true, Bytes: [16]byte{0xde, 0xad, 0xbe, 0xef}}
+	q := store.New(pool)
+	_, err := throttle.Check(ctx, deps, q, bogus)
+	if err == nil {
+		t.Fatal("Check on non-existent company should error")
+	}
+	if !strings.Contains(err.Error(), "GetCompanyThrottleState") {
+		t.Errorf("error %q should wrap GetCompanyThrottleState", err)
 	}
 }
