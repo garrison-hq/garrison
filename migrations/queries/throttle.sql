@@ -54,3 +54,12 @@ FROM throttle_events
 WHERE company_id = $1
 ORDER BY fired_at DESC
 LIMIT $2;
+
+-- name: NotifyThrottleEvent :exec
+-- M6 T004: in-tx pg_notify. Composes with InsertThrottleEvent on the
+-- caller's tx so the audit row + notify land atomically — the
+-- dashboard SSE bridge (T015) sees the notify only if the row
+-- committed. Mirrors the M5.x chat pgNotifyExecSQL pattern but bound
+-- to the channel constant `work.throttle.event` so the call site
+-- can't typo the channel name.
+SELECT pg_notify('work.throttle.event', sqlc.arg('payload')::text);

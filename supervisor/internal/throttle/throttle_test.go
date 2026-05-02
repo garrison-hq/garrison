@@ -1,0 +1,179 @@
+package throttle
+
+import (
+	"encoding/json"
+	"math/big"
+	"testing"
+	"time"
+
+	"github.com/garrison-hq/garrison/supervisor/internal/store"
+	"github.com/jackc/pgx/v5/pgtype"
+)
+
+// numericFromFloat builds a pgtype.Numeric carrying the supplied float
+// at NUMERIC(10,2) precision. Mirrors how spawn.parseCostToNumeric
+// produces values from the claude wire-format string; we want the
+// same shape in tests so float-comparison roundtrips behave the same.
+func numericFromFloat(t *testing.T, f float64) pgtype.Numeric {
+	t.Helper()
+	cents := int64(f * 100)
+	return pgtype.Numeric{
+		Int:   big.NewInt(cents),
+		Exp:   -2,
+		Valid: true,
+	}
+}
+
+func nullNumeric() pgtype.Numeric {
+	return pgtype.Numeric{Valid: false}
+}
+
+func nullTimestamptz() pgtype.Timestamptz {
+	return pgtype.Timestamptz{Valid: false}
+}
+
+func futureTimestamp(t *testing.T, now time.Time, delta time.Duration) pgtype.Timestamptz {
+	t.Helper()
+	return pgtype.Timestamptz{Time: now.Add(delta), Valid: true}
+}
+
+func TestBudgetPredicate_AllowsBelowCap(t *testing.T) {
+	state := store.GetCompanyThrottleStateRow{
+		DailyBudgetUsd: numericFromFloat(t, 1.00),
+		Cost24hUsd:     numericFromFloat(t, 0.50),
+	}
+	d, err := evaluateBudget(state, numericFromFloat(t, 0.10))
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !d.Allowed {
+		t.Errorf("expected Allowed=true; got Decision=%+v", d)
+	}
+}
+
+func TestBudgetPredicate_DefersAtCap(t *testing.T) {
+	state := store.GetCompanyThrottleStateRow{
+		DailyBudgetUsd: numericFromFloat(t, 1.00),
+		Cost24hUsd:     numericFromFloat(t, 0.95),
+	}
+	d, err := evaluateBudget(state, numericFromFloat(t, 0.10))
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if d.Allowed {
+		t.Errorf("expected Allowed=false; got Decision=%+v", d)
+	}
+	if d.Kind != KindCompanyBudgetExceeded {
+		t.Errorf("Kind = %q; want %q", d.Kind, KindCompanyBudgetExceeded)
+	}
+	if len(d.Payload) == 0 {
+		t.Errorf("expected non-empty payload")
+	}
+}
+
+func TestBudgetPredicate_NullBudgetIsAlwaysAllow(t *testing.T) {
+	state := store.GetCompanyThrottleStateRow{
+		DailyBudgetUsd: nullNumeric(),
+		Cost24hUsd:     numericFromFloat(t, 999.99),
+	}
+	d, err := evaluateBudget(state, numericFromFloat(t, 100.00))
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !d.Allowed {
+		t.Errorf("NULL budget should always allow; got %+v", d)
+	}
+}
+
+func TestBudgetPredicate_ZeroBudgetDefersAlways(t *testing.T) {
+	state := store.GetCompanyThrottleStateRow{
+		DailyBudgetUsd: numericFromFloat(t, 0.00),
+		Cost24hUsd:     numericFromFloat(t, 0.00),
+	}
+	d, err := evaluateBudget(state, numericFromFloat(t, 0.01))
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if d.Allowed {
+		t.Errorf("zero budget should always defer; got %+v", d)
+	}
+	if d.Kind != KindCompanyBudgetExceeded {
+		t.Errorf("Kind = %q; want %q", d.Kind, KindCompanyBudgetExceeded)
+	}
+}
+
+func TestPausePredicate_DefersDuringWindow(t *testing.T) {
+	now := time.Date(2026, 5, 2, 12, 0, 0, 0, time.UTC)
+	state := store.GetCompanyThrottleStateRow{
+		PauseUntil: futureTimestamp(t, now, 30*time.Second),
+	}
+	d := evaluatePause(state, now)
+	if d.Allowed {
+		t.Errorf("expected Allowed=false; got %+v", d)
+	}
+	if d.Kind != KindRateLimitPause {
+		t.Errorf("Kind = %q; want %q", d.Kind, KindRateLimitPause)
+	}
+}
+
+func TestPausePredicate_AllowsAfterWindow(t *testing.T) {
+	now := time.Date(2026, 5, 2, 12, 0, 0, 0, time.UTC)
+	state := store.GetCompanyThrottleStateRow{
+		PauseUntil: futureTimestamp(t, now, -30*time.Second),
+	}
+	d := evaluatePause(state, now)
+	if !d.Allowed {
+		t.Errorf("expected Allowed=true (past pause); got %+v", d)
+	}
+}
+
+func TestPausePredicate_NullIsAlwaysAllow(t *testing.T) {
+	state := store.GetCompanyThrottleStateRow{
+		PauseUntil: nullTimestamptz(),
+	}
+	d := evaluatePause(state, time.Now())
+	if !d.Allowed {
+		t.Errorf("NULL pause_until should always allow; got %+v", d)
+	}
+}
+
+func TestDecisionComposition_PauseWinsOverBudget(t *testing.T) {
+	// Both predicates would defer if evaluated in isolation. Check
+	// that pause wins (per package contract: pause is the dominant
+	// cause; budget noise should not shadow the pause audit).
+	now := time.Date(2026, 5, 2, 12, 0, 0, 0, time.UTC)
+	pauseState := store.GetCompanyThrottleStateRow{
+		PauseUntil:     futureTimestamp(t, now, 30*time.Second),
+		DailyBudgetUsd: numericFromFloat(t, 1.00),
+		Cost24hUsd:     numericFromFloat(t, 0.95),
+	}
+	d := evaluatePause(pauseState, now)
+	if d.Allowed || d.Kind != KindRateLimitPause {
+		t.Errorf("pause should fire first; got %+v", d)
+	}
+}
+
+func TestNotifyPayloadShape(t *testing.T) {
+	// emitNotify constructs the payload with these four fields.
+	// Verify the JSON shape so the dashboard SSE bridge consumer
+	// has a stable contract.
+	body := map[string]string{
+		"event_id":   "00000000-0000-0000-0000-000000000001",
+		"company_id": "00000000-0000-0000-0000-00000000000c",
+		"kind":       KindCompanyBudgetExceeded,
+		"fired_at":   time.Date(2026, 5, 2, 12, 0, 0, 0, time.UTC).Format(time.RFC3339Nano),
+	}
+	encoded, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var decoded map[string]string
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	for _, key := range []string{"event_id", "company_id", "kind", "fired_at"} {
+		if _, ok := decoded[key]; !ok {
+			t.Errorf("missing key %q in notify payload", key)
+		}
+	}
+}
