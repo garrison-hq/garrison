@@ -148,7 +148,7 @@ These apply throughout the supervisor code:
 Specs are narrow per milestone. Each milestone's spec covers only that milestone's concerns. The active milestone's `specs/_context/m{N}-context.md` enumerates what is in scope; ARCHITECTURE.md and `docs/issues/` enumerate work that is intentionally deferred.
 
 Standing out-of-scope for any non-named milestone:
-- **Workspace sandboxing / Docker-per-agent** — see `docs/issues/agent-workspace-sandboxing.md`. Per-agent Docker containers with hard guardrails preventing workspace escape; deferred post-M5.
+- ~~**Workspace sandboxing / Docker-per-agent**~~ — **scope-merged into M7 (2026-05-02)**, see `docs/research/m7-spike.md` §4 + `docs/security/agent-sandbox-threat-model.md`. The container is the natural skill-install boundary, so M7 resolves the per-agent runtime and the install actuator in one ship. While M7 is active this is *in*-scope; once M7 ships it returns to "sealed and binding" rather than "deferred."
 - **Cost-telemetry blind-spot fix** — see `docs/issues/cost-telemetry-blind-spot.md`. Successful finalize runs read `$0.00` for `total_cost_usd`; surface the caveat in any cost UI but do not fix the supervisor signal-handling here.
 - **Mutating sealed M2/M2.3 surfaces** — supervisor spawn semantics, finalize tool schema, vault rules, `garrison_agent_*` Postgres roles, MemPalace MCP wiring. These are sealed unless the active milestone's context file explicitly amends them.
 - Future-milestone surfaces — M5.3 sessions don't carry M7 hiring or M8 MCP-registry work; M7 sessions don't carry M8 work; etc.
