@@ -10,9 +10,12 @@ import { useTranslations } from 'next-intl';
 //   - "Operator audit"  — operator_initiated rows only.
 //   - "All"            — every non-clean row.
 //
-// Active=`bg-accent/15 text-accent`, inactive=`text-text-3
-// hover:text-text-2`. Calls `onChange(tab)` on click. The parent
-// owns the tab state; this component is presentational only.
+// Active = `bg-accent/10 text-accent border-accent/30`; inactive =
+// `bg-surface-1 text-text-3 border-border-1 hover:text-text-2
+// hover:border-border-2`. Mirrors FailureModeFilter's chip shape
+// byte-for-byte so the two segmented rows on /hygiene share an
+// active-state vocabulary. Calls `onChange(tab)` on click. The
+// parent owns the tab state; this component is presentational only.
 
 export type HygieneTab = 'failures' | 'audit' | 'all';
 
@@ -47,10 +50,10 @@ export function HygieneTabStrip({
             aria-selected={selected}
             onClick={() => onChange(m.tab)}
             data-testid={`hygiene-tab-${m.tab}`}
-            className={`inline-flex items-center px-2.5 py-1 rounded text-[12px] transition-colors ${
+            className={`inline-flex items-center px-2.5 py-1 rounded text-[12px] border transition-colors ${
               selected
-                ? 'bg-accent/15 text-accent'
-                : 'text-text-3 hover:text-text-2'
+                ? 'bg-accent/10 text-accent border-accent/30'
+                : 'bg-surface-1 text-text-3 border-border-1 hover:text-text-2 hover:border-border-2'
             }`}
           >
             {t(m.labelKey)}

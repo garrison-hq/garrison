@@ -42,9 +42,11 @@ describe('HygieneTabStrip', () => {
 
   it('TestHygieneTabStripActiveTabHasAccentClass', () => {
     const html = renderToString(<HygieneTabStrip active="all" onChange={noop} />);
-    // The active tab carries the bg-accent/15 utility per M5.4 polish.
-    // The match is loose to tolerate Tailwind class-ordering changes.
-    expect(html).toContain('bg-accent/15');
+    // Active chip mirrors FailureModeFilter's shape:
+    // bg-accent/10 + text-accent + border-accent/30. Loose match
+    // tolerates Tailwind class-ordering changes.
+    expect(html).toContain('bg-accent/10');
+    expect(html).toContain('border-accent/30');
   });
 
   it('TestHygieneTabStripRendersAsTablist', () => {
