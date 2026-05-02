@@ -197,6 +197,33 @@ func TestPolicyLifecycle_TerminalWriteErrorPersists(t *testing.T) {
 	}
 }
 
+// TestPolicyLifecycle_TicketCreationCeilingEmitsAssistantError: fires
+// the M6 per-turn ticket-creation ceiling against a real pool so the
+// EmitAssistantError pg_notify call (the Pool!=nil branch of
+// maybeFireTicketCreationCeiling) actually runs against the wired-up
+// transport. The unit test in policy_m6_test.go exercises the same
+// trigger condition with Pool=nil and stops at the bailReason set;
+// this companion confirms the integration-side emit lands.
+func TestPolicyLifecycle_TicketCreationCeilingEmitsAssistantError(t *testing.T) {
+	p, _, _, _ := newPolicyWithPool(t, 50)
+	p.MaxTicketsPerTurn = 10
+	ctx := context.Background()
+
+	raw := []byte(`{"event":{"content_block":{"type":"tool_use","id":"tu-x","name":"mcp__garrison-mutate__create_ticket","input":{}}}}`)
+	for i := 0; i < 11; i++ {
+		p.OnStreamEvent(ctx, claudeproto.StreamEvent{
+			InnerType: "content_block_start",
+			Raw:       raw,
+		})
+	}
+	if !p.ticketCreationCeilingFired {
+		t.Fatal("ticketCreationCeilingFired should be true after 11 calls")
+	}
+	if p.bailReason != ChatErrorTicketCreationCeilingReached {
+		t.Errorf("bailReason = %q; want %q", p.bailReason, ChatErrorTicketCreationCeilingReached)
+	}
+}
+
 // TestPolicyLifecycle_OnTerminateBailWritesError: OnTerminate("bail")
 // with a populated bailReason should terminal-write with that reason.
 func TestPolicyLifecycle_OnTerminateBailWritesError(t *testing.T) {
