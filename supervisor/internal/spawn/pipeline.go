@@ -652,11 +652,11 @@ func Run(
 	streamEvents := startScannerPump(scannerCtx, stdout)
 
 	fp, _ := policy.(*FinalizePolicy) // nil for non-finalize policies
-	loop := &runLoop{ctx: ctx, policy: policy, fp: fp, logger: logger}
+	loop := &runLoop{policy: policy, fp: fp, logger: logger}
 	defer loop.stop()
 
 	for {
-		done, res, err := loop.step(streamEvents)
+		done, res, err := loop.step(ctx, streamEvents)
 		if done {
 			return res, err
 		}
@@ -715,8 +715,9 @@ const graceTickInterval = 50 * time.Millisecond
 
 // runLoop holds Run's mutable per-call state so the select-loop body
 // can be extracted into step() without each branch passing 6+ args.
+// ctx is intentionally NOT a field — it's passed to each step() call
+// per Go's idiomatic ctx-as-first-parameter rule.
 type runLoop struct {
-	ctx     context.Context
 	policy  Policy
 	fp      *FinalizePolicy
 	logger  *slog.Logger
@@ -729,14 +730,14 @@ type runLoop struct {
 // ...) when the loop should keep iterating. Pulled out of Run so the
 // per-branch logic is straight-line code rather than a deeply nested
 // select.
-func (l *runLoop) step(streamEvents <-chan scanItem) (bool, Result, error) {
+func (l *runLoop) step(ctx context.Context, streamEvents <-chan scanItem) (bool, Result, error) {
 	var tickC <-chan time.Time
 	if l.ticker != nil {
 		tickC = l.ticker.C
 	}
 	select {
 	case sr, ok := <-streamEvents:
-		return l.onStream(sr, ok)
+		return l.onStream(ctx, sr, ok)
 	case <-l.graceCh:
 		// Grace window expired. Fire pending commit (cost may still
 		// be NULL — that's the FR-021 failure-mode contract).
@@ -753,11 +754,11 @@ func (l *runLoop) step(streamEvents <-chan scanItem) (bool, Result, error) {
 			return true, l.policy.Result(), nil
 		}
 		return false, Result{}, nil
-	case <-l.ctx.Done():
+	case <-ctx.Done():
 		// SIGTERM. Fire any pending commit so we don't drop the audit
 		// row, but preserve the ctx err for the caller.
 		l.firePending()
-		return true, l.policy.Result(), l.ctx.Err()
+		return true, l.policy.Result(), ctx.Err()
 	}
 }
 
@@ -765,7 +766,7 @@ func (l *runLoop) step(streamEvents <-chan scanItem) (bool, Result, error) {
 // (done=true, ...) on EOF, scan error, or dispatch error; otherwise
 // inspects whether the policy just deferred a commit and, if so, either
 // fires it immediately (result already seen) or arms the grace window.
-func (l *runLoop) onStream(sr scanItem, ok bool) (bool, Result, error) {
+func (l *runLoop) onStream(ctx context.Context, sr scanItem, ok bool) (bool, Result, error) {
 	if !ok {
 		// Scanner exited (EOF or read error already drained).
 		l.firePending()
@@ -775,7 +776,7 @@ func (l *runLoop) onStream(sr scanItem, ok bool) (bool, Result, error) {
 		l.firePending()
 		return true, l.policy.Result(), fmt.Errorf("pipeline: scan: %w", sr.err)
 	}
-	if err := dispatchStreamLine(l.ctx, sr.line, l.policy, l.logger); err != nil {
+	if err := dispatchStreamLine(ctx, sr.line, l.policy, l.logger); err != nil {
 		l.firePending()
 		return true, l.policy.Result(), err
 	}
