@@ -32,12 +32,16 @@ SELECT objective FROM tickets WHERE id = $1;
 -- pass NULL to mean "use default"; the verb resolves "todo" / "{}"
 -- before calling rather than relying on COALESCE-on-cast SQL that
 -- confuses sqlc's parameter-name inference.
+-- M6 T010: parent_ticket_id passes through as a NULLABLE sentinel; verb
+-- handler validates same-department + non-closed parent BEFORE calling
+-- this query (cross-table CHECK can't enforce both; verb error message
+-- has to be operator-readable anyway).
 INSERT INTO tickets (
     department_id, objective, acceptance_criteria, column_slug,
-    metadata, origin, created_via_chat_session_id
+    metadata, origin, created_via_chat_session_id, parent_ticket_id
 )
-VALUES (@department_id, @objective, @acceptance_criteria, @column_slug, @metadata, 'ceo_chat', @created_via_chat_session_id)
-RETURNING id, department_id, objective, created_at, column_slug, acceptance_criteria, metadata, origin, created_via_chat_session_id;
+VALUES (@department_id, @objective, @acceptance_criteria, @column_slug, @metadata, 'ceo_chat', @created_via_chat_session_id, @parent_ticket_id)
+RETURNING id, department_id, objective, created_at, column_slug, acceptance_criteria, metadata, origin, created_via_chat_session_id, parent_ticket_id;
 
 -- name: SelectDepartmentIDBySlug :one
 -- garrison-mutate verbs accept department_slug from the chat assistant;
