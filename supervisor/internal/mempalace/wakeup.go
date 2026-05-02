@@ -7,6 +7,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/garrison-hq/garrison/supervisor/internal/agentpolicy"
 	"github.com/garrison-hq/garrison/supervisor/internal/dockerexec"
 )
 
@@ -113,25 +114,36 @@ func Wakeup(ctx context.Context, cfg WakeupConfig, wing string) (stdout string, 
 }
 
 // ComposeSystemPrompt builds the Claude `--system-prompt` argument from
-// three pieces: the agent's agent.md content (from agents.agent_md), the
+// four pieces: the immutable security preamble (agentpolicy.Body, M7
+// FR-303), the agent's agent.md content (from agents.agent_md), the
 // wake-up stdout (possibly empty), and the "This turn" block carrying
 // ticketID + instanceID (per FR-207a as extended by Session 2026-04-23 Q2).
+//
+// The preamble is prepended unconditionally — every spawn carries it,
+// regardless of whether the wake-up succeeded. This is the structural
+// enforcement the M7 sandbox + hiring threat models depend on; bypassing
+// it via "skip preamble on empty wake-up" branches would silently widen
+// the operator-trust posture.
 //
 // When wakeUpStdout is empty (either a legitimately empty wing or a
 // StatusFailed wake-up per FR-207b), the wake-up block is omitted entirely
 // and the "---\n## Wake-up context\n" section does not appear. The "This
 // turn" block always appears.
 //
-// The exact template shape matches FR-207a verbatim so a test can assert
-// byte-equality against it.
+// The exact template shape matches FR-207a verbatim (preamble layered
+// above) so the FR-207a regression tests still pass against
+// agentpolicy.PrependPreamble(<old shape>).
 func ComposeSystemPrompt(agentMD, wakeUpStdout, ticketID, instanceID string) string {
 	thisTurn := "## This turn\n\nYou have been spawned as agent_instance " + instanceID +
 		" to work ticket " + ticketID +
 		". Read it, then execute your completion protocol.\n"
 
+	var body string
 	if wakeUpStdout == "" {
-		return agentMD + "\n\n---\n\n" + thisTurn
+		body = agentMD + "\n\n---\n\n" + thisTurn
+	} else {
+		body = agentMD + "\n\n---\n\n## Wake-up context\n\n" + wakeUpStdout +
+			"\n\n---\n\n" + thisTurn
 	}
-	return agentMD + "\n\n---\n\n## Wake-up context\n\n" + wakeUpStdout +
-		"\n\n---\n\n" + thisTurn
+	return agentpolicy.PrependPreamble(body)
 }

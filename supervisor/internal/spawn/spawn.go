@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/garrison-hq/garrison/supervisor/internal/agentcontainer"
 	"github.com/garrison-hq/garrison/supervisor/internal/agents"
 	"github.com/garrison-hq/garrison/supervisor/internal/claudeproto"
 	"github.com/garrison-hq/garrison/supervisor/internal/concurrency"
@@ -175,6 +176,20 @@ type Deps struct {
 	// when set. Tests inject failure scenarios (e.g. returning ErrVaultAuditFailed)
 	// without needing a real pool. Production leaves this nil.
 	AuditFn func(ctx context.Context, row vault.AuditRow) error
+
+	// M7 T011 / decision #5: feature flag selecting the spawn execution
+	// path. UseDirectExec=true (default at M7 ship) runs the legacy
+	// exec.CommandContext flow for M2.x-shipped agents pre-grandfathering.
+	// migrate7 (T014) flips this to false after the M2.x agents move to
+	// per-agent containers; from then on every spawn flows through
+	// AgentContainer.Exec. The flag is removed entirely in the post-M7
+	// polish PR after a soak window at false.
+	UseDirectExec bool
+
+	// AgentContainer is the M7 controller used when UseDirectExec=false.
+	// nil tolerated only when UseDirectExec=true; otherwise spawn fails
+	// fast with ExitSpawnFailed.
+	AgentContainer agentcontainer.Controller
 }
 
 // UseFake decides which branch Spawn runs. UseFakeAgent wins if set;
@@ -548,6 +563,18 @@ func runRealClaude(
 		return writeFail(ExitAgentMissing)
 	}
 
+	// M7 FR-303 / FR-304 / FR-305: every spawn records the immutable
+	// preamble's hash + the cwd CLAUDE.md hash + the per-agent container
+	// image digest so a forensic walk can reconstruct exactly which
+	// preamble version + skill content + image bytes were active for any
+	// historical run. preamble_hash always populates (the const is
+	// embedded in the binary); claude_md_hash is NULL when no CLAUDE.md
+	// exists in the workspace; image_digest is "" until grandfathering
+	// (T014) flips the agent into a per-agent container.
+	if errH := recordM7HashesForInstance(ctx, deps, instanceID, dept, agent); errH != nil {
+		logger.Warn("M7 hash record best-effort failed", "err", errH)
+	}
+
 	// --- M2.3 vault steps V1–V5 (D4.5 / FR-409 / FR-405 / FR-407 / FR-412) ---
 	// Rule 3 pre-check: run BEFORE the vault fetch so no Infisical request is
 	// made when the agent's mcp_config carries a banned server name (T013 /
@@ -674,6 +701,26 @@ func runRealClaude(
 		"--system-prompt", systemPrompt,
 		"--permission-mode", "bypassPermissions",
 	}
+
+	// M7 T011 / decision #5: when the operator has migrated agents into
+	// per-agent containers (UseDirectExec=false post-migrate7), the
+	// supervisor no longer fork+execs claude directly. Instead, the
+	// already-running per-agent container hosts a long-lived claude
+	// process that the supervisor reaches via the socket-proxy's
+	// /containers/<id>/exec surface. The full pipe-drain + adjudicator
+	// integration lives behind this branch — the legacy direct-exec
+	// path below stays load-bearing through the soak window.
+	if !deps.UseDirectExec && deps.AgentContainer != nil {
+		return runRealClaudeViaContainer(execCtx, deps, runViaContainerInputs{
+			InstanceID: instanceID,
+			EventID:    eventID,
+			TicketID:   ticketUUID,
+			RoleSlug:   roleSlug,
+			Argv:       argv,
+			Logger:     logger,
+		})
+	}
+
 	cmd := exec.CommandContext(execCtx, deps.ClaudeBin, argv...)
 	if dept.WorkspacePath != nil && *dept.WorkspacePath != "" {
 		cmd.Dir = *dept.WorkspacePath

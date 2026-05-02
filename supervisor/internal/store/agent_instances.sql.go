@@ -134,6 +134,37 @@ func (q *Queries) SelectAgentInstanceFinalizedState(ctx context.Context, id pgty
 	return i, err
 }
 
+const updateInstanceM7Hashes = `-- name: UpdateInstanceM7Hashes :exec
+UPDATE agent_instances
+   SET preamble_hash = $1,
+       claude_md_hash = $2,
+       image_digest = $3
+ WHERE id = $4
+`
+
+type UpdateInstanceM7HashesParams struct {
+	PreambleHash string
+	ClaudeMdHash *string
+	ImageDigest  string
+	ID           pgtype.UUID
+}
+
+// M7 FR-303 / FR-304 / FR-305: every spawn records the immutable
+// preamble's hash, the cwd CLAUDE.md hash (NULL when claude is
+// invoked without a CLAUDE.md in the workspace), and the per-agent
+// container image digest (empty string when the spawn ran in
+// direct-exec mode pre-migrate7). Called after InsertRunningInstance
+// as part of step 3a in spawn.runRealClaude.
+func (q *Queries) UpdateInstanceM7Hashes(ctx context.Context, arg UpdateInstanceM7HashesParams) error {
+	_, err := q.db.Exec(ctx, updateInstanceM7Hashes,
+		arg.PreambleHash,
+		arg.ClaudeMdHash,
+		arg.ImageDigest,
+		arg.ID,
+	)
+	return err
+}
+
 const updateInstanceTerminal = `-- name: UpdateInstanceTerminal :exec
 UPDATE agent_instances
 SET status = $2,
