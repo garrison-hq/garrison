@@ -492,3 +492,152 @@ func TestCreateTicketWithParent_NilParentSucceeds(t *testing.T) {
 		t.Fatalf("expected Success; got %+v", r)
 	}
 }
+
+// -------- M7 T009 propose_skill_change + bump_skill_version -------------
+
+// validDigest is a syntactically-valid SHA-256 hex used for the M7
+// integration tests. Real registry digests come from skillregistry's
+// HTTP fetch + body hash; these tests exercise the verb's INSERT path,
+// not the registry — a fixed valid-shape digest is sufficient.
+const validDigest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+func TestProposeSkillChange_WritesSkillChangeProposal(t *testing.T) {
+	fx := setupIntegration(t)
+	args, _ := json.Marshal(ProposeSkillChangeArgs{
+		AgentRoleSlug:   fx.agentRoleSlug,
+		JustificationMD: "engineer needs sql migration reader for next sprint",
+		Add: []SkillEntry{
+			{Package: "skills.sh/sqlmigrate-reader", Version: "v1.2.0", Digest: validDigest},
+		},
+	})
+	r, err := realProposeSkillChangeHandler(context.Background(), fx.deps, args)
+	if err != nil || !r.Success {
+		t.Fatalf("propose_skill_change: %v / %+v", err, r)
+	}
+	var (
+		ptype    string
+		targetID pgtype.UUID
+		diff     []byte
+		snap     []byte
+		digestAt *string
+	)
+	if err := fx.pool.QueryRow(context.Background(),
+		`SELECT proposal_type, target_agent_id, skill_diff_jsonb, proposal_snapshot_jsonb, skill_digest_at_propose
+		   FROM hiring_proposals WHERE id::text = $1`, r.AffectedResourceID).
+		Scan(&ptype, &targetID, &diff, &snap, &digestAt); err != nil {
+		t.Fatalf("readback: %v", err)
+	}
+	if ptype != "skill_change" {
+		t.Errorf("proposal_type = %q; want skill_change", ptype)
+	}
+	if !targetID.Valid || targetID != fx.agentID {
+		t.Errorf("target_agent_id mismatch: %v vs %v", targetID, fx.agentID)
+	}
+	if !strings.Contains(string(diff), "sqlmigrate-reader") {
+		t.Errorf("skill_diff_jsonb missing package: %s", diff)
+	}
+	if !strings.Contains(string(snap), "engineer needs sql migration reader") {
+		t.Errorf("proposal_snapshot_jsonb missing justification: %s", snap)
+	}
+	if got := auditCount(t, fx, "propose_skill_change"); got != 1 {
+		t.Errorf("audit rows = %d; want 1", got)
+	}
+}
+
+func TestProposeSkillChange_UnknownAgentRole(t *testing.T) {
+	fx := setupIntegration(t)
+	args, _ := json.Marshal(ProposeSkillChangeArgs{
+		AgentRoleSlug:   "engineering.does-not-exist",
+		JustificationMD: "real reason",
+		Add: []SkillEntry{
+			{Package: "skills.sh/x", Digest: validDigest},
+		},
+	})
+	r, _ := realProposeSkillChangeHandler(context.Background(), fx.deps, args)
+	if r.Success {
+		t.Fatal("expected failure")
+	}
+	if r.ErrorKind != string(ErrResourceNotFound) {
+		t.Errorf("ErrorKind = %q; want %q", r.ErrorKind, ErrResourceNotFound)
+	}
+	if got := auditCount(t, fx, "propose_skill_change"); got != 1 {
+		t.Errorf("failure audit rows = %d; want 1", got)
+	}
+}
+
+func TestBumpSkillVersion_RecordsBothDigests(t *testing.T) {
+	fx := setupIntegration(t)
+	priorDigest := strings.Repeat("a", 64)
+	nextDigest := strings.Repeat("b", 64)
+	args, _ := json.Marshal(BumpSkillVersionArgs{
+		AgentRoleSlug:   fx.agentRoleSlug,
+		Package:         "skills.sh/golang-staticanalysis",
+		FromVersion:     "v1.0.0",
+		ToVersion:       "v1.1.0",
+		FromDigest:      priorDigest,
+		ToDigest:        nextDigest,
+		JustificationMD: "operator-approved bump",
+	})
+	r, err := realBumpSkillVersionHandler(context.Background(), fx.deps, args)
+	if err != nil || !r.Success {
+		t.Fatalf("bump_skill_version: %v / %+v", err, r)
+	}
+	var (
+		ptype    string
+		diff     []byte
+		digestAt *string
+	)
+	if err := fx.pool.QueryRow(context.Background(),
+		`SELECT proposal_type, skill_diff_jsonb, skill_digest_at_propose
+		   FROM hiring_proposals WHERE id::text = $1`, r.AffectedResourceID).
+		Scan(&ptype, &diff, &digestAt); err != nil {
+		t.Fatalf("readback: %v", err)
+	}
+	if ptype != "version_bump" {
+		t.Errorf("proposal_type = %q; want version_bump", ptype)
+	}
+	if !strings.Contains(string(diff), priorDigest) {
+		t.Errorf("diff missing from_digest: %s", diff)
+	}
+	if !strings.Contains(string(diff), nextDigest) {
+		t.Errorf("diff missing to_digest: %s", diff)
+	}
+	if digestAt == nil || *digestAt != nextDigest {
+		t.Errorf("skill_digest_at_propose = %v; want %q", digestAt, nextDigest)
+	}
+	if got := auditCount(t, fx, "bump_skill_version"); got != 1 {
+		t.Errorf("audit rows = %d; want 1", got)
+	}
+}
+
+// TestBumpSkillVersion_TwoSimultaneousProposalsBothLand pins FR-110a's
+// shape: two pending bumps for the same (agent, package) BOTH succeed
+// at propose time. Supersession resolves at approve-time (T010); no
+// DB-side dedup.
+func TestBumpSkillVersion_TwoSimultaneousProposalsBothLand(t *testing.T) {
+	fx := setupIntegration(t)
+	mkArgs := func(toDigest string) []byte {
+		body, _ := json.Marshal(BumpSkillVersionArgs{
+			AgentRoleSlug: fx.agentRoleSlug,
+			Package:       "skills.sh/x",
+			ToVersion:     "v2.0.0",
+			ToDigest:      toDigest,
+		})
+		return body
+	}
+	r1, _ := realBumpSkillVersionHandler(context.Background(), fx.deps, mkArgs(strings.Repeat("a", 64)))
+	r2, _ := realBumpSkillVersionHandler(context.Background(), fx.deps, mkArgs(strings.Repeat("b", 64)))
+	if !r1.Success || !r2.Success {
+		t.Fatalf("both bumps should land: r1=%+v r2=%+v", r1, r2)
+	}
+	var pending int
+	if err := fx.pool.QueryRow(context.Background(),
+		`SELECT COUNT(*) FROM hiring_proposals
+		  WHERE target_agent_id = $1 AND proposal_type = 'version_bump' AND status = 'pending'`,
+		fx.agentID).Scan(&pending); err != nil {
+		t.Fatalf("count pending: %v", err)
+	}
+	if pending != 2 {
+		t.Errorf("pending bumps = %d; want 2 (FR-110a: supersession at approve time)", pending)
+	}
+}
