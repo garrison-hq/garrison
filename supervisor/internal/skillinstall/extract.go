@@ -76,15 +76,28 @@ func SafeExtractTarGz(reader io.Reader, destDir string) error {
 			return err
 		}
 
-		target := filepath.Join(abs, hdr.Name)
+		// Compute the on-disk target + post-join sink check. validateEntry
+		// already rejected path-traversal upstream, but the sink-side
+		// HasPrefix check is belt-and-suspenders against any future
+		// validateEntry regression and satisfies tar-slip taint
+		// analyzers (gosecurity:S6096) that don't follow upstream
+		// validation through filepath.Join.
+		target, err := safeJoinUnder(abs, hdr.Name)
+		if err != nil {
+			return err
+		}
 		switch hdr.Typeflag {
 		case tar.TypeDir:
 			if err := os.MkdirAll(target, fsModeFromTar(hdr.Mode, 0o755)); err != nil {
 				return fmt.Errorf("skillinstall: mkdir %s: %w", target, err)
 			}
 		case tar.TypeReg:
-			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-				return fmt.Errorf("skillinstall: mkdir parent %s: %w", target, err)
+			parent, err := safeJoinUnder(abs, filepath.Dir(hdr.Name))
+			if err != nil {
+				return err
+			}
+			if err := os.MkdirAll(parent, 0o755); err != nil {
+				return fmt.Errorf("skillinstall: mkdir parent %s: %w", parent, err)
 			}
 			limit := MaxExtractedBytes - written
 			n, err := writeFile(tr, target, fsModeFromTar(hdr.Mode, 0o644), limit)
@@ -141,6 +154,10 @@ func validateEntry(hdr *tar.Header, absRoot string) error {
 
 // writeFile copies tr into target, capped at limit bytes. Returns
 // the bytes written + an error if the cap was exceeded.
+//
+// target MUST already have passed safeJoinUnder; this function does
+// not re-validate the path. Callers in this package always go
+// through safeJoinUnder before invoking writeFile.
 func writeFile(tr io.Reader, target string, mode os.FileMode, limit int64) (int64, error) {
 	if limit <= 0 {
 		return 0, fmt.Errorf("%w: extracted >100 MiB", ErrArchiveTooLarge)
@@ -160,6 +177,23 @@ func writeFile(tr io.Reader, target string, mode os.FileMode, limit int64) (int6
 		return n, fmt.Errorf("%w: archive contains >100 MiB total", ErrArchiveTooLarge)
 	}
 	return n, nil
+}
+
+// safeJoinUnder joins entryPath onto absRoot and verifies the result
+// resolves to a path under absRoot. Returns ErrArchiveUnsafe if the
+// joined path escapes the root (defence-in-depth alongside
+// validateEntry; satisfies tar-slip taint analyzers like
+// gosecurity:S6096 that look for a sink-side HasPrefix check).
+func safeJoinUnder(absRoot, entryPath string) (string, error) {
+	joined := filepath.Join(absRoot, entryPath)
+	cleaned := filepath.Clean(joined)
+	// HasPrefix on the path-with-trailing-separator catches the case
+	// where entryPath is empty (joined == absRoot exactly is OK; any
+	// other prefix-shorter path is not).
+	if cleaned != absRoot && !strings.HasPrefix(cleaned, absRoot+string(filepath.Separator)) {
+		return "", fmt.Errorf("%w: %q resolves outside extract root", ErrArchiveUnsafe, entryPath)
+	}
+	return cleaned, nil
 }
 
 // fsModeFromTar converts a tar mode (POSIX with extra bits) to
