@@ -12,7 +12,7 @@ import (
 )
 
 const getHiringProposalByID = `-- name: GetHiringProposalByID :one
-SELECT id, role_title, department_slug, justification_md, skills_summary_md, proposed_via, proposed_by_chat_session_id, status, created_at FROM hiring_proposals WHERE id = $1
+SELECT id, role_title, department_slug, justification_md, skills_summary_md, proposed_via, proposed_by_chat_session_id, status, created_at, target_agent_id, proposal_type, skill_diff_jsonb, proposal_snapshot_jsonb, skill_digest_at_propose, approved_at, approved_by, rejected_at, rejected_reason FROM hiring_proposals WHERE id = $1
 `
 
 func (q *Queries) GetHiringProposalByID(ctx context.Context, id pgtype.UUID) (HiringProposal, error) {
@@ -28,6 +28,15 @@ func (q *Queries) GetHiringProposalByID(ctx context.Context, id pgtype.UUID) (Hi
 		&i.ProposedByChatSessionID,
 		&i.Status,
 		&i.CreatedAt,
+		&i.TargetAgentID,
+		&i.ProposalType,
+		&i.SkillDiffJsonb,
+		&i.ProposalSnapshotJsonb,
+		&i.SkillDigestAtPropose,
+		&i.ApprovedAt,
+		&i.ApprovedBy,
+		&i.RejectedAt,
+		&i.RejectedReason,
 	)
 	return i, err
 }
@@ -80,7 +89,7 @@ func (q *Queries) InsertHiringProposal(ctx context.Context, arg InsertHiringProp
 }
 
 const listHiringProposals = `-- name: ListHiringProposals :many
-SELECT id, role_title, department_slug, justification_md, skills_summary_md, proposed_via, proposed_by_chat_session_id, status, created_at FROM hiring_proposals
+SELECT id, role_title, department_slug, justification_md, skills_summary_md, proposed_via, proposed_by_chat_session_id, status, created_at, target_agent_id, proposal_type, skill_diff_jsonb, proposal_snapshot_jsonb, skill_digest_at_propose, approved_at, approved_by, rejected_at, rejected_reason FROM hiring_proposals
 ORDER BY created_at DESC
 LIMIT $1
 `
@@ -104,6 +113,15 @@ func (q *Queries) ListHiringProposals(ctx context.Context, limit int32) ([]Hirin
 			&i.ProposedByChatSessionID,
 			&i.Status,
 			&i.CreatedAt,
+			&i.TargetAgentID,
+			&i.ProposalType,
+			&i.SkillDiffJsonb,
+			&i.ProposalSnapshotJsonb,
+			&i.SkillDigestAtPropose,
+			&i.ApprovedAt,
+			&i.ApprovedBy,
+			&i.RejectedAt,
+			&i.RejectedReason,
 		); err != nil {
 			return nil, err
 		}
@@ -116,7 +134,7 @@ func (q *Queries) ListHiringProposals(ctx context.Context, limit int32) ([]Hirin
 }
 
 const listHiringProposalsByStatus = `-- name: ListHiringProposalsByStatus :many
-SELECT id, role_title, department_slug, justification_md, skills_summary_md, proposed_via, proposed_by_chat_session_id, status, created_at FROM hiring_proposals
+SELECT id, role_title, department_slug, justification_md, skills_summary_md, proposed_via, proposed_by_chat_session_id, status, created_at, target_agent_id, proposal_type, skill_diff_jsonb, proposal_snapshot_jsonb, skill_digest_at_propose, approved_at, approved_by, rejected_at, rejected_reason FROM hiring_proposals
 WHERE status = $1
 ORDER BY created_at DESC
 LIMIT $2
@@ -146,6 +164,15 @@ func (q *Queries) ListHiringProposalsByStatus(ctx context.Context, arg ListHirin
 			&i.ProposedByChatSessionID,
 			&i.Status,
 			&i.CreatedAt,
+			&i.TargetAgentID,
+			&i.ProposalType,
+			&i.SkillDiffJsonb,
+			&i.ProposalSnapshotJsonb,
+			&i.SkillDigestAtPropose,
+			&i.ApprovedAt,
+			&i.ApprovedBy,
+			&i.RejectedAt,
+			&i.RejectedReason,
 		); err != nil {
 			return nil, err
 		}
