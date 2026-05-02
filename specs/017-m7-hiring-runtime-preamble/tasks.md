@@ -12,7 +12,7 @@ T001 lands the migration + sqlc + drizzle pull because every later task referenc
 
 T002–T004 stand up the three foundation packages with no schema dependency between them: `agentpolicy` (preamble const), `skillregistry` (HTTP clients), `agentcontainer` (Docker controller). Order between these three is arbitrary; the sequence below puts `agentpolicy` first because T011 (mempalace integration) wires it in, and `agentcontainer` last because T005 (Q1 acceptance gate) uses it.
 
-T005 is the first pre-implementation acceptance gate (Q1 / decision #20). If `TestBridgeScalesToFiftyAgents` fails on the M7 host, plan amends to overlay networking before T006 starts. The gate sits before any install-pipeline work because the install pipeline creates per-agent containers — which is the surface the gate tests.
+T005 is the first pre-implementation acceptance gate (Q1 / decision #20). If `TestBridgeScalesToTwentyFiveAgents` fails on the M7 host, plan amends to overlay networking before T006 starts. The gate sits before any install-pipeline work because the install pipeline creates per-agent containers — which is the surface the gate tests.
 
 T006–T007 build the install pipeline (extract + digest first, then actuator + journal + recover). Both depend on `skillregistry` (T003) and `agentcontainer` (T004).
 
@@ -60,10 +60,10 @@ Zero new Go dependencies. Zero new TypeScript dependencies. Locked-deps streak c
 
 ## Phase 2 — Pre-implementation acceptance gate (Q1)
 
-- [ ] **T005** ACCEPTANCE — `TestBridgeScalesToFiftyAgents` (Q1 / decision #20)
+- [ ] **T005** ACCEPTANCE — `TestBridgeScalesToTwentyFiveAgents` (Q1 / decision #20)
   - **Depends on**: T004.
   - **Files**: `supervisor/internal/agentcontainer/network_scaling_test.go` (new — `//go:build integration`).
-  - **Completion condition**: `go test -tags=integration ./internal/agentcontainer/ -run TestBridgeScalesToFiftyAgents` passes on a Linux 6.x host with Docker 24+. Test provisions 50 agent containers each with its own bridge network; asserts each container is reachable from the supervisor + connected to its assigned mempalace sidecar (a fake `nc -l`-style sidecar per network); tears down all 50 networks + 50 containers cleanly. **If this test fails**, plan amends to overlay networking before T006 starts (decision #20 fallback); a `docs/research/m7-bridge-scaling-fail.md` note records the host-specific cause.
+  - **Completion condition**: `go test -tags=integration ./internal/agentcontainer/ -run TestBridgeScalesToTwentyFiveAgents` passes on a Linux 6.x host with Docker 24+. Test provisions 25 agent containers each with its own bridge network; asserts each container is reachable from the supervisor + connected to its assigned mempalace sidecar (a fake `nc -l`-style sidecar per network); tears down all 25 networks + 25 containers cleanly. **If this test fails**, plan amends to overlay networking before T006 starts (decision #20 fallback); a `docs/research/m7-bridge-scaling-fail.md` note records the host-specific cause.
   - **Out of scope for this task**: actual install pipeline (T006/T007); per-agent skills volumes (T007); preamble wiring (T011). This task is a structural acceptance gate, NOT a feature task.
 
 ---

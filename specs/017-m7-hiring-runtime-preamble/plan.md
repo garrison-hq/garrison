@@ -7,7 +7,7 @@
 
 M7 ships three threads in one milestone (per spec §"Why this milestone now"): the hiring flow that lets the operator add agents at runtime, the per-agent Docker runtime that sandboxes every agent including the M2.x-seeded ones, and the immutable security preamble that sits above `agent.md` in every system prompt. The plan extends six existing packages and adds four new ones; introduces zero new Go dependencies; lands one Postgres migration; and ships acceptance tests for every threat-model rule (`agent-sandbox-threat-model.md` Rules 1–10, `hiring-threat-model.md` Rules 1–12).
 
-The structural decisions slate (operator-approved 2026-05-02) is encoded throughout this plan. Where the spec deferred Q1 / Q12 / Q15 / Q18 to plan with explicit fallbacks, the plan commits to bridge networking with empirical N≥50 acceptance test (§9), socket-proxy `RepoDigests`-driven image pinning (§4), preamble-vs-skill empirical conflict test (§5), and an operator-side SkillHub spike as the §10 pre-implementation gate.
+The structural decisions slate (operator-approved 2026-05-02) is encoded throughout this plan. Where the spec deferred Q1 / Q12 / Q15 / Q18 to plan with explicit fallbacks, the plan commits to bridge networking with empirical N≥25 acceptance test (§9), socket-proxy `RepoDigests`-driven image pinning (§4), preamble-vs-skill empirical conflict test (§5), and an operator-side SkillHub spike as the §10 pre-implementation gate.
 
 ## Technical context
 
@@ -36,7 +36,7 @@ The structural decisions slate (operator-approved 2026-05-02) is encoded through
 
 **Constraints**: AGENTS.md concurrency rules (every goroutine has a `context.Context`, errgroup-wrapped subsystem lifecycle, `exec.CommandContext` for subprocess spawn, supervisor-managed pipes drained before `cmd.Wait`). New: every `agentcontainer.Controller` call carries a context-derived timeout matching the M2.1 spawn pattern.
 
-**Scale/scope**: single-tenant alpha. Estimated <100 agents per host at M7 ship; bridge driver chosen with overlay fallback gated on N≥50 empirical test (§9, decision #20).
+**Scale/scope**: single-tenant alpha. Estimated <100 agents per host at M7 ship; bridge driver chosen with overlay fallback gated on N≥25 empirical test (§9, decision #20).
 
 ## Constitution check
 
@@ -89,7 +89,7 @@ supervisor/internal/
 │   ├── reconcile.go           #   restart-time reconciliation
 │   ├── controller_test.go
 │   ├── reconcile_test.go
-│   └── network_scaling_test.go  #   `-tags=integration`; N≥50 acceptance (Q1)
+│   └── network_scaling_test.go  #   `-tags=integration`; N≥25 acceptance (Q1)
 ├── agentpolicy/             # NEW — preamble const + composer
 │   ├── preamble.go            #   the const + Hash()
 │   ├── compose.go             #   PrependPreamble(prompt) -> string
@@ -348,7 +348,7 @@ type ReconcileReport struct {
 - `reconcile_test.go::TestReconcileMatchesDockerPS` — fake socket-proxy returns 3 containers, expected set has 3 matches; report shows AdoptedRunning=3.
 - `reconcile_test.go::TestReconcileRestartsStoppedContainer` — fake reports stopped; expected says should_be_running; report shows Restarted=1.
 - `reconcile_test.go::TestReconcileGCsOrphan` — fake reports 1 container with no matching agents row; report shows GarbageCollected=[id].
-- `network_scaling_test.go::TestBridgeScalesToFiftyAgents` (`-tags=integration`) — provision 50 agent containers each with its own bridge network; assert all reachable from supervisor + each connects to its assigned mempalace sidecar; tear-down cleanly. Acceptance for Q1 (decision #20). If this test fails on the M7 host, plan amends to overlay before /garrison-implement signs off.
+- `network_scaling_test.go::TestBridgeScalesToTwentyFiveAgents` (`-tags=integration`) — provision 25 agent containers each with its own bridge network; assert all reachable from supervisor + each connects to its assigned mempalace sidecar; tear-down cleanly. Acceptance for Q1 (decision #20). If this test fails on the M7 host, plan amends to overlay before /garrison-implement signs off.
 
 ### 4. `internal/agentpolicy/` — preamble const + composer
 
@@ -765,7 +765,7 @@ After reconciliation completes, normal supervisor lifecycle resumes (LISTEN, dis
 - `supervisor/m7_skill_change_integration_test.go` — propose_skill_change → approve → bind-mount swap → next spawn sees new skill (US3).
 - `supervisor/m7_supersession_integration_test.go` — two pending bumps for same skill; approve one; sibling auto-rejects (FR-110a).
 - `supervisor/m7_reject_integration_test.go` — coarse-scan flagged proposal; operator rejects; row + audit persist (US4).
-- `internal/agentcontainer/network_scaling_test.go::TestBridgeScalesToFiftyAgents` — Q1 acceptance (decision #20).
+- `internal/agentcontainer/network_scaling_test.go::TestBridgeScalesToTwentyFiveAgents` — Q1 acceptance (decision #20).
 - `internal/agentpolicy/conflict_integration_test.go::TestPreambleWinsOverContradictorySkill` — Q15 acceptance (decision #23).
 
 ### Chaos tests (Go, `-tags=chaos`)
@@ -799,7 +799,7 @@ After reconciliation completes, normal supervisor lifecycle resumes (LISTEN, dis
 
 1. **SkillHub HTTP client shape** — finalised by the §10 operator-side spike before /garrison-tasks. The skillhub.go skeleton lands in /garrison-tasks; concrete auth-flow + version-pin handling fills in post-spike. Listed as a single task in /garrison-tasks (`T-skillhub-implement`).
 2. **Final preamble wording** — the placeholder ships now; the final operator-approved wording lands as a separate /garrison-tasks task (`T-preamble-finalize`) with a code-review gate on the const + the byte-equality fixture.
-3. **Per-agent network creation cost at scale** — Q1 empirical test passes locally on a Linux 6.x dev box; CI runs same test (decision #20). If CI reports systematic failure on N=50, plan amends to overlay before /garrison-implement signs off.
+3. **Per-agent network creation cost at scale** — Q1 empirical test passes locally on a Linux 6.x dev box; CI runs same test (decision #20). If CI reports systematic failure on N=25, plan amends to overlay before /garrison-implement signs off.
 4. **Coarse-scan rule set** — the regex list (`curl http`, `wget http`, `nc -e`, `bash -i`) is starter; /garrison-tasks may add (`base64 -d | sh`, `eval $(...)`, etc.). Track as `T-coarse-scan-rules` task.
 5. **Socket-proxy filter test** — decision #21 sketches the body-filter shape; /garrison-tasks expands the policy_test.sh coverage with the full attack-surface enumeration.
 6. **Chat-runtime parity migration sequencing** — FR-215 + decision #5 say the chat-CEO container adopts the sandbox rules at M7 ship. Whether this lands as a single task or splits across two (M5.1 chat-runtime container shape + M7 sandbox rule application) is a /garrison-tasks ordering call.

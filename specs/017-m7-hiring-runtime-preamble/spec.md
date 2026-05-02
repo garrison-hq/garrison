@@ -21,7 +21,7 @@
 
 These are the operator-approved answers from the `/garrison-specify` pre-flight, encoding the 18 binding questions from the context doc. Each one closes (or explicitly defers with a fallback) a question the plan would otherwise have to re-litigate.
 
-- Q1: Per-agent network scaling (bridge / overlay / shared-bridge). → A: **Defer to plan with bridge-driver fallback.** Plan empirically probes bridge scaling at N≥50 networks; switches to overlay if bridge fails.
+- Q1: Per-agent network scaling (bridge / overlay / shared-bridge). → A: **Defer to plan with bridge-driver fallback.** Plan empirically probes bridge scaling at N≥25 networks; switches to overlay if bridge fails.
 - Q2: `hiring_proposals` schema for skill-change proposals (extend vs split). → A: **Extend the existing table** with optional `target_agent_id`, `proposal_type` enum, `skill_diff_jsonb` columns. One table.
 - Q3: Image-build vs bind-mount for skills. → A: **Bind-mount, single base image** (per spike §4 lean).
 - Q4: `bump_skill_version` UX — full propose→approve cycle vs lighter approve-diff. → A: **Full propose→approve cycle.** Skill bump is a security event; operator fatigue is acceptable.
@@ -266,7 +266,7 @@ Citations to `agent-sandbox-threat-model.md` Rule N are abbreviated **AS-N**; `h
 - **Skill packages under 50 MB each** (no spike measurement; informed by skills.sh / SkillHub typical sizes). M7 ships without per-skill size cap; M7.1 polish if observed sizes exceed.
 - **SkillHub auth token rotation is operator-driven** (manual at M7). Auto-rotation is M9+ if SkillHub adds a refresh-token API.
 - **The operator is sole approver** at M7 ship. Multi-approver workflows are M9+ (governance milestone).
-- **Per-agent-network bridge driver scales to N=50 agents on a single host**, fallback to overlay if not (Q1 deferred-to-plan).
+- **Per-agent-network bridge driver scales to N=25 agents on a single host**, fallback to overlay if not (Q1 deferred-to-plan).
 - **Existing-agent migration is one-shot at M7 deploy time** — not idempotent across multiple M7 deploys; operator runs it once and the synthetic audit row prevents re-run.
 - **AGENTS.md active-milestone pointer flips to M7 by the operator at M7 implementation kickoff** (not by this spec).
 - **No regression on M5.4's MinIO sidecar or M2.3's Infisical sidecar** — both stay reachable from per-agent containers via the per-agent custom network's selective sidecar attach.
@@ -277,7 +277,7 @@ Citations to `agent-sandbox-threat-model.md` Rule N are abbreviated **AS-N**; `h
 
 These survived the binding-input pass and need operator input or empirical input before `/garrison-plan`:
 
-1. **Q1 — Per-agent network driver** — committed-to-bridge-with-overlay-fallback in the clarifications session, but plan must run an empirical N≥50 probe before final commitment.
+1. **Q1 — Per-agent network driver** — committed-to-bridge-with-overlay-fallback in the clarifications session, but plan must run an empirical N≥25 probe before final commitment.
 2. **Q15 — Preamble-vs-skill conflict resolution** — committed lean is "preamble wins via prompt position-power", BUT plan MUST validate empirically with a real opus / haiku spawn against a contrived skill before /garrison-implement.
 3. **Q18 — SkillHub live behaviour** — committed-to-deferred; needs an operator-side spike with SkillHub creds before /garrison-plan commits the HTTP client shape.
 4. **F1 — Single-tenant filter shape** — lean is structural-only `companies.id`, no query filter. If a customer-A operator is meant to see ONLY customer-A proposals at M7 ship, this needs to flip to "filter at query time."
