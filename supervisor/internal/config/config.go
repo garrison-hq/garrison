@@ -156,6 +156,20 @@ type Config struct {
 	DefaultSpawnCostUSD string        // GARRISON_DEFAULT_SPAWN_COST_USD, default "0.05"
 	RateLimitBackOff    time.Duration // GARRISON_RATE_LIMIT_BACK_OFF_SECONDS, default 60s
 	FinalizeResultGrace time.Duration // GARRISON_FINALIZE_RESULT_GRACE, default 3s
+
+	// M7 fields. Per-agent runtime defaults + skill-registry endpoints
+	// + the direct-exec feature flag that flips false at the migrate7
+	// grandfathering cutover (T014).
+	AgentUIDRangeStart      int    // GARRISON_AGENT_UID_RANGE_START, default 1000
+	AgentUIDRangeEnd        int    // GARRISON_AGENT_UID_RANGE_END, default 1999
+	DefaultContainerMemory  string // GARRISON_DEFAULT_CONTAINER_MEMORY, default "512m"
+	DefaultContainerCPUs    string // GARRISON_DEFAULT_CONTAINER_CPUS, default "1.0"
+	DefaultContainerPIDsLim int    // GARRISON_DEFAULT_CONTAINER_PIDS_LIMIT, default 200
+	SkillsShURL             string // GARRISON_SKILLS_SH_URL, default "https://skills.sh"
+	SkillHubURL             string // GARRISON_SKILLHUB_URL, default "http://garrison-skillhub:8080"
+	SkillHubToken           string // GARRISON_SKILLHUB_TOKEN, no default — empty disables SkillHub
+	UseDirectExec           bool   // GARRISON_USE_DIRECT_EXEC, default true; flipped to false by migrate7.Run after grandfathering completes
+	DockerSocketProxyURL    string // GARRISON_DOCKER_SOCKET_PROXY_URL, default "http://garrison-docker-proxy:2375"
 }
 
 // DefaultMinIOBucket per M5.4 spec FR-620.
@@ -249,6 +263,18 @@ func Load() (*Config, error) {
 		DefaultSpawnCostUSD: "0.05",
 		RateLimitBackOff:    60 * time.Second,
 		FinalizeResultGrace: 3 * time.Second,
+
+		// M7 defaults.
+		AgentUIDRangeStart:      1000,
+		AgentUIDRangeEnd:        1999,
+		DefaultContainerMemory:  "512m",
+		DefaultContainerCPUs:    "1.0",
+		DefaultContainerPIDsLim: 200,
+		SkillsShURL:             "https://skills.sh",
+		SkillHubURL:             "http://garrison-skillhub:8080",
+		SkillHubToken:           "",
+		UseDirectExec:           true,
+		DockerSocketProxyURL:    "http://garrison-docker-proxy:2375",
 	}
 
 	// M5.1 env overrides — all optional; defaults above are used
@@ -331,6 +357,57 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("config: GARRISON_FINALIZE_RESULT_GRACE must be >= 0; got %s", d)
 		}
 		cfg.FinalizeResultGrace = d
+	}
+
+	// M7 env overrides.
+	if v := os.Getenv("GARRISON_AGENT_UID_RANGE_START"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 100 {
+			return nil, fmt.Errorf("config: GARRISON_AGENT_UID_RANGE_START must be int >=100; got %q", v)
+		}
+		cfg.AgentUIDRangeStart = n
+	}
+	if v := os.Getenv("GARRISON_AGENT_UID_RANGE_END"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= cfg.AgentUIDRangeStart {
+			return nil, fmt.Errorf("config: GARRISON_AGENT_UID_RANGE_END must be int >start (%d); got %q", cfg.AgentUIDRangeStart, v)
+		}
+		cfg.AgentUIDRangeEnd = n
+	}
+	if v := os.Getenv("GARRISON_DEFAULT_CONTAINER_MEMORY"); v != "" {
+		cfg.DefaultContainerMemory = v
+	}
+	if v := os.Getenv("GARRISON_DEFAULT_CONTAINER_CPUS"); v != "" {
+		cfg.DefaultContainerCPUs = v
+	}
+	if v := os.Getenv("GARRISON_DEFAULT_CONTAINER_PIDS_LIMIT"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 10 {
+			return nil, fmt.Errorf("config: GARRISON_DEFAULT_CONTAINER_PIDS_LIMIT must be int >=10; got %q", v)
+		}
+		cfg.DefaultContainerPIDsLim = n
+	}
+	if v := os.Getenv("GARRISON_SKILLS_SH_URL"); v != "" {
+		cfg.SkillsShURL = v
+	}
+	if v := os.Getenv("GARRISON_SKILLHUB_URL"); v != "" {
+		cfg.SkillHubURL = v
+	}
+	if v := os.Getenv("GARRISON_SKILLHUB_TOKEN"); v != "" {
+		cfg.SkillHubToken = v
+	}
+	if v := os.Getenv("GARRISON_USE_DIRECT_EXEC"); v != "" {
+		switch v {
+		case "true", "1", "yes":
+			cfg.UseDirectExec = true
+		case "false", "0", "no":
+			cfg.UseDirectExec = false
+		default:
+			return nil, fmt.Errorf("config: GARRISON_USE_DIRECT_EXEC must be true/false/1/0/yes/no; got %q", v)
+		}
+	}
+	if v := os.Getenv("GARRISON_DOCKER_SOCKET_PROXY_URL"); v != "" {
+		cfg.DockerSocketProxyURL = v
 	}
 
 	dbURL := os.Getenv("GARRISON_DATABASE_URL")

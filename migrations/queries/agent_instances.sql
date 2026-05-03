@@ -47,6 +47,19 @@ UPDATE agent_instances
 SET pid = $2
 WHERE id = $1;
 
+-- name: UpdateInstanceM7Hashes :exec
+-- M7 FR-303 / FR-304 / FR-305: every spawn records the immutable
+-- preamble's hash, the cwd CLAUDE.md hash (NULL when claude is
+-- invoked without a CLAUDE.md in the workspace), and the per-agent
+-- container image digest (empty string when the spawn ran in
+-- direct-exec mode pre-migrate7). Called after InsertRunningInstance
+-- as part of step 3a in spawn.runRealClaude.
+UPDATE agent_instances
+   SET preamble_hash = sqlc.arg(preamble_hash),
+       claude_md_hash = sqlc.arg(claude_md_hash),
+       image_digest = sqlc.arg(image_digest)
+ WHERE id = sqlc.arg(id);
+
 -- name: CountRunningByDepartment :one
 SELECT COUNT(*) FROM agent_instances
 WHERE department_id = $1 AND status = 'running';

@@ -16,6 +16,7 @@ sql:
       - ../migrations/20260429000016_m5_2_chat_archive_and_cascade.sql
       - ../migrations/20260430000000_m5_3_chat_driven_mutations.sql
       - ../migrations/20260503000000_m6_decomposition_hygiene_throttle.sql
+      - ../migrations/20260504000000_m7_hiring_runtime_preamble.sql
     gen:
       go:
         package: store

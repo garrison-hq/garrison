@@ -7,9 +7,10 @@ import (
 )
 
 // TestVerbsRegistryMatchesEnumeration is the sealed-allow-list test
-// per chat-threat-model.md Rule 1 + spec FR-411 + plan §1.1. The Verbs
-// slice MUST contain exactly the M5.3 enumeration. Adding a verb
-// without updating the threat-model amendment + this test fails CI.
+// per chat-threat-model.md Rule 1 + spec FR-411 + plan §1.1 (M5.3) +
+// FR-103 (M7). The Verbs slice MUST contain exactly the enumerated
+// chat-side verb set. Adding a verb without updating the threat-model
+// amendment + this test fails CI.
 func TestVerbsRegistryMatchesEnumeration(t *testing.T) {
 	want := []string{
 		"create_ticket",
@@ -20,6 +21,9 @@ func TestVerbsRegistryMatchesEnumeration(t *testing.T) {
 		"spawn_agent",
 		"edit_agent_config",
 		"propose_hire",
+		// M7 FR-103 additions:
+		"propose_skill_change",
+		"bump_skill_version",
 	}
 	got := VerbNames()
 	sort.Strings(got)

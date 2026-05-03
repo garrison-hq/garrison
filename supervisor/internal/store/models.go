@@ -9,33 +9,66 @@ import (
 )
 
 type Agent struct {
+	ID                  pgtype.UUID
+	DepartmentID        pgtype.UUID
+	RoleSlug            string
+	AgentMd             string
+	Model               string
+	Skills              []byte
+	McpTools            []byte
+	ListensFor          []byte
+	PalaceWing          *string
+	Status              string
+	CreatedAt           pgtype.Timestamptz
+	McpConfig           []byte
+	UpdatedAt           pgtype.Timestamptz
+	ImageDigest         *string
+	RuntimeCaps         []byte
+	EgressGrantJsonb    []byte
+	McpServersJsonb     []byte
+	LastGrandfatheredAt pgtype.Timestamptz
+	HostUid             *int32
+}
+
+type AgentContainerEvent struct {
+	ID              pgtype.UUID
+	AgentID         pgtype.UUID
+	Kind            string
+	ImageDigest     *string
+	StartedAt       pgtype.Timestamptz
+	StoppedAt       pgtype.Timestamptz
+	StopReason      *string
+	CgroupCapsJsonb []byte
+	RetentionClass  *string
+	CreatedAt       pgtype.Timestamptz
+}
+
+type AgentInstallJournal struct {
 	ID           pgtype.UUID
-	DepartmentID pgtype.UUID
-	RoleSlug     string
-	AgentMd      string
-	Model        string
-	Skills       []byte
-	McpTools     []byte
-	ListensFor   []byte
-	PalaceWing   *string
-	Status       string
+	ProposalID   pgtype.UUID
+	Step         string
+	Outcome      string
+	ErrorKind    *string
+	PayloadJsonb []byte
 	CreatedAt    pgtype.Timestamptz
-	McpConfig    []byte
-	UpdatedAt    pgtype.Timestamptz
 }
 
 type AgentInstance struct {
-	ID           pgtype.UUID
-	DepartmentID pgtype.UUID
-	TicketID     pgtype.UUID
-	Pid          *int32
-	StartedAt    pgtype.Timestamptz
-	FinishedAt   pgtype.Timestamptz
-	Status       string
-	ExitReason   *string
-	TotalCostUsd pgtype.Numeric
-	WakeUpStatus *string
-	RoleSlug     string
+	ID                 pgtype.UUID
+	DepartmentID       pgtype.UUID
+	TicketID           pgtype.UUID
+	Pid                *int32
+	StartedAt          pgtype.Timestamptz
+	FinishedAt         pgtype.Timestamptz
+	Status             string
+	ExitReason         *string
+	TotalCostUsd       pgtype.Numeric
+	WakeUpStatus       *string
+	RoleSlug           string
+	ImageDigest        string
+	PreambleHash       string
+	ClaudeMdHash       *string
+	OriginatingAuditID pgtype.UUID
 }
 
 type AgentRoleSecret struct {
@@ -76,6 +109,7 @@ type ChatMutationAudit struct {
 	AffectedResourceID   *string
 	AffectedResourceType *string
 	CreatedAt            pgtype.Timestamptz
+	RetentionClass       *string
 }
 
 type ChatSession struct {
@@ -126,6 +160,15 @@ type HiringProposal struct {
 	ProposedByChatSessionID pgtype.UUID
 	Status                  string
 	CreatedAt               pgtype.Timestamptz
+	TargetAgentID           pgtype.UUID
+	ProposalType            string
+	SkillDiffJsonb          []byte
+	ProposalSnapshotJsonb   []byte
+	SkillDigestAtPropose    *string
+	ApprovedAt              pgtype.Timestamptz
+	ApprovedBy              pgtype.UUID
+	RejectedAt              pgtype.Timestamptz
+	RejectedReason          *string
 }
 
 type SecretMetadatum struct {

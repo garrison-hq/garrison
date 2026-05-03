@@ -100,7 +100,11 @@ ENV USE_BUILTIN_RIPGREP=0 \
 RUN addgroup -S garrison \
  && adduser -S -G garrison -H -s /sbin/nologin garrison \
  && mkdir -p /var/lib/garrison/mcp \
+                /var/lib/garrison/workspaces \
+                /var/lib/garrison/skills \
  && chown -R garrison:garrison /var/lib/garrison \
- && chmod 0750 /var/lib/garrison/mcp
+ && chmod 0750 /var/lib/garrison/mcp \
+                /var/lib/garrison/workspaces \
+                /var/lib/garrison/skills
 USER garrison
 ENTRYPOINT ["/supervisor"]

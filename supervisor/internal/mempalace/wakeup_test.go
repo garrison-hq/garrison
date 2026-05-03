@@ -9,7 +9,22 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/garrison-hq/garrison/supervisor/internal/agentpolicy"
 )
+
+// agentpolicyBodyForTest exposes the package-private import via a tiny
+// local indirection so the imports above stay tidy.
+func agentpolicyBodyForTest() string {
+	// Take a 64-char prefix of the preamble body so the test substring
+	// is stable but doesn't depend on exact full-body bytes — the byte-
+	// equality test in agentpolicy already pins those.
+	body := agentpolicy.Body()
+	if len(body) > 64 {
+		return body[:64]
+	}
+	return body
+}
 
 func TestWakeupOK(t *testing.T) {
 	fake := &fakeExec{stdout: []byte("Wake-up text (~79 tokens):\n##L0...")}
@@ -167,5 +182,36 @@ func TestComposeSystemPromptWithoutWakeUp(t *testing.T) {
 	}
 	if !strings.Contains(got, "ticket TKT-1") {
 		t.Error("missing ticket_id substitution")
+	}
+}
+
+// TestComposeSystemPromptPrependsPreamble (M7 FR-303 / T011) pins the
+// preamble's prompt-position above agent.md. The first agentpolicy.Body
+// snippet appears before the agent.md substring on every spawn,
+// regardless of whether the wake-up succeeded.
+func TestComposeSystemPromptPrependsPreamble(t *testing.T) {
+	pre := agentpolicyBodyForTest()
+
+	cases := []struct {
+		name string
+		out  string
+	}{
+		{"with wake-up", ComposeSystemPrompt("AGENT_MD_CONTENT", "WAKE_UP_STDOUT", "TKT-1", "INST-1")},
+		{"empty wake-up", ComposeSystemPrompt("AGENT_MD_CONTENT", "", "TKT-1", "INST-1")},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			preIdx := strings.Index(c.out, pre)
+			if preIdx == -1 {
+				t.Fatalf("preamble body absent from system prompt")
+			}
+			agentIdx := strings.Index(c.out, "AGENT_MD_CONTENT")
+			if agentIdx == -1 {
+				t.Fatalf("agent.md content absent")
+			}
+			if preIdx >= agentIdx {
+				t.Errorf("preamble must precede agent.md; preIdx=%d agentIdx=%d", preIdx, agentIdx)
+			}
+		})
 	}
 }

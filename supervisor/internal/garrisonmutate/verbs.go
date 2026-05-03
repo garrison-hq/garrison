@@ -124,6 +124,24 @@ var Verbs = []Verb{
 		AffectedResourceType: "hiring_proposal",
 		Description:          "Write a hiring proposal row visible on the operator's stopgap page.",
 	},
+	{
+		Name: "propose_skill_change",
+		Handler: func(ctx context.Context, deps Deps, args json.RawMessage) (Result, error) {
+			return handleProposeSkillChange(ctx, deps, args)
+		},
+		ReversibilityClass:   3,
+		AffectedResourceType: "hiring_proposal",
+		Description:          "Propose adding, removing, or bumping skills on an existing agent. Operator review required before install.",
+	},
+	{
+		Name: "bump_skill_version",
+		Handler: func(ctx context.Context, deps Deps, args json.RawMessage) (Result, error) {
+			return handleBumpSkillVersion(ctx, deps, args)
+		},
+		ReversibilityClass:   3,
+		AffectedResourceType: "hiring_proposal",
+		Description:          "Propose bumping one installed skill to a new version. Operator review required before install.",
+	},
 }
 
 // FindVerb returns the Verb entry for name, or nil if not registered.
@@ -165,12 +183,14 @@ func stubHandler(_ context.Context, _ Deps, _ json.RawMessage) (Result, error) {
 // land. Until then, these stubs satisfy the registry's HandlerFunc
 // type and let the sealed-allow-list test pass.
 var (
-	handleCreateTicket     HandlerFunc = stubHandler
-	handleEditTicket       HandlerFunc = stubHandler
-	handleTransitionTicket HandlerFunc = stubHandler
-	handlePauseAgent       HandlerFunc = stubHandler
-	handleResumeAgent      HandlerFunc = stubHandler
-	handleSpawnAgent       HandlerFunc = stubHandler
-	handleEditAgentConfig  HandlerFunc = stubHandler
-	handleProposeHire      HandlerFunc = stubHandler
+	handleCreateTicket       HandlerFunc = stubHandler
+	handleEditTicket         HandlerFunc = stubHandler
+	handleTransitionTicket   HandlerFunc = stubHandler
+	handlePauseAgent         HandlerFunc = stubHandler
+	handleResumeAgent        HandlerFunc = stubHandler
+	handleSpawnAgent         HandlerFunc = stubHandler
+	handleEditAgentConfig    HandlerFunc = stubHandler
+	handleProposeHire        HandlerFunc = stubHandler
+	handleProposeSkillChange HandlerFunc = stubHandler
+	handleBumpSkillVersion   HandlerFunc = stubHandler
 )

@@ -20,9 +20,11 @@ Agents are subprocesses spawned on events, run to completion, and are terminated
 
 Workflow transitions do not fail because an expected MemPalace write was missing or thin. Memory hygiene issues surface on a dashboard for weekly review and backfill, not as transition blockers. Enforcement is by dashboard visibility and operator discipline, not by code-level gates on the workflow. See RATIONALE §5.
 
-### V. Skills come from skills.sh; no curated internal library
+### V. Skills come from operator-approved registries; no curated internal library
 
-Agents acquire capabilities through skills installed from the skills.sh registry, not through a hand-maintained internal skill library or inline skills pasted into `agent.md` files. `agent.md` describes who the agent is; skills describe what it knows. Skills installed from the registry are the unit of capability reuse. See RATIONALE §7.
+Agents acquire capabilities through skills installed from operator-approved registries, not through a hand-maintained internal skill library or inline skills pasted into `agent.md` files. `agent.md` describes who the agent is; skills describe what it knows. Skills installed from a registry are the unit of capability reuse.
+
+At M7 the approved-registry set is **skills.sh (public) + self-hosted SkillHub (`github.com/iflytek/skillhub`)**, both consumed via supervisor-mediated HTTPS clients (`internal/skillregistry/`). Adding a third registry requires the same shape: a `Registry`-implementing client plus a one-line registration. See RATIONALE §7 (including the 2026-05-04 amendment) and `docs/security/hiring-threat-model.md` §5.
 
 ### VI. Hiring is UI-driven, not git-driven
 
@@ -64,4 +66,4 @@ Changes to this constitution are not made directly. To amend a principle:
 
 If a principle here drifts from `RATIONALE.md` before this process is followed, RATIONALE wins and this file is the one with the bug.
 
-**Version**: 1.0.0 | **Ratified**: 2026-04-21 | **Last Amended**: 2026-04-21
+**Version**: 1.1.0 | **Ratified**: 2026-04-21 | **Last Amended**: 2026-05-04 (Principle V — skills.sh-only → skills.sh + self-hosted SkillHub at M7; RATIONALE §7 amended in same commit)

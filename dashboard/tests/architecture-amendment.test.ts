@@ -115,3 +115,29 @@ describe('ARCHITECTURE.md M6 amendment', () => {
     expect(source).toContain('throttle_events');
   });
 });
+
+describe('ARCHITECTURE.md M7 amendment', () => {
+  // Pins the M7 amendment substrings per T022. The M7 paragraph is
+  // annotated with the shipped status + retro link + the threat-model
+  // path references the agent-sandbox + hiring threat models the
+  // milestone closes against.
+  it('M7 paragraph annotated with shipped status', () => {
+    const path = resolve(import.meta.dirname, '..', '..', 'ARCHITECTURE.md');
+    const source = readFileSync(path, 'utf-8');
+    expect(source).toContain('**M7 — ');
+    expect(source).toContain('Shipped 2026-05-03');
+    expect(source).toContain('docs/retros/m7.md');
+  });
+
+  it('M7 paragraph references agent-sandbox-threat-model.md', () => {
+    const path = resolve(import.meta.dirname, '..', '..', 'ARCHITECTURE.md');
+    const source = readFileSync(path, 'utf-8');
+    expect(source).toContain('docs/security/agent-sandbox-threat-model.md');
+  });
+
+  it('M7 paragraph references hiring-threat-model.md', () => {
+    const path = resolve(import.meta.dirname, '..', '..', 'ARCHITECTURE.md');
+    const source = readFileSync(path, 'utf-8');
+    expect(source).toContain('docs/security/hiring-threat-model.md');
+  });
+});

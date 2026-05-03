@@ -58,7 +58,7 @@ func (q *Queries) FindAgentByRoleSlug(ctx context.Context, roleSlug string) (Fin
 }
 
 const getAgentByDepartmentAndRole = `-- name: GetAgentByDepartmentAndRole :one
-SELECT id, department_id, role_slug, agent_md, model, skills, mcp_tools, listens_for, palace_wing, status, created_at, mcp_config, updated_at FROM agents
+SELECT id, department_id, role_slug, agent_md, model, skills, mcp_tools, listens_for, palace_wing, status, created_at, mcp_config, updated_at, image_digest, runtime_caps, egress_grant_jsonb, mcp_servers_jsonb, last_grandfathered_at, host_uid FROM agents
 WHERE department_id = $1 AND role_slug = $2 AND status = 'active'
 `
 
@@ -84,12 +84,18 @@ func (q *Queries) GetAgentByDepartmentAndRole(ctx context.Context, arg GetAgentB
 		&i.CreatedAt,
 		&i.McpConfig,
 		&i.UpdatedAt,
+		&i.ImageDigest,
+		&i.RuntimeCaps,
+		&i.EgressGrantJsonb,
+		&i.McpServersJsonb,
+		&i.LastGrandfatheredAt,
+		&i.HostUid,
 	)
 	return i, err
 }
 
 const getAgentByID = `-- name: GetAgentByID :one
-SELECT id, department_id, role_slug, agent_md, model, skills, mcp_tools, listens_for, palace_wing, status, created_at, mcp_config, updated_at FROM agents WHERE id = $1
+SELECT id, department_id, role_slug, agent_md, model, skills, mcp_tools, listens_for, palace_wing, status, created_at, mcp_config, updated_at, image_digest, runtime_caps, egress_grant_jsonb, mcp_servers_jsonb, last_grandfathered_at, host_uid FROM agents WHERE id = $1
 `
 
 func (q *Queries) GetAgentByID(ctx context.Context, id pgtype.UUID) (Agent, error) {
@@ -109,12 +115,18 @@ func (q *Queries) GetAgentByID(ctx context.Context, id pgtype.UUID) (Agent, erro
 		&i.CreatedAt,
 		&i.McpConfig,
 		&i.UpdatedAt,
+		&i.ImageDigest,
+		&i.RuntimeCaps,
+		&i.EgressGrantJsonb,
+		&i.McpServersJsonb,
+		&i.LastGrandfatheredAt,
+		&i.HostUid,
 	)
 	return i, err
 }
 
 const listActiveAgents = `-- name: ListActiveAgents :many
-SELECT id, department_id, role_slug, agent_md, model, skills, mcp_tools, listens_for, palace_wing, status, created_at, mcp_config, updated_at FROM agents
+SELECT id, department_id, role_slug, agent_md, model, skills, mcp_tools, listens_for, palace_wing, status, created_at, mcp_config, updated_at, image_digest, runtime_caps, egress_grant_jsonb, mcp_servers_jsonb, last_grandfathered_at, host_uid FROM agents
 WHERE status = 'active'
 ORDER BY department_id, role_slug
 `
@@ -142,6 +154,12 @@ func (q *Queries) ListActiveAgents(ctx context.Context) ([]Agent, error) {
 			&i.CreatedAt,
 			&i.McpConfig,
 			&i.UpdatedAt,
+			&i.ImageDigest,
+			&i.RuntimeCaps,
+			&i.EgressGrantJsonb,
+			&i.McpServersJsonb,
+			&i.LastGrandfatheredAt,
+			&i.HostUid,
 		); err != nil {
 			return nil, err
 		}
