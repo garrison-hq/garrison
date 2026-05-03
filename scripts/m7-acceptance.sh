@@ -49,6 +49,7 @@ run_go_test() {
   else
     fail "${name}"
   fi
+  return 0
 }
 
 echo "M7 acceptance run — ${REPO_ROOT}"

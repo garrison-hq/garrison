@@ -249,37 +249,55 @@ func parseSkillChangeArgs(raw json.RawMessage) (ProposeSkillChangeArgs, *Result)
 	}
 	args.AgentRoleSlug = strings.TrimSpace(args.AgentRoleSlug)
 	args.JustificationMD = strings.TrimSpace(args.JustificationMD)
-	if args.AgentRoleSlug == "" {
-		r := validationFailure("propose_skill_change: agent_role_slug is required")
-		return args, &r
-	}
-	if args.JustificationMD == "" {
-		r := validationFailure("propose_skill_change: justification_md is required")
-		return args, &r
-	}
-	if len(args.JustificationMD) > 10000 {
-		r := validationFailure("propose_skill_change: justification_md exceeds 10000 chars")
-		return args, &r
-	}
-	total := len(args.Add) + len(args.Remove) + len(args.Bump)
-	if total == 0 {
-		r := validationFailure("propose_skill_change: at least one of add/remove/bump must be non-empty")
-		return args, &r
-	}
-	if total > maxSkillEntriesPerProposal {
-		r := validationFailure(fmt.Sprintf("propose_skill_change: too many entries (max %d)", maxSkillEntriesPerProposal))
-		return args, &r
-	}
-	if r := validateSkillEntries("add", args.Add, true); r != nil {
+	if r := validateSkillChangeRequiredFields(args); r != nil {
 		return args, r
 	}
-	if r := validateSkillEntries("remove", args.Remove, false); r != nil {
+	if r := validateSkillChangeEntryCount(args); r != nil {
 		return args, r
 	}
-	if r := validateSkillBumps(args.Bump); r != nil {
+	if r := validateAllSkillEntries(args); r != nil {
 		return args, r
 	}
 	return args, nil
+}
+
+func validateSkillChangeRequiredFields(args ProposeSkillChangeArgs) *Result {
+	if args.AgentRoleSlug == "" {
+		r := validationFailure("propose_skill_change: agent_role_slug is required")
+		return &r
+	}
+	if args.JustificationMD == "" {
+		r := validationFailure("propose_skill_change: justification_md is required")
+		return &r
+	}
+	if len(args.JustificationMD) > 10000 {
+		r := validationFailure("propose_skill_change: justification_md exceeds 10000 chars")
+		return &r
+	}
+	return nil
+}
+
+func validateSkillChangeEntryCount(args ProposeSkillChangeArgs) *Result {
+	total := len(args.Add) + len(args.Remove) + len(args.Bump)
+	if total == 0 {
+		r := validationFailure("propose_skill_change: at least one of add/remove/bump must be non-empty")
+		return &r
+	}
+	if total > maxSkillEntriesPerProposal {
+		r := validationFailure(fmt.Sprintf("propose_skill_change: too many entries (max %d)", maxSkillEntriesPerProposal))
+		return &r
+	}
+	return nil
+}
+
+func validateAllSkillEntries(args ProposeSkillChangeArgs) *Result {
+	if r := validateSkillEntries("add", args.Add, true); r != nil {
+		return r
+	}
+	if r := validateSkillEntries("remove", args.Remove, false); r != nil {
+		return r
+	}
+	return validateSkillBumps(args.Bump)
 }
 
 // parseBumpSkillVersionArgs unmarshals + validates a BumpSkillVersion
