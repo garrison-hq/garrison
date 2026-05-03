@@ -34,51 +34,10 @@ func (c *socketProxyController) Reconcile(ctx context.Context, expected []Expect
 		seenIDs[a.ID] = struct{}{}
 		exp, ok := expectedByID[a.ID]
 		if !ok {
-			// Orphan — no agents row references this container.
-			c.logger.Info("agentcontainer: gc orphan", "container_id", a.ID, "image", a.Image)
-			if err := c.Remove(ctx, a.ID); err != nil {
-				report.Mismatches = append(report.Mismatches, ReconcileMismatch{
-					ActualKind: a.State,
-					Reason:     "orphan remove failed: " + err.Error(),
-				})
-				continue
-			}
-			report.GarbageCollected = append(report.GarbageCollected, a.ID)
+			c.gcOrphan(ctx, a, &report)
 			continue
 		}
-		switch exp.State {
-		case ExpectedRunning:
-			if a.State == "running" {
-				report.AdoptedRunning = append(report.AdoptedRunning, exp.AgentID)
-			} else {
-				if err := c.Start(ctx, a.ID); err != nil {
-					report.Mismatches = append(report.Mismatches, ReconcileMismatch{
-						AgentID: exp.AgentID, Expected: exp.State, ActualKind: a.State,
-						Reason: "restart failed: " + err.Error(),
-					})
-					continue
-				}
-				report.Restarted = append(report.Restarted, exp.AgentID)
-			}
-		case ExpectedStopped:
-			if a.State == "running" {
-				if err := c.Stop(ctx, a.ID); err != nil {
-					report.Mismatches = append(report.Mismatches, ReconcileMismatch{
-						AgentID: exp.AgentID, Expected: exp.State, ActualKind: a.State,
-						Reason: "stop failed: " + err.Error(),
-					})
-				}
-			}
-		case ExpectedRemoved:
-			if err := c.Remove(ctx, a.ID); err != nil {
-				report.Mismatches = append(report.Mismatches, ReconcileMismatch{
-					AgentID: exp.AgentID, Expected: exp.State, ActualKind: a.State,
-					Reason: "remove failed: " + err.Error(),
-				})
-				continue
-			}
-			report.GarbageCollected = append(report.GarbageCollected, a.ID)
-		}
+		c.reconcileExpected(ctx, a, exp, &report)
 	}
 
 	// Expected containers that the docker daemon doesn't know about
@@ -96,4 +55,65 @@ func (c *socketProxyController) Reconcile(ctx context.Context, expected []Expect
 	}
 
 	return report, nil
+}
+
+func (c *socketProxyController) gcOrphan(ctx context.Context, a containerJSON, report *ReconcileReport) {
+	c.logger.Info("agentcontainer: gc orphan", "container_id", a.ID, "image", a.Image)
+	if err := c.Remove(ctx, a.ID); err != nil {
+		report.Mismatches = append(report.Mismatches, ReconcileMismatch{
+			ActualKind: a.State,
+			Reason:     "orphan remove failed: " + err.Error(),
+		})
+		return
+	}
+	report.GarbageCollected = append(report.GarbageCollected, a.ID)
+}
+
+func (c *socketProxyController) reconcileExpected(ctx context.Context, a containerJSON, exp ExpectedContainer, report *ReconcileReport) {
+	switch exp.State {
+	case ExpectedRunning:
+		c.reconcileRunning(ctx, a, exp, report)
+	case ExpectedStopped:
+		c.reconcileStopped(ctx, a, exp, report)
+	case ExpectedRemoved:
+		c.reconcileRemoved(ctx, a, exp, report)
+	}
+}
+
+func (c *socketProxyController) reconcileRunning(ctx context.Context, a containerJSON, exp ExpectedContainer, report *ReconcileReport) {
+	if a.State == "running" {
+		report.AdoptedRunning = append(report.AdoptedRunning, exp.AgentID)
+		return
+	}
+	if err := c.Start(ctx, a.ID); err != nil {
+		report.Mismatches = append(report.Mismatches, ReconcileMismatch{
+			AgentID: exp.AgentID, Expected: exp.State, ActualKind: a.State,
+			Reason: "restart failed: " + err.Error(),
+		})
+		return
+	}
+	report.Restarted = append(report.Restarted, exp.AgentID)
+}
+
+func (c *socketProxyController) reconcileStopped(ctx context.Context, a containerJSON, exp ExpectedContainer, report *ReconcileReport) {
+	if a.State != "running" {
+		return
+	}
+	if err := c.Stop(ctx, a.ID); err != nil {
+		report.Mismatches = append(report.Mismatches, ReconcileMismatch{
+			AgentID: exp.AgentID, Expected: exp.State, ActualKind: a.State,
+			Reason: "stop failed: " + err.Error(),
+		})
+	}
+}
+
+func (c *socketProxyController) reconcileRemoved(ctx context.Context, a containerJSON, exp ExpectedContainer, report *ReconcileReport) {
+	if err := c.Remove(ctx, a.ID); err != nil {
+		report.Mismatches = append(report.Mismatches, ReconcileMismatch{
+			AgentID: exp.AgentID, Expected: exp.State, ActualKind: a.State,
+			Reason: "remove failed: " + err.Error(),
+		})
+		return
+	}
+	report.GarbageCollected = append(report.GarbageCollected, a.ID)
 }

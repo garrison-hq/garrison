@@ -78,10 +78,10 @@ check_rejected "BUILD disabled — image build rejected" \
 check_rejected "SWARM disabled — swarm init rejected" \
   POST /swarm/init '{}'
 
-# TODO (operator-driven HAProxy ACL or sidecar): body-field filter
-# rules per plan §12. These cases land once a body-inspecting filter
-# is in front of the proxy. They're documented here so the test
-# expands cleanly when the filter ships:
+# Body-field filter rules per plan §12 (operator-driven HAProxy ACL or
+# sidecar). These cases land once a body-inspecting filter is in front
+# of the proxy. They're documented here so the test expands cleanly
+# when the filter ships:
 #
 #   check_rejected "Image=ubuntu rejected (only garrison-claude:m5)" \
 #     POST /containers/create '{"Image":"ubuntu"}'

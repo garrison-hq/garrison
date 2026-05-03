@@ -18,9 +18,28 @@ SKIPPED=0
 declare -a FAILURES=()
 declare -a SKIPS=()
 
-ok() { PASS=$((PASS + 1)); printf '  ✅  %s\n' "$1"; }
-fail() { FAIL=$((FAIL + 1)); FAILURES+=("$1"); printf '  ❌  %s\n' "$1" >&2; }
-skip() { SKIPPED=$((SKIPPED + 1)); SKIPS+=("$1"); printf '  ⏭   %s\n' "$1"; }
+ok() {
+  local label="$1"
+  PASS=$((PASS + 1))
+  printf '  ✅  %s\n' "${label}"
+  return 0
+}
+
+fail() {
+  local label="$1"
+  FAIL=$((FAIL + 1))
+  FAILURES+=("${label}")
+  printf '  ❌  %s\n' "${label}" >&2
+  return 0
+}
+
+skip() {
+  local label="$1"
+  SKIPPED=$((SKIPPED + 1))
+  SKIPS+=("${label}")
+  printf '  ⏭   %s\n' "${label}"
+  return 0
+}
 
 run_go_test() {
   local name="$1"; shift

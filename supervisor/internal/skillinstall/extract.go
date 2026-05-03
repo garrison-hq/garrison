@@ -74,47 +74,53 @@ func SafeExtractTarGz(reader io.Reader, destDir string) error {
 		if err != nil {
 			return fmt.Errorf("%w: tar header: %v", ErrUnsupportedArchive, err)
 		}
-
 		if err := validateEntry(hdr); err != nil {
 			return err
 		}
-
-		// Every fs operation below goes through `root` — os.Root's
-		// methods reject any name that resolves outside the rooted
-		// directory, so a regression in validateEntry can't produce
-		// a tar-slip write. This is the canonical safe-extract
-		// pattern (Go 1.24+); it satisfies tar-slip taint analyzers
-		// because the entry name flows into root-scoped methods,
-		// not free filepath.Join calls.
-		switch hdr.Typeflag {
-		case tar.TypeDir:
-			if err := root.MkdirAll(hdr.Name, fsModeFromTar(hdr.Mode, 0o755)); err != nil {
-				return fmt.Errorf("skillinstall: mkdir %s: %w", hdr.Name, err)
-			}
-		case tar.TypeReg:
-			if dir := filepath.Dir(hdr.Name); dir != "." && dir != "" {
-				if err := root.MkdirAll(dir, 0o755); err != nil {
-					return fmt.Errorf("skillinstall: mkdir parent %s: %w", dir, err)
-				}
-			}
-			limit := MaxExtractedBytes - written
-			n, err := writeFile(root, tr, hdr.Name, fsModeFromTar(hdr.Mode, 0o644), limit)
-			written += n
-			if err != nil {
-				return err
-			}
-		case tar.TypeSymlink:
-			// validateEntry already rejected absolute Linkname and
-			// out-of-root relative ones. Symlink is created via
-			// root-scoped helper so the link's location is bounded.
-			if err := root.Symlink(hdr.Linkname, hdr.Name); err != nil {
-				return fmt.Errorf("skillinstall: symlink %s -> %s: %w", hdr.Name, hdr.Linkname, err)
-			}
-		default:
-			// Hardlinks, char devices, FIFOs, etc. — never appear in
-			// well-formed skill packages; reject the archive.
-			return fmt.Errorf("%w: unsupported tar type %c at %s", ErrArchiveUnsafe, hdr.Typeflag, hdr.Name)
+		n, err := extractEntry(root, tr, hdr, written)
+		written += n
+		if err != nil {
+			return err
 		}
+	}
+}
+
+// extractEntry handles one tar entry per its Typeflag. Returns bytes
+// written (zero for non-regular entries) plus any error. Pulled out
+// of SafeExtractTarGz to keep the extract loop's cognitive complexity
+// below Sonar's threshold.
+//
+// Every fs operation goes through `root` — os.Root's methods reject
+// any name that resolves outside the rooted directory, so a regression
+// in validateEntry can't produce a tar-slip write. This is the
+// canonical safe-extract pattern (Go 1.24+).
+func extractEntry(root *os.Root, tr *tar.Reader, hdr *tar.Header, written int64) (int64, error) {
+	switch hdr.Typeflag {
+	case tar.TypeDir:
+		if err := root.MkdirAll(hdr.Name, fsModeFromTar(hdr.Mode, 0o755)); err != nil {
+			return 0, fmt.Errorf("skillinstall: mkdir %s: %w", hdr.Name, err)
+		}
+		return 0, nil
+	case tar.TypeReg:
+		if dir := filepath.Dir(hdr.Name); dir != "." && dir != "" {
+			if err := root.MkdirAll(dir, 0o755); err != nil {
+				return 0, fmt.Errorf("skillinstall: mkdir parent %s: %w", dir, err)
+			}
+		}
+		limit := MaxExtractedBytes - written
+		return writeFile(root, tr, hdr.Name, fsModeFromTar(hdr.Mode, 0o644), limit)
+	case tar.TypeSymlink:
+		// validateEntry already rejected absolute Linkname and
+		// out-of-root relative ones. Symlink is created via
+		// root-scoped helper so the link's location is bounded.
+		if err := root.Symlink(hdr.Linkname, hdr.Name); err != nil {
+			return 0, fmt.Errorf("skillinstall: symlink %s -> %s: %w", hdr.Name, hdr.Linkname, err)
+		}
+		return 0, nil
+	default:
+		// Hardlinks, char devices, FIFOs, etc. — never appear in
+		// well-formed skill packages; reject the archive.
+		return 0, fmt.Errorf("%w: unsupported tar type %c at %s", ErrArchiveUnsafe, hdr.Typeflag, hdr.Name)
 	}
 }
 

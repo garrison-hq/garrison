@@ -198,8 +198,14 @@ func realProposeSkillChangeHandler(ctx context.Context, deps Deps, raw json.RawM
 	if vRes != nil {
 		return *vRes, nil
 	}
-	return runSkillProposalTx(ctx, deps, "propose_skill_change", args.AgentRoleSlug, "skill_change",
-		args.JustificationMD, skillChangeDiffJSON(args), skillChangeSnapshotJSON(args), "")
+	return runSkillProposalTx(ctx, deps, skillProposalTxInput{
+		Verb:           "propose_skill_change",
+		AgentRoleSlug:  args.AgentRoleSlug,
+		ProposalType:   "skill_change",
+		Justification:  args.JustificationMD,
+		SkillDiffJSONB: skillChangeDiffJSON(args),
+		SnapshotJSONB:  skillChangeSnapshotJSON(args),
+	})
 }
 
 // realBumpSkillVersionHandler implements `bump_skill_version`. Records
@@ -221,8 +227,15 @@ func realBumpSkillVersionHandler(ctx context.Context, deps Deps, raw json.RawMes
 		}},
 	})
 	snap, _ := json.Marshal(args)
-	return runSkillProposalTx(ctx, deps, "bump_skill_version", args.AgentRoleSlug, "version_bump",
-		args.JustificationMD, diff, snap, args.ToDigest)
+	return runSkillProposalTx(ctx, deps, skillProposalTxInput{
+		Verb:            "bump_skill_version",
+		AgentRoleSlug:   args.AgentRoleSlug,
+		ProposalType:    "version_bump",
+		Justification:   args.JustificationMD,
+		SkillDiffJSONB:  diff,
+		SnapshotJSONB:   snap,
+		DigestAtPropose: args.ToDigest,
+	})
 }
 
 // parseSkillChangeArgs unmarshals + validates a ProposeSkillChange
@@ -278,48 +291,66 @@ func parseBumpSkillVersionArgs(raw json.RawMessage) (BumpSkillVersionArgs, *Resu
 		r := validationFailure("bump_skill_version: parse args: " + err.Error())
 		return args, &r
 	}
-	args.AgentRoleSlug = strings.TrimSpace(args.AgentRoleSlug)
-	args.Package = strings.TrimSpace(args.Package)
-	args.ToVersion = strings.TrimSpace(args.ToVersion)
-	args.ToDigest = strings.TrimSpace(args.ToDigest)
-	args.JustificationMD = strings.TrimSpace(args.JustificationMD)
-	if args.AgentRoleSlug == "" {
-		r := validationFailure("bump_skill_version: agent_role_slug is required")
-		return args, &r
+	trimBumpSkillVersionArgs(&args)
+	if r := validateBumpRequiredFields(args); r != nil {
+		return args, r
 	}
-	if args.Package == "" {
-		r := validationFailure("bump_skill_version: package is required")
-		return args, &r
-	}
-	if len(args.Package) > maxSkillPackageLen {
-		r := validationFailure(fmt.Sprintf("bump_skill_version: package exceeds %d chars", maxSkillPackageLen))
-		return args, &r
-	}
-	if args.ToVersion == "" {
-		r := validationFailure("bump_skill_version: to_version is required")
-		return args, &r
-	}
-	if len(args.ToVersion) > maxSkillVersionLen {
-		r := validationFailure(fmt.Sprintf("bump_skill_version: to_version exceeds %d chars", maxSkillVersionLen))
-		return args, &r
-	}
-	if args.ToDigest == "" {
-		r := validationFailure("bump_skill_version: to_digest is required")
-		return args, &r
-	}
-	if !looksLikeSHA256Hex(args.ToDigest) {
-		r := validationFailure("bump_skill_version: to_digest must be 64-char SHA-256 hex")
-		return args, &r
-	}
-	if args.FromDigest != "" && !looksLikeSHA256Hex(args.FromDigest) {
-		r := validationFailure("bump_skill_version: from_digest must be 64-char SHA-256 hex when supplied")
-		return args, &r
+	if r := validateBumpDigests(args); r != nil {
+		return args, r
 	}
 	if len(args.JustificationMD) > 10000 {
 		r := validationFailure("bump_skill_version: justification_md exceeds 10000 chars")
 		return args, &r
 	}
 	return args, nil
+}
+
+func trimBumpSkillVersionArgs(args *BumpSkillVersionArgs) {
+	args.AgentRoleSlug = strings.TrimSpace(args.AgentRoleSlug)
+	args.Package = strings.TrimSpace(args.Package)
+	args.ToVersion = strings.TrimSpace(args.ToVersion)
+	args.ToDigest = strings.TrimSpace(args.ToDigest)
+	args.JustificationMD = strings.TrimSpace(args.JustificationMD)
+}
+
+func validateBumpRequiredFields(args BumpSkillVersionArgs) *Result {
+	if args.AgentRoleSlug == "" {
+		r := validationFailure("bump_skill_version: agent_role_slug is required")
+		return &r
+	}
+	if args.Package == "" {
+		r := validationFailure("bump_skill_version: package is required")
+		return &r
+	}
+	if len(args.Package) > maxSkillPackageLen {
+		r := validationFailure(fmt.Sprintf("bump_skill_version: package exceeds %d chars", maxSkillPackageLen))
+		return &r
+	}
+	if args.ToVersion == "" {
+		r := validationFailure("bump_skill_version: to_version is required")
+		return &r
+	}
+	if len(args.ToVersion) > maxSkillVersionLen {
+		r := validationFailure(fmt.Sprintf("bump_skill_version: to_version exceeds %d chars", maxSkillVersionLen))
+		return &r
+	}
+	return nil
+}
+
+func validateBumpDigests(args BumpSkillVersionArgs) *Result {
+	if args.ToDigest == "" {
+		r := validationFailure("bump_skill_version: to_digest is required")
+		return &r
+	}
+	if !looksLikeSHA256Hex(args.ToDigest) {
+		r := validationFailure("bump_skill_version: to_digest must be 64-char SHA-256 hex")
+		return &r
+	}
+	if args.FromDigest != "" && !looksLikeSHA256Hex(args.FromDigest) {
+		r := validationFailure("bump_skill_version: from_digest must be 64-char SHA-256 hex when supplied")
+		return &r
+	}
+	return nil
 }
 
 func validateSkillEntries(field string, entries []SkillEntry, digestRequired bool) *Result {
@@ -413,18 +444,33 @@ func skillChangeSnapshotJSON(args ProposeSkillChangeArgs) []byte {
 	return body
 }
 
+// skillProposalTxInput bundles the runSkillProposalTx parameters so
+// the function signature stays within Sonar S107's 7-arg limit. The
+// fields are independently meaningful at every call site.
+type skillProposalTxInput struct {
+	Verb            string
+	AgentRoleSlug   string
+	ProposalType    string
+	Justification   string
+	SkillDiffJSONB  []byte
+	SnapshotJSONB   []byte
+	DigestAtPropose string
+}
+
 // runSkillProposalTx is the shared INSERT path for `propose_skill_change`
 // and `bump_skill_version`. Both verbs walk the same shape: lookup the
 // target agent by role_slug; INSERT a hiring_proposals row with the M7
 // columns populated; write the audit row in the same tx; emit the
 // chat-namespaced notify post-commit.
-func runSkillProposalTx(
-	ctx context.Context,
-	deps Deps,
-	verb, agentRoleSlug, proposalType, justification string,
-	skillDiffJSONB, snapshotJSONB []byte,
-	digestAtPropose string,
-) (Result, error) {
+func runSkillProposalTx(ctx context.Context, deps Deps, in skillProposalTxInput) (Result, error) {
+	verb := in.Verb
+	agentRoleSlug := in.AgentRoleSlug
+	proposalType := in.ProposalType
+	justification := in.Justification
+	skillDiffJSONB := in.SkillDiffJSONB
+	snapshotJSONB := in.SnapshotJSONB
+	digestAtPropose := in.DigestAtPropose
+
 	target, lookupRes, lookupErr := resolveTargetAgent(ctx, deps, verb, agentRoleSlug)
 	if lookupRes != nil || lookupErr != nil {
 		return resultOrEmpty(lookupRes), lookupErr

@@ -60,7 +60,8 @@ export default async function AdminHireDetailPage({ params }: Readonly<PageProps
 
   async function reject(formData: FormData) {
     'use server';
-    const reason = String(formData.get('reason') ?? '').trim();
+    const raw = formData.get('reason');
+    const reason = typeof raw === 'string' ? raw.trim() : '';
     if (reason.length === 0) {
       throw new Error('reason is required');
     }
@@ -131,8 +132,8 @@ export default async function AdminHireDetailPage({ params }: Readonly<PageProps
           Immutable security preamble
         </h2>
         <p className="text-text-2 text-[13px]">
-          Every spawn carries Garrison's immutable security preamble above the agent's
-          <code className="font-mono"> agent.md</code>. The preamble cannot be overridden by
+          Every spawn carries Garrison&apos;s immutable security preamble above the agent&apos;s{' '}
+          <code className="font-mono">agent.md</code>. The preamble cannot be overridden by
           ticket content, palace recall, or skill instructions. Approving this proposal
           activates the agent under that preamble.
         </p>

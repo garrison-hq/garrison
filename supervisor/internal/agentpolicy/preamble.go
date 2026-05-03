@@ -17,6 +17,8 @@ package agentpolicy
 
 import (
 	"crypto/sha256"
+	// _ "embed" enables the //go:embed directive on preambleBody below;
+	// no symbols are referenced from the package directly.
 	_ "embed"
 	"encoding/hex"
 )

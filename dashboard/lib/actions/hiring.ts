@@ -171,12 +171,13 @@ async function approveSkillFlow(
       .set({ status: 'install_in_progress' })
       .where(and(eq(hiringProposals.id, proposalId), eq(hiringProposals.status, 'approved')));
 
+    const supersededReason = `superseded_by:${proposalId}`;
     const supersededRows = await tx
       .update(hiringProposals)
       .set({
         status: 'superseded',
         rejectedAt: sql`NOW()`,
-        rejectedReason: sql`${`superseded_by:${proposalId}`}`,
+        rejectedReason: supersededReason,
       })
       .where(
         and(

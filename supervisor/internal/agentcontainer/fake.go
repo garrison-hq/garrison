@@ -87,7 +87,7 @@ func (f *FakeController) Start(_ context.Context, id string) error {
 	}
 	st, ok := f.Containers[id]
 	if !ok {
-		return fmt.Errorf("%w: %s", ErrContainerNotFound, id)
+		return errContainerNotFoundf(id)
 	}
 	st.State = "running"
 	f.Calls = append(f.Calls, FakeCall{Method: "Start", ID: id})
@@ -102,7 +102,7 @@ func (f *FakeController) Stop(_ context.Context, id string) error {
 	}
 	st, ok := f.Containers[id]
 	if !ok {
-		return fmt.Errorf("%w: %s", ErrContainerNotFound, id)
+		return errContainerNotFoundf(id)
 	}
 	st.State = "stopped"
 	f.Calls = append(f.Calls, FakeCall{Method: "Stop", ID: id})
@@ -116,7 +116,7 @@ func (f *FakeController) Remove(_ context.Context, id string) error {
 		return f.RemoveError
 	}
 	if _, ok := f.Containers[id]; !ok {
-		return fmt.Errorf("%w: %s", ErrContainerNotFound, id)
+		return errContainerNotFoundf(id)
 	}
 	delete(f.Containers, id)
 	f.Calls = append(f.Calls, FakeCall{Method: "Remove", ID: id})
@@ -128,7 +128,7 @@ func (f *FakeController) ConnectNetwork(_ context.Context, id, network string) e
 	defer f.mu.Unlock()
 	st, ok := f.Containers[id]
 	if !ok {
-		return fmt.Errorf("%w: %s", ErrContainerNotFound, id)
+		return errContainerNotFoundf(id)
 	}
 	st.Networks = append(st.Networks, network)
 	f.Calls = append(f.Calls, FakeCall{Method: "ConnectNetwork", ID: id, NetID: network})
@@ -146,7 +146,7 @@ func (f *FakeController) Exec(ctx context.Context, id string, cmd []string, stdi
 	}
 	if _, ok := f.Containers[id]; !ok {
 		f.mu.Unlock()
-		return nil, nil, fmt.Errorf("%w: %s", ErrContainerNotFound, id)
+		return nil, nil, errContainerNotFoundf(id)
 	}
 	queue := f.ExecOutputs[id]
 	f.mu.Unlock()
@@ -234,3 +234,10 @@ func (f *FakeController) ResetCalls() {
 
 // Compile-time assert: FakeController implements Controller.
 var _ Controller = (*FakeController)(nil)
+
+// errContainerNotFoundf wraps ErrContainerNotFound with the offending
+// container id. Centralised so the "not found: <id>" string isn't
+// duplicated across every method (Sonar S1192).
+func errContainerNotFoundf(id string) error {
+	return fmt.Errorf("%w: %s", ErrContainerNotFound, id)
+}

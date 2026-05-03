@@ -14,6 +14,11 @@ import (
 	"time"
 )
 
+// containersPathPrefix is the docker engine API root for container
+// operations. Centralised here so per-call site doesn't repeat the
+// literal (Sonar S1192).
+const containersPathPrefix = "/containers/"
+
 // socketProxyController is the production Controller implementation.
 // HTTP requests against the M2.2 docker-socket-proxy; no
 // github.com/docker/docker/client dependency. JSON request bodies
@@ -148,7 +153,7 @@ func (c *socketProxyController) Create(ctx context.Context, spec ContainerSpec) 
 }
 
 func (c *socketProxyController) Start(ctx context.Context, id string) error {
-	resp, err := c.do(ctx, http.MethodPost, "/containers/"+id+"/start", nil)
+	resp, err := c.do(ctx, http.MethodPost, containersPathPrefix+id+"/start", nil)
 	if err != nil {
 		return err
 	}
@@ -160,7 +165,7 @@ func (c *socketProxyController) Start(ctx context.Context, id string) error {
 }
 
 func (c *socketProxyController) Stop(ctx context.Context, id string) error {
-	resp, err := c.do(ctx, http.MethodPost, "/containers/"+id+"/stop?t=10", nil)
+	resp, err := c.do(ctx, http.MethodPost, containersPathPrefix+id+"/stop?t=10", nil)
 	if err != nil {
 		return err
 	}
@@ -172,7 +177,7 @@ func (c *socketProxyController) Stop(ctx context.Context, id string) error {
 }
 
 func (c *socketProxyController) Remove(ctx context.Context, id string) error {
-	resp, err := c.do(ctx, http.MethodDelete, "/containers/"+id+"?force=true", nil)
+	resp, err := c.do(ctx, http.MethodDelete, containersPathPrefix+id+"?force=true", nil)
 	if err != nil {
 		return err
 	}
@@ -211,7 +216,7 @@ func (c *socketProxyController) Exec(ctx context.Context, id string, cmd []strin
 		"Tty":          false,
 		"Cmd":          cmd,
 	})
-	resp, err := c.do(ctx, http.MethodPost, "/containers/"+id+"/exec", bytes.NewReader(createBody))
+	resp, err := c.do(ctx, http.MethodPost, containersPathPrefix+id+"/exec", bytes.NewReader(createBody))
 	if err != nil {
 		return nil, nil, err
 	}
