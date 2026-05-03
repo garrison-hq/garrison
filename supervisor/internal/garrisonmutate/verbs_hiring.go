@@ -373,32 +373,45 @@ func validateBumpDigests(args BumpSkillVersionArgs) *Result {
 
 func validateSkillEntries(field string, entries []SkillEntry, digestRequired bool) *Result {
 	for i, e := range entries {
-		pkg := strings.TrimSpace(e.Package)
-		if pkg == "" {
-			r := validationFailure(fmt.Sprintf("propose_skill_change: %s[%d].package is required", field, i))
+		if r := validateSingleSkillEntry(field, i, e, digestRequired); r != nil {
+			return r
+		}
+	}
+	return nil
+}
+
+func validateSingleSkillEntry(field string, idx int, e SkillEntry, digestRequired bool) *Result {
+	pkg := strings.TrimSpace(e.Package)
+	if pkg == "" {
+		r := validationFailure(fmt.Sprintf("propose_skill_change: %s[%d].package is required", field, idx))
+		return &r
+	}
+	if len(pkg) > maxSkillPackageLen {
+		r := validationFailure(fmt.Sprintf("propose_skill_change: %s[%d].package exceeds %d chars", field, idx, maxSkillPackageLen))
+		return &r
+	}
+	if len(e.Version) > maxSkillVersionLen {
+		r := validationFailure(fmt.Sprintf("propose_skill_change: %s[%d].version exceeds %d chars", field, idx, maxSkillVersionLen))
+		return &r
+	}
+	return validateSkillEntryDigest(field, idx, e.Digest, digestRequired)
+}
+
+func validateSkillEntryDigest(field string, idx int, digest string, required bool) *Result {
+	if required {
+		if digest == "" {
+			r := validationFailure(fmt.Sprintf("propose_skill_change: %s[%d].digest is required", field, idx))
 			return &r
 		}
-		if len(pkg) > maxSkillPackageLen {
-			r := validationFailure(fmt.Sprintf("propose_skill_change: %s[%d].package exceeds %d chars", field, i, maxSkillPackageLen))
+		if !looksLikeSHA256Hex(digest) {
+			r := validationFailure(fmt.Sprintf("propose_skill_change: %s[%d].digest must be 64-char SHA-256 hex", field, idx))
 			return &r
 		}
-		if len(e.Version) > maxSkillVersionLen {
-			r := validationFailure(fmt.Sprintf("propose_skill_change: %s[%d].version exceeds %d chars", field, i, maxSkillVersionLen))
-			return &r
-		}
-		if digestRequired {
-			if e.Digest == "" {
-				r := validationFailure(fmt.Sprintf("propose_skill_change: %s[%d].digest is required", field, i))
-				return &r
-			}
-			if !looksLikeSHA256Hex(e.Digest) {
-				r := validationFailure(fmt.Sprintf("propose_skill_change: %s[%d].digest must be 64-char SHA-256 hex", field, i))
-				return &r
-			}
-		} else if e.Digest != "" && !looksLikeSHA256Hex(e.Digest) {
-			r := validationFailure(fmt.Sprintf("propose_skill_change: %s[%d].digest must be 64-char SHA-256 hex when supplied", field, i))
-			return &r
-		}
+		return nil
+	}
+	if digest != "" && !looksLikeSHA256Hex(digest) {
+		r := validationFailure(fmt.Sprintf("propose_skill_change: %s[%d].digest must be 64-char SHA-256 hex when supplied", field, idx))
+		return &r
 	}
 	return nil
 }
