@@ -170,6 +170,12 @@ type Config struct {
 	SkillHubToken           string // GARRISON_SKILLHUB_TOKEN, no default — empty disables SkillHub
 	UseDirectExec           bool   // GARRISON_USE_DIRECT_EXEC, default true; flipped to false by migrate7.Run after grandfathering completes
 	DockerSocketProxyURL    string // GARRISON_DOCKER_SOCKET_PROXY_URL, default "http://garrison-docker-proxy:2375"
+
+	// M8 fields. MCPJungle integration — single-instance for alpha;
+	// per-customer-instance is the beta path (Option A) via the
+	// URLForCustomer seam in internal/mcpjungle.
+	MCPJungleURL            string // GARRISON_MCPJUNGLE_URL, required in non-fake-agent mode
+	MCPJungleAdminTokenPath string // GARRISON_MCPJUNGLE_ADMIN_TOKEN_PATH, default "mcpjungle/admin"
 }
 
 // DefaultMinIOBucket per M5.4 spec FR-620.
@@ -275,6 +281,10 @@ func Load() (*Config, error) {
 		SkillHubToken:           "",
 		UseDirectExec:           true,
 		DockerSocketProxyURL:    "http://garrison-docker-proxy:2375",
+
+		// M8 defaults.
+		MCPJungleURL:            "",
+		MCPJungleAdminTokenPath: "mcpjungle/admin",
 	}
 
 	// M5.1 env overrides — all optional; defaults above are used
@@ -408,6 +418,14 @@ func Load() (*Config, error) {
 	}
 	if v := os.Getenv("GARRISON_DOCKER_SOCKET_PROXY_URL"); v != "" {
 		cfg.DockerSocketProxyURL = v
+	}
+
+	// M8: MCPJungle env overrides.
+	if v := os.Getenv("GARRISON_MCPJUNGLE_URL"); v != "" {
+		cfg.MCPJungleURL = v
+	}
+	if v := os.Getenv("GARRISON_MCPJUNGLE_ADMIN_TOKEN_PATH"); v != "" {
+		cfg.MCPJungleAdminTokenPath = v
 	}
 
 	dbURL := os.Getenv("GARRISON_DATABASE_URL")

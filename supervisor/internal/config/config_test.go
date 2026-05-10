@@ -51,6 +51,9 @@ var allEnvVars = []string{
 	"GARRISON_MINIO_ACCESS_KEY_PATH",
 	"GARRISON_MINIO_SECRET_KEY_PATH",
 	"GARRISON_DASHBOARD_API_PORT",
+	// M8 additions
+	"GARRISON_MCPJUNGLE_URL",
+	"GARRISON_MCPJUNGLE_ADMIN_TOKEN_PATH",
 }
 
 // clearAll unsets every GARRISON_* env var the config package reads, so a test
@@ -916,5 +919,45 @@ func TestM6EnvVarsParseFinalizeGraceDuration(t *testing.T) {
 				t.Errorf("FinalizeResultGrace = %v; want %v", cfg.FinalizeResultGrace, want)
 			}
 		})
+	}
+}
+
+// TestM8MCPJungleEnvVarsDefault — when no MCPJungle env vars are set,
+// the config carries the documented defaults: URL empty (forcing
+// operator-explicit configuration in non-fake-agent mode), admin
+// token path "mcpjungle/admin".
+func TestM8MCPJungleEnvVarsDefault(t *testing.T) {
+	clearAll(t)
+	t.Setenv("GARRISON_DATABASE_URL", validDBURL)
+	t.Setenv("GARRISON_FAKE_AGENT_CMD", validFakeCmd)
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.MCPJungleURL != "" {
+		t.Errorf("MCPJungleURL default = %q; want empty", cfg.MCPJungleURL)
+	}
+	if cfg.MCPJungleAdminTokenPath != "mcpjungle/admin" {
+		t.Errorf("MCPJungleAdminTokenPath = %q; want mcpjungle/admin", cfg.MCPJungleAdminTokenPath)
+	}
+}
+
+// TestM8MCPJungleEnvVarsOverride — env-var overrides land in the
+// config struct verbatim.
+func TestM8MCPJungleEnvVarsOverride(t *testing.T) {
+	clearAll(t)
+	t.Setenv("GARRISON_DATABASE_URL", validDBURL)
+	t.Setenv("GARRISON_FAKE_AGENT_CMD", validFakeCmd)
+	t.Setenv("GARRISON_MCPJUNGLE_URL", "http://garrison-mcpjungle:8080")
+	t.Setenv("GARRISON_MCPJUNGLE_ADMIN_TOKEN_PATH", "ops/mcpjungle/admin")
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.MCPJungleURL != "http://garrison-mcpjungle:8080" {
+		t.Errorf("MCPJungleURL = %q; want override", cfg.MCPJungleURL)
+	}
+	if cfg.MCPJungleAdminTokenPath != "ops/mcpjungle/admin" {
+		t.Errorf("MCPJungleAdminTokenPath = %q; want override", cfg.MCPJungleAdminTokenPath)
 	}
 }

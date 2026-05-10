@@ -16,13 +16,15 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-// GrantRow is a single row from the ListGrantsForRole query.
-// Matches the sqlc-generated ListGrantsForRoleRow shape so callers
-// can pass the query results directly.
+// GrantRow is a single row from the ListGrantsForRole / ListGrantsForRoleAndAgent
+// query. Matches the sqlc-generated row shape so callers can pass the
+// query results directly. M8 added the AgentID field; pre-M8 callers
+// leave it at the zero value (Valid=false), preserving M2.3 semantics.
 type GrantRow struct {
 	EnvVarName string
 	SecretPath string
 	CustomerID pgtype.UUID
+	AgentID    pgtype.UUID // M8: NULL = role-scoped grant; non-NULL = agent-scoped
 }
 
 // ClientConfig holds the configuration for vault.Client. All fields are
