@@ -10,6 +10,7 @@ import { Chip } from '@/components/ui/Chip';
 import { HygieneTable } from '@/components/features/hygiene-table/HygieneTable';
 import { HygieneTabStripClient } from '@/components/features/hygiene-table/HygieneTabStripClient';
 import { ThrottleEventsTable } from '@/components/features/hygiene-table/ThrottleEventsTable';
+import { RunawayPanel } from '@/components/features/hygiene-table/RunawayPanel';
 import { FailureModeFilter } from '@/components/features/hygiene-table/FailureModeFilter';
 import { PatternCategoryFilter } from '@/components/features/hygiene-table/PatternCategoryFilter';
 import { RefreshButton } from '@/components/features/org-overview/RefreshButton';
@@ -114,6 +115,8 @@ export default async function HygienePage({
           <HygieneTable rows={hygiene.rows} emptyDescription={t('empty')} />
         </div>
       </section>
+
+      <RunawayPanel />
 
       <ThrottleEventsTable initialRows={throttleRows} />
 
