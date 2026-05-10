@@ -98,6 +98,40 @@ services:
     container_name: garrison-infisical-redis
     restart: unless-stopped
 
+  # M8: MCPJungle backing Postgres. Separate from garrison-postgres so
+  # MCPJungle's state (mcp_clients, allow_lists, etc.) is isolated from
+  # Garrison's state and can be backed up independently.
+  mcpjungle-postgres:
+    image: postgres:15-alpine
+    container_name: garrison-mcpjungle-postgres
+    environment:
+      POSTGRES_DB: mcpjungle
+      POSTGRES_USER: mcpjungle
+      POSTGRES_PASSWORD: ${GARRISON_MCPJUNGLE_PG_PASSWORD:?GARRISON_MCPJUNGLE_PG_PASSWORD required}
+    volumes:
+      - mcpjungle-postgres-data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  # M8: MCPJungle MCP-server registry / proxy. Garrison's chosen
+  # registry per docs/research/m8-mcpjungle-spike.md. Internal network
+  # only (no ports: block) — reachable as garrison-mcpjungle:8080 from
+  # the supervisor + agents. Operator runs `mcpjungle init-server`
+  # once after the first up; the resulting admin token lands in
+  # Infisical at the path GARRISON_MCPJUNGLE_ADMIN_TOKEN_PATH (default
+  # mcpjungle/admin). Set GARRISON_MCPJUNGLE_IMAGE env var to pin a
+  # specific digest in production; see ops-checklist M8 section.
+  mcpjungle:
+    image: ${GARRISON_MCPJUNGLE_IMAGE:-mcpjungle/mcpjungle:latest}
+    container_name: garrison-mcpjungle
+    depends_on:
+      mcpjungle-postgres:
+        condition: service_started
+    environment:
+      DATABASE_URL: postgres://mcpjungle:${GARRISON_MCPJUNGLE_PG_PASSWORD}@mcpjungle-postgres:5432/mcpjungle
+      MCPJUNGLE_BIND_ADDR: 0.0.0.0:8080
+      MCPJUNGLE_MODE: enterprise
+    restart: unless-stopped
+
   # M5.4: MinIO single-node object storage. Hosts the CEO-editable
   # Company.md object at s3://garrison-company/<companyId>/company.md.
   # Internal-network only (no ports: block) — accessed via service-name
@@ -162,6 +196,8 @@ services:
         condition: service_started
       minio:
         condition: service_started
+      mcpjungle:
+        condition: service_started
     environment:
       GARRISON_DATABASE_URL: postgres://supervisor:${GARRISON_POSTGRES_PASSWORD}@postgres:5432/garrison
       GARRISON_AGENT_RO_PASSWORD: ${GARRISON_AGENT_RO_PASSWORD:?GARRISON_AGENT_RO_PASSWORD required}
@@ -184,6 +220,12 @@ services:
       GARRISON_MINIO_ACCESS_KEY_PATH: ${GARRISON_MINIO_ACCESS_KEY_PATH:?GARRISON_MINIO_ACCESS_KEY_PATH required}
       GARRISON_MINIO_SECRET_KEY_PATH: ${GARRISON_MINIO_SECRET_KEY_PATH:?GARRISON_MINIO_SECRET_KEY_PATH required}
       GARRISON_DASHBOARD_API_PORT: "8081"
+      # M8 — MCPJungle registry endpoint + admin-token vault path.
+      # GARRISON_MCPJUNGLE_URL empty disables the subsystem (M2.x
+      # chaos/integration suites). Admin token is fetched from
+      # Infisical at GARRISON_MCPJUNGLE_ADMIN_TOKEN_PATH at boot.
+      GARRISON_MCPJUNGLE_URL: ${GARRISON_MCPJUNGLE_URL:-http://garrison-mcpjungle:8080}
+      GARRISON_MCPJUNGLE_ADMIN_TOKEN_PATH: ${GARRISON_MCPJUNGLE_ADMIN_TOKEN_PATH:-mcpjungle/admin}
     restart: unless-stopped
 
   # M3 — operator dashboard (Next.js 16 + React 19; standalone build).
@@ -230,3 +272,4 @@ volumes:
   mempalace-palace:
   infisical-postgres-data:
   garrison-minio-data:
+  mcpjungle-postgres-data:
