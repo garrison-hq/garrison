@@ -22,7 +22,7 @@ export async function HygieneTable({
   const t = await getTranslations('hygieneMeta.headers');
   return (
     <div className="overflow-x-auto h-full">
-      <table className="w-full">
+      <table className="w-full" data-testid="hygiene-table">
         <colgroup>
           <col style={{ width: 180 }} />
           <col style={{ width: 120 }} />
