@@ -323,3 +323,74 @@ func TestDependencyErrorHelpers(t *testing.T) {
 		t.Errorf("deptWeeklyBudgetExceededErr shape wrong: %+v", r)
 	}
 }
+
+func TestParseCreateTicketArgs_AcceptsValid(t *testing.T) {
+	args, res := parseCreateTicketArgs([]byte(`{"objective":"x","department_slug":"engineering"}`))
+	if res != nil {
+		t.Fatalf("expected acceptance; got %+v", res)
+	}
+	if args.Objective != "x" || args.DepartmentSlug != "engineering" {
+		t.Errorf("args = %+v; want objective=x dept=engineering", args)
+	}
+}
+
+func TestParseCreateTicketArgs_TrimsWhitespace(t *testing.T) {
+	args, res := parseCreateTicketArgs([]byte(`{"objective":"  hello  ","department_slug":"  engineering  "}`))
+	if res != nil {
+		t.Fatalf("expected acceptance; got %+v", res)
+	}
+	if args.Objective != "hello" {
+		t.Errorf("objective = %q; want hello (trimmed)", args.Objective)
+	}
+	if args.DepartmentSlug != "engineering" {
+		t.Errorf("department_slug = %q; want engineering (trimmed)", args.DepartmentSlug)
+	}
+}
+
+func TestBuildCreateTicketMetadata_Empty(t *testing.T) {
+	body, res := buildCreateTicketMetadata(CreateTicketArgs{})
+	if res != nil {
+		t.Fatalf("expected acceptance; got %+v", res)
+	}
+	if string(body) != "{}" {
+		t.Errorf("body = %q; want empty JSON object", body)
+	}
+}
+
+func TestBuildCreateTicketMetadata_Populated(t *testing.T) {
+	body, res := buildCreateTicketMetadata(CreateTicketArgs{
+		Metadata: map[string]any{"key": "value"},
+	})
+	if res != nil {
+		t.Fatalf("expected acceptance; got %+v", res)
+	}
+	if !strings.Contains(string(body), `"key":"value"`) {
+		t.Errorf("body = %s; missing serialized metadata", body)
+	}
+}
+
+func TestValidationFailureShape(t *testing.T) {
+	r := validationFailure("test message")
+	if r.Success {
+		t.Error("Success should be false")
+	}
+	if r.ErrorKind != string(ErrValidationFailed) {
+		t.Errorf("ErrorKind = %q; want validation_failed", r.ErrorKind)
+	}
+	if !strings.Contains(r.Message, "test message") {
+		t.Errorf("message missing: %q", r.Message)
+	}
+}
+
+func TestResourceNotFoundShape(t *testing.T) {
+	r := resourceNotFound("dept %q not found", "engineering")
+	if r.Success {
+		t.Error("Success should be false")
+	}
+	if r.ErrorKind != string(ErrResourceNotFound) {
+		t.Errorf("ErrorKind = %q; want resource_not_found", r.ErrorKind)
+	}
+	if !strings.Contains(r.Message, "engineering") {
+		t.Errorf("message missing format arg: %q", r.Message)
+	}
+}
