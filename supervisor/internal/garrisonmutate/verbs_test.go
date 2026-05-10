@@ -102,3 +102,21 @@ func TestFindVerbReturnsExpectedEntry(t *testing.T) {
 		t.Errorf("create_ticket reversibility = %d; want 3", v.ReversibilityClass)
 	}
 }
+
+// TestVerbsSlicesDisjoint asserts that the chat-side Verbs registry
+// and the M8 ServerActionVerbs registry have empty intersection. The
+// chat surface MUST NOT expose register_mcp_server (per FR-306 +
+// docs/security/chat-threat-model.md), and the Server-Action surface
+// MUST NOT expose chat-side verbs (the SA wrapping logic uses
+// `FindServerActionVerb`, not `FindVerb`).
+func TestVerbsSlicesDisjoint(t *testing.T) {
+	chatSet := make(map[string]bool, len(Verbs))
+	for _, v := range Verbs {
+		chatSet[v.Name] = true
+	}
+	for _, sa := range ServerActionVerbs {
+		if chatSet[sa.Name] {
+			t.Errorf("verb %q appears in both Verbs (chat) and ServerActionVerbs", sa.Name)
+		}
+	}
+}

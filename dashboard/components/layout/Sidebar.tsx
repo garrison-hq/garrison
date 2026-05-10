@@ -102,6 +102,8 @@ export async function Sidebar() {
         <NavLink href="/agents" label={t('agents')} icon={<AgentIcon />} />
         <NavGroup label={t('admin')} icon={<AdminIcon />}>
           <NavSubLink href="/admin/invites" label="invites" />
+          {/* M8 — MCPJungle MCP-server registry. */}
+          <NavSubLink href="/admin/mcp-servers" label="MCP servers" />
         </NavGroup>
       </nav>
 

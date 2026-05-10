@@ -343,6 +343,24 @@ func prepareSpawn(ctx context.Context, deps Deps, eventID pgtype.UUID, roleSlug 
 		}
 	}
 
+	// M8 FR-102: dependency satisfaction gate. If the candidate
+	// ticket carries a `depends_on_ticket_id` and that predecessor
+	// isn't yet in one of its dept's
+	// `dependency_satisfaction_columns`, defer the spawn (event stays
+	// unprocessed; the transition listener's NotifyBlockedDependents
+	// callback re-enqueues on predecessor advancement).
+	if ok, err := checkDependencySatisfied(ctx, q, ticketUUID); err != nil {
+		_ = tx.Rollback(ctx)
+		return spawnPrep{}, fmt.Errorf("spawn: checkDependencySatisfied: %w", err)
+	} else if !ok {
+		_ = tx.Rollback(ctx)
+		deps.Logger.Info("defer: dependency not satisfied",
+			"event_id", formatUUID(eventID),
+			"ticket_id", payload.TicketID,
+		)
+		return spawnPrep{done: true}, nil
+	}
+
 	instanceID, err := q.InsertRunningInstance(ctx, store.InsertRunningInstanceParams{
 		DepartmentID: deptUUID,
 		TicketID:     ticketUUID,

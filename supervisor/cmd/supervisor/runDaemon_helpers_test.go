@@ -150,3 +150,14 @@ func TestEnvOverrideSurvivesNonCanonicalPath(t *testing.T) {
 		t.Error("env was mutated mid-test")
 	}
 }
+
+func TestBuildMcpjungleSubsystemShortCircuitsWithEmptyURL(t *testing.T) {
+	cfg := &config.Config{MCPJungleURL: ""}
+	client, worker := buildMcpjungleSubsystem(context.Background(), cfg, nil, nil, nil, newDiscardLogger())
+	if client != nil {
+		t.Errorf("expected nil client when MCPJungleURL is empty; got %v", client)
+	}
+	if worker != nil {
+		t.Errorf("expected nil worker when MCPJungleURL is empty; got %v", worker)
+	}
+}

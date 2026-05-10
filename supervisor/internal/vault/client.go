@@ -16,13 +16,15 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-// GrantRow is a single row from the ListGrantsForRole query.
-// Matches the sqlc-generated ListGrantsForRoleRow shape so callers
-// can pass the query results directly.
+// GrantRow is a single row from the ListGrantsForRole / ListGrantsForRoleAndAgent
+// query. Matches the sqlc-generated row shape so callers can pass the
+// query results directly. M8 added the AgentID field; pre-M8 callers
+// leave it at the zero value (Valid=false), preserving M2.3 semantics.
 type GrantRow struct {
 	EnvVarName string
 	SecretPath string
 	CustomerID pgtype.UUID
+	AgentID    pgtype.UUID // M8: NULL = role-scoped grant; non-NULL = agent-scoped
 }
 
 // ClientConfig holds the configuration for vault.Client. All fields are
@@ -202,6 +204,72 @@ func (c *Client) fetchOneUnderLock(ctx context.Context, grant GrantRow) (SecretV
 		return SecretValue{}, err
 	}
 	return New([]byte(secret.SecretValue)), nil
+}
+
+// MCPJungleBearerTokenEnvVar is the env var name under which the
+// MCPJungle per-agent bearer token is injected into the agent
+// subprocess. The M8 reconciler writes the token to vault at path
+// mcpjungle/agents/<agent-id> and inserts an agent-scoped grant binding
+// that path to this env var name.
+const MCPJungleBearerTokenEnvVar = "MCPJUNGLE_BEARER_TOKEN"
+
+// WriteSecret writes (or upserts) a single secret value at the given
+// vault path. Used by the M8 mcpjungle reconciler to store per-agent
+// bearer tokens at mcpjungle/agents/<agent-id>. On Infisical's 409
+// (secret already exists) the call transparently falls back to Update
+// so the operation is idempotent across reconciler runs.
+//
+// The path argument follows the same shape as fetches —
+// "<folder>/<key>" — and is split at the last "/" into the Infisical
+// SecretPath (folder) + SecretKey. A bare key (no slash) lands at "/".
+func (c *Client) WriteSecret(ctx context.Context, fullPath, value string) error {
+	folderPath, secretKey := splitSecretPath(fullPath)
+	if secretKey == "" {
+		return fmt.Errorf("vault: WriteSecret: empty key in path %q", fullPath)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.writeSecretUnderLockWithRetry(ctx, folderPath, secretKey, value)
+}
+
+// writeSecretUnderLockWithRetry tries Create, then Update on conflict,
+// re-authenticating once on 401. Must be called with c.mu held.
+func (c *Client) writeSecretUnderLockWithRetry(ctx context.Context, folderPath, key, value string) error {
+	_, err := c.sdk.Secrets().Create(infisical.CreateSecretOptions{
+		SecretKey:   key,
+		ProjectID:   c.projectID,
+		Environment: c.environment,
+		SecretPath:  folderPath,
+		SecretValue: value,
+	})
+	if err == nil {
+		return nil
+	}
+	var apiErr *infisicalErrors.APIError
+	if errors.As(err, &apiErr) {
+		switch apiErr.StatusCode {
+		case http.StatusUnauthorized:
+			if c.reauthenticateUnderLock(ctx) != nil {
+				return ErrVaultAuthExpired
+			}
+			return c.writeSecretUnderLockWithRetry(ctx, folderPath, key, value)
+		case http.StatusConflict, http.StatusBadRequest:
+			// Infisical returns 400 (sometimes 409) when the secret
+			// already exists at that path. Fall back to Update.
+			_, updErr := c.sdk.Secrets().Update(infisical.UpdateSecretOptions{
+				SecretKey:      key,
+				ProjectID:      c.projectID,
+				Environment:    c.environment,
+				SecretPath:     folderPath,
+				NewSecretValue: value,
+			})
+			if updErr == nil {
+				return nil
+			}
+			return classifySDKError(updErr)
+		}
+	}
+	return classifySDKError(err)
 }
 
 // reauthenticate obtains a fresh token. Safe for external callers; acquires

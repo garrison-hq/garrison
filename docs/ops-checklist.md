@@ -733,8 +733,83 @@ TLS: M5.4 ships internal-network plaintext only
 (`GARRISON_MINIO_USE_TLS=false`). Operator-controlled TLS termination
 is post-M5; the path is documented at FR-667.
 
+## M8 — MCPJungle MCP-server registry deployment
+
+M8 introduces a sidecar MCP-server registry (MCPJungle, MPL-2.0,
+self-hosted) so agents can be granted scoped access to operator-approved
+MCP servers without each agent holding upstream credentials. The full
+rationale + spike findings live at `docs/research/m8-mcpjungle-spike.md`;
+this section covers the deployment plumbing only.
+
+**Two new compose services** (defined in `supervisor/docker-compose.yml`):
+
+- `garrison-mcpjungle-postgres` — Postgres 15 backing store, isolated
+  from `garrison-postgres` and `garrison-infisical-postgres`. State
+  volume: `mcpjungle-postgres-data`.
+- `garrison-mcpjungle` — MCPJungle server, listens on `:8080` inside
+  the compose network. Not published to the host. Reachable from the
+  supervisor as `garrison-mcpjungle:8080`. Pin a specific image
+  digest in production with:
+  ```
+  GARRISON_MCPJUNGLE_IMAGE=mcpjungle/mcpjungle@sha256:<digest>
+  ```
+
+**Required env vars** (compose `.env` file or operator's secret store):
+
+| Variable | Purpose |
+|---|---|
+| `GARRISON_MCPJUNGLE_PG_PASSWORD` | password for the mcpjungle Postgres role |
+| `GARRISON_MCPJUNGLE_URL` | supervisor's endpoint (default `http://garrison-mcpjungle:8080`); set empty to disable the subsystem |
+| `GARRISON_MCPJUNGLE_ADMIN_TOKEN_PATH` | Infisical vault path holding the admin bearer (default `mcpjungle/admin`) |
+
+**First-time setup** (run once after the compose stack is up):
+
+```
+GARRISON_INFISICAL_PROJECT_ID=<dev-project-id> \
+  scripts/dev-mcpjungle-init.sh
+```
+
+This invokes `mcpjungle init-server` in the running container, captures
+the generated admin token, and writes it to Infisical at the configured
+vault path. The supervisor reads this path at boot via
+`fetchMcpjungleAdminToken` to authenticate against the MCPJungle admin
+API. Re-running the script after init will fail at step 1 — rotate by
+tearing down + re-up'ing the mcpjungle service.
+
+**Admin-token rotation procedure**:
+
+1. `docker compose down mcpjungle mcpjungle-postgres`
+2. `docker volume rm garrison_mcpjungle-postgres-data`
+3. `docker compose up -d mcpjungle-postgres mcpjungle`
+4. Re-run `scripts/dev-mcpjungle-init.sh` to mint a new admin token.
+5. Restart the supervisor to pick up the new token from Infisical.
+
+**Postgres backup expectation**: the `mcpjungle-postgres-data` named
+volume preserves McpClient + allow-list state. `docker compose down -v`
+is destructive — snapshot the volume before any destructive command:
+```
+docker run --rm -v mcpjungle-postgres-data:/data:ro -v $(pwd):/backup \
+  busybox tar czf /backup/mcpjungle-$(date +%Y%m%d).tar.gz /data
+```
+
+**Degrade-with-warning posture** (FR-308): if MCPJungle is unreachable
+at supervisor startup, the supervisor logs `mcpjungle_unreachable_at_startup`
+and continues. The reconciler is skipped that boot; per-spawn calls
+that need MCPJungle fail individually with typed errors so the rest of
+the supervisor's surface (chat, hygiene, hiring, etc.) stays available.
+
+**Multi-tenant beta**: M8 ships single-instance — one MCPJungle per
+deployment. The `mcpjungle.Client.URLForCustomer` method is the
+structural seam for the beta switch to per-customer instances (Option
+A from the multi-tenant analysis); the alpha implementation returns
+the configured `BaseURL` regardless of `customer_id`.
+
 ## Changelog
 
+- **2026-05-10**: M8 MCP-server registry deployment section added
+  (MCPJungle + MCPJungle-Postgres sidecars, GARRISON_MCPJUNGLE_* env
+  vars, dev-mcpjungle-init.sh bootstrap script, admin-token rotation
+  procedure, degrade-with-warning posture).
 - **2026-05-01**: M5.4 knowledge-base pane deployment section added
   (MinIO 4th container, scoped service-account credential model via
   Infisical, dashboardapi HTTP server on port 8081, named volume

@@ -123,7 +123,9 @@ test.describe('M4 hygiene pattern-category filter', () => {
     await page.getByTestId('category-sk_prefix').click();
     await page.waitForURL(/category=sk_prefix/);
     await expect(page.getByTestId('hygiene-row')).toHaveCount(1);
-    const tableText = await page.getByRole('table').textContent();
+    // Scope to the hygiene data table — M8's RunawayPanel added a
+    // second <table> to /hygiene, so getByRole('table') is ambiguous.
+    const tableText = await page.getByTestId('hygiene-table').textContent();
     expect(tableText).toContain('sk_prefix');
     expect(tableText).not.toContain('aws_akia');
     await ctx.close();

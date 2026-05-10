@@ -2,7 +2,7 @@
 // Run `bun run drizzle:pull` to regenerate.
 // Source: goose-managed migrations under ../../migrations/.
 
-import { pgTable, integer, bigint, boolean, timestamp, index, uuid, text, jsonb, foreignKey, numeric, unique, check, smallint, primaryKey, interval } from "drizzle-orm/pg-core"
+import { pgTable, integer, bigint, boolean, timestamp, index, uuid, text, jsonb, type AnyPgColumn, foreignKey, numeric, check, unique, uniqueIndex, smallint, primaryKey, interval } from "drizzle-orm/pg-core"
 import { sql } from "drizzle-orm"
 
 
@@ -60,24 +60,6 @@ export const agentInstances = pgTable("agent_instances", {
 		}).onDelete("set null"),
 ]);
 
-export const departments = pgTable("departments", {
-	id: uuid().defaultRandom().primaryKey().notNull(),
-	slug: text().notNull(),
-	name: text().notNull(),
-	concurrencyCap: integer("concurrency_cap").default(3).notNull(),
-	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-	companyId: uuid("company_id"),
-	workspacePath: text("workspace_path"),
-	workflow: jsonb().default({}).notNull(),
-}, (table) => [
-	foreignKey({
-			columns: [table.companyId],
-			foreignColumns: [companies.id],
-			name: "departments_company_id_fkey"
-		}),
-	unique("departments_slug_key").on(table.slug),
-]);
-
 export const tickets = pgTable("tickets", {
 	id: uuid().defaultRandom().primaryKey().notNull(),
 	departmentId: uuid("department_id").notNull(),
@@ -89,8 +71,10 @@ export const tickets = pgTable("tickets", {
 	origin: text().default('sql').notNull(),
 	createdViaChatSessionId: uuid("created_via_chat_session_id"),
 	parentTicketId: uuid("parent_ticket_id"),
+	dependsOnTicketId: uuid("depends_on_ticket_id"),
 }, (table) => [
 	index("idx_tickets_chat_session").using("btree", table.createdViaChatSessionId.asc().nullsLast().op("uuid_ops")).where(sql`(created_via_chat_session_id IS NOT NULL)`),
+	index("idx_tickets_depends_on").using("btree", table.dependsOnTicketId.asc().nullsLast().op("uuid_ops")).where(sql`(depends_on_ticket_id IS NOT NULL)`),
 	index("idx_tickets_parent").using("btree", table.parentTicketId.asc().nullsLast().op("uuid_ops")).where(sql`(parent_ticket_id IS NOT NULL)`),
 	foreignKey({
 			columns: [table.departmentId],
@@ -107,15 +91,33 @@ export const tickets = pgTable("tickets", {
 			foreignColumns: [table.id],
 			name: "tickets_parent_ticket_id_fkey"
 		}),
+	foreignKey({
+			columns: [table.dependsOnTicketId],
+			foreignColumns: [table.id],
+			name: "tickets_depends_on_ticket_id_fkey"
+		}).onDelete("set null"),
+	check("tickets_depends_on_not_self", sql`(depends_on_ticket_id IS NULL) OR (depends_on_ticket_id <> id)`),
 ]);
 
-export const companies = pgTable("companies", {
+export const departments = pgTable("departments", {
 	id: uuid().defaultRandom().primaryKey().notNull(),
+	slug: text().notNull(),
 	name: text().notNull(),
+	concurrencyCap: integer("concurrency_cap").default(3).notNull(),
 	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-	dailyBudgetUsd: numeric("daily_budget_usd", { precision: 10, scale:  2 }),
-	pauseUntil: timestamp("pause_until", { withTimezone: true, mode: 'string' }),
-});
+	companyId: uuid("company_id"),
+	workspacePath: text("workspace_path"),
+	workflow: jsonb().default({}).notNull(),
+	dependencySatisfactionColumns: jsonb("dependency_satisfaction_columns").default(["qa_review","done"]),
+	weeklyTicketBudget: integer("weekly_ticket_budget"),
+}, (table) => [
+	foreignKey({
+			columns: [table.companyId],
+			foreignColumns: [companies.id],
+			name: "departments_company_id_fkey"
+		}),
+	unique("departments_slug_key").on(table.slug),
+]);
 
 export const ticketTransitions = pgTable("ticket_transitions", {
 	id: uuid().defaultRandom().primaryKey().notNull(),
@@ -181,6 +183,29 @@ export const chatSessions = pgTable("chat_sessions", {
 	index("idx_chat_sessions_user_active_unarchived").using("btree", table.startedByUserId.asc().nullsLast().op("timestamptz_ops"), table.startedAt.desc().nullsFirst().op("uuid_ops")).where(sql`(is_archived = false)`),
 	index("idx_chat_sessions_user_started").using("btree", table.startedByUserId.asc().nullsLast().op("uuid_ops"), table.startedAt.desc().nullsFirst().op("uuid_ops")),
 	check("chat_sessions_status_check", sql`status = ANY (ARRAY['active'::text, 'ended'::text, 'aborted'::text])`),
+]);
+
+export const agentRoleSecrets = pgTable("agent_role_secrets", {
+	roleSlug: text("role_slug").notNull(),
+	secretPath: text("secret_path").notNull(),
+	envVarName: text("env_var_name").notNull(),
+	customerId: uuid("customer_id").notNull(),
+	grantedAt: timestamp("granted_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	grantedBy: text("granted_by").notNull(),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	updatedAt: timestamp("updated_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	id: uuid().defaultRandom().primaryKey().notNull(),
+	agentId: uuid("agent_id"),
+}, (table) => [
+	index("idx_agent_role_secrets_agent_id").using("btree", table.agentId.asc().nullsLast().op("uuid_ops")).where(sql`(agent_id IS NOT NULL)`),
+	index("idx_agent_role_secrets_secret_path").using("btree", table.secretPath.asc().nullsLast().op("text_ops"), table.customerId.asc().nullsLast().op("uuid_ops")),
+	uniqueIndex("uq_agent_role_secrets_agent_scope").using("btree", table.agentId.asc().nullsLast().op("uuid_ops"), table.envVarName.asc().nullsLast().op("uuid_ops"), table.customerId.asc().nullsLast().op("uuid_ops")).where(sql`(agent_id IS NOT NULL)`),
+	uniqueIndex("uq_agent_role_secrets_role_scope").using("btree", table.roleSlug.asc().nullsLast().op("text_ops"), table.envVarName.asc().nullsLast().op("uuid_ops"), table.customerId.asc().nullsLast().op("text_ops")).where(sql`(agent_id IS NULL)`),
+	foreignKey({
+			columns: [table.agentId],
+			foreignColumns: [agents.id],
+			name: "agent_role_secrets_agent_id_fkey"
+		}).onDelete("cascade"),
 ]);
 
 export const chatMessages = pgTable("chat_messages", {
@@ -253,7 +278,7 @@ export const throttleEvents = pgTable("throttle_events", {
 			foreignColumns: [companies.id],
 			name: "throttle_events_company_id_fkey"
 		}),
-	check("throttle_events_kind_check", sql`kind = ANY (ARRAY['company_budget_exceeded'::text, 'rate_limit_pause'::text])`),
+	check("throttle_events_kind_check", sql`kind = ANY (ARRAY['company_budget_exceeded'::text, 'rate_limit_pause'::text, 'dept_weekly_ticket_budget_exceeded'::text])`),
 ]);
 
 export const hiringProposals = pgTable("hiring_proposals", {
@@ -320,6 +345,56 @@ export const agentContainerEvents = pgTable("agent_container_events", {
 	check("agent_container_events_kind_check", sql`kind = ANY (ARRAY['created'::text, 'started'::text, 'stopped'::text, 'removed'::text, 'migrated'::text, 'oom_killed'::text, 'crashed'::text, 'image_digest_drift_detected'::text, 'reconciled_on_supervisor_restart'::text])`),
 ]);
 
+export const chatMutationAudit = pgTable("chat_mutation_audit", {
+	id: uuid().defaultRandom().primaryKey().notNull(),
+	chatSessionId: uuid("chat_session_id"),
+	chatMessageId: uuid("chat_message_id"),
+	verb: text().notNull(),
+	argsJsonb: jsonb("args_jsonb").notNull(),
+	outcome: text().notNull(),
+	reversibilityClass: smallint("reversibility_class").notNull(),
+	affectedResourceId: text("affected_resource_id"),
+	affectedResourceType: text("affected_resource_type"),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	retentionClass: text("retention_class"),
+	agentInstanceId: uuid("agent_instance_id"),
+}, (table) => [
+	index("idx_chat_mutation_audit_agent_instance").using("btree", table.agentInstanceId.asc().nullsLast().op("timestamptz_ops"), table.createdAt.desc().nullsFirst().op("uuid_ops")).where(sql`(agent_instance_id IS NOT NULL)`),
+	index("idx_cma_resource").using("btree", table.affectedResourceType.asc().nullsLast().op("text_ops"), table.affectedResourceId.asc().nullsLast().op("text_ops")),
+	index("idx_cma_session").using("btree", table.chatSessionId.asc().nullsLast().op("uuid_ops"), table.createdAt.desc().nullsFirst().op("timestamptz_ops")),
+	foreignKey({
+			columns: [table.chatSessionId],
+			foreignColumns: [chatSessions.id],
+			name: "chat_mutation_audit_chat_session_id_fkey"
+		}).onDelete("cascade"),
+	foreignKey({
+			columns: [table.chatMessageId],
+			foreignColumns: [chatMessages.id],
+			name: "chat_mutation_audit_chat_message_id_fkey"
+		}).onDelete("cascade"),
+	// chat_mutation_audit.agent_instance_id → agent_instances.id FK is
+	// enforced by the DB (M8 migration) but not declared here because
+	// the back-reference (agent_instances.originating_audit_id →
+	// chat_mutation_audit.id) creates a TypeScript-level circular
+	// declaration Drizzle's inference can't unwind. Joins from the
+	// dashboard side use the column reference directly.
+	check("chat_mutation_audit_reversibility_class_check", sql`reversibility_class = ANY (ARRAY[1, 2, 3])`),
+	check("chat_mutation_audit_affected_resource_type_check", sql`affected_resource_type = ANY (ARRAY['ticket'::text, 'agent_role'::text, 'hiring_proposal'::text])`),
+	check("chat_mutation_audit_verb_check", sql`verb = ANY (ARRAY['create_ticket'::text, 'edit_ticket'::text, 'transition_ticket'::text, 'pause_agent'::text, 'resume_agent'::text, 'spawn_agent'::text, 'edit_agent_config'::text, 'propose_hire'::text, 'propose_skill_change'::text, 'bump_skill_version'::text, 'approve_hire'::text, 'reject_hire'::text, 'approve_skill_change'::text, 'reject_skill_change'::text, 'approve_version_bump'::text, 'reject_version_bump'::text, 'update_agent_md'::text, 'grandfathered_at_m7'::text, 'register_mcp_server'::text])`),
+	check("chat_mutation_audit_outcome_check", sql`outcome = ANY (ARRAY['success'::text, 'validation_failed'::text, 'leak_scan_failed'::text, 'ticket_state_changed'::text, 'concurrency_cap_full'::text, 'invalid_transition'::text, 'resource_not_found'::text, 'tool_call_ceiling_reached'::text, 'dept_weekly_ticket_budget_exceeded'::text])`),
+]);
+
+export const companies = pgTable("companies", {
+	id: uuid().defaultRandom().primaryKey().notNull(),
+	name: text().notNull(),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	dailyBudgetUsd: numeric("daily_budget_usd", { precision: 10, scale:  2 }),
+	pauseUntil: timestamp("pause_until", { withTimezone: true, mode: 'string' }),
+	customerSlug: text("customer_slug").default('garrison').notNull(),
+}, (table) => [
+	unique("companies_customer_slug_unique").on(table.customerSlug),
+]);
+
 export const agentInstallJournal = pgTable("agent_install_journal", {
 	id: uuid().defaultRandom().primaryKey().notNull(),
 	proposalId: uuid("proposal_id").notNull(),
@@ -335,53 +410,33 @@ export const agentInstallJournal = pgTable("agent_install_journal", {
 			foreignColumns: [hiringProposals.id],
 			name: "agent_install_journal_proposal_id_fkey"
 		}).onDelete("cascade"),
-	check("agent_install_journal_step_check", sql`step = ANY (ARRAY['download'::text, 'verify_digest'::text, 'extract'::text, 'mount'::text, 'container_create'::text, 'container_start'::text])`),
 	check("agent_install_journal_outcome_check", sql`outcome = ANY (ARRAY['success'::text, 'failed'::text, 'interrupted'::text])`),
+	check("agent_install_journal_step_check", sql`step = ANY (ARRAY['download'::text, 'verify_digest'::text, 'extract'::text, 'mount'::text, 'container_create'::text, 'container_start'::text, 'mcpjungle_client_create'::text, 'mcpjungle_allowlist_apply'::text])`),
 ]);
 
-export const chatMutationAudit = pgTable("chat_mutation_audit", {
+export const mcpServers = pgTable("mcp_servers", {
 	id: uuid().defaultRandom().primaryKey().notNull(),
-	chatSessionId: uuid("chat_session_id"),
-	chatMessageId: uuid("chat_message_id"),
-	verb: text().notNull(),
-	argsJsonb: jsonb("args_jsonb").notNull(),
-	outcome: text().notNull(),
-	reversibilityClass: smallint("reversibility_class").notNull(),
-	affectedResourceId: text("affected_resource_id"),
-	affectedResourceType: text("affected_resource_type"),
-	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-	retentionClass: text("retention_class"),
-}, (table) => [
-	index("idx_cma_resource").using("btree", table.affectedResourceType.asc().nullsLast().op("text_ops"), table.affectedResourceId.asc().nullsLast().op("text_ops")),
-	index("idx_cma_session").using("btree", table.chatSessionId.asc().nullsLast().op("uuid_ops"), table.createdAt.desc().nullsFirst().op("timestamptz_ops")),
-	foreignKey({
-			columns: [table.chatSessionId],
-			foreignColumns: [chatSessions.id],
-			name: "chat_mutation_audit_chat_session_id_fkey"
-		}).onDelete("cascade"),
-	foreignKey({
-			columns: [table.chatMessageId],
-			foreignColumns: [chatMessages.id],
-			name: "chat_mutation_audit_chat_message_id_fkey"
-		}).onDelete("cascade"),
-	check("chat_mutation_audit_outcome_check", sql`outcome = ANY (ARRAY['success'::text, 'validation_failed'::text, 'leak_scan_failed'::text, 'ticket_state_changed'::text, 'concurrency_cap_full'::text, 'invalid_transition'::text, 'resource_not_found'::text, 'tool_call_ceiling_reached'::text])`),
-	check("chat_mutation_audit_reversibility_class_check", sql`reversibility_class = ANY (ARRAY[1, 2, 3])`),
-	check("chat_mutation_audit_affected_resource_type_check", sql`affected_resource_type = ANY (ARRAY['ticket'::text, 'agent_role'::text, 'hiring_proposal'::text])`),
-	check("chat_mutation_audit_verb_check", sql`verb = ANY (ARRAY['create_ticket'::text, 'edit_ticket'::text, 'transition_ticket'::text, 'pause_agent'::text, 'resume_agent'::text, 'spawn_agent'::text, 'edit_agent_config'::text, 'propose_hire'::text, 'propose_skill_change'::text, 'bump_skill_version'::text, 'approve_hire'::text, 'reject_hire'::text, 'approve_skill_change'::text, 'reject_skill_change'::text, 'approve_version_bump'::text, 'reject_version_bump'::text, 'update_agent_md'::text, 'grandfathered_at_m7'::text])`),
-]);
-
-export const agentRoleSecrets = pgTable("agent_role_secrets", {
-	roleSlug: text("role_slug").notNull(),
-	secretPath: text("secret_path").notNull(),
-	envVarName: text("env_var_name").notNull(),
-	customerId: uuid("customer_id").notNull(),
-	grantedAt: timestamp("granted_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-	grantedBy: text("granted_by").notNull(),
+	customerSlug: text("customer_slug").notNull(),
+	name: text().notNull(),
+	transport: text().notNull(),
+	url: text(),
+	bearerTokenPath: text("bearer_token_path"),
+	status: text().default('pending').notNull(),
+	failureReason: text("failure_reason"),
+	registeredBy: uuid("registered_by"),
+	registeredAt: timestamp("registered_at", { withTimezone: true, mode: 'string' }),
 	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
 	updatedAt: timestamp("updated_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
 }, (table) => [
-	index("idx_agent_role_secrets_secret_path").using("btree", table.secretPath.asc().nullsLast().op("text_ops"), table.customerId.asc().nullsLast().op("text_ops")),
-	primaryKey({ columns: [table.roleSlug, table.envVarName, table.customerId], name: "agent_role_secrets_pkey"}),
+	index("idx_mcp_servers_status_pending").using("btree", table.createdAt.asc().nullsLast().op("timestamptz_ops")).where(sql`(status = 'pending'::text)`),
+	foreignKey({
+			columns: [table.customerSlug],
+			foreignColumns: [companies.customerSlug],
+			name: "mcp_servers_customer_slug_fkey"
+		}),
+	unique("mcp_servers_customer_slug_name_key").on(table.customerSlug, table.name),
+	check("mcp_servers_transport_check", sql`transport = ANY (ARRAY['http'::text, 'stdio'::text, 'sse'::text])`),
+	check("mcp_servers_status_check", sql`status = ANY (ARRAY['pending'::text, 'registered'::text, 'failed'::text, 'deregistered'::text])`),
 ]);
 
 export const secretMetadata = pgTable("secret_metadata", {

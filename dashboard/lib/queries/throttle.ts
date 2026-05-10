@@ -1,5 +1,6 @@
-import { sql } from 'drizzle-orm';
+import { sql, eq, desc, and } from 'drizzle-orm';
 import { appDb } from '@/lib/db/appClient';
+import { departments, throttleEvents, tickets } from '@/drizzle/schema.supervisor';
 
 // M6 — throttle_events read query (plan §"Phase 9 — Dashboard").
 //
@@ -50,5 +51,75 @@ export async function listThrottleEvents(limit = 50): Promise<ThrottleEventRow[]
     kind: r.kind,
     firedAt: r.fired_at,
     payload: r.payload,
+  }));
+}
+
+// M8 — runaway control read-side. Per FR-501 the /hygiene surface
+// gains a per-department panel showing current rolling-7d ticket
+// count vs configured weekly_ticket_budget + the last
+// dept_weekly_ticket_budget_exceeded fired_at if any.
+
+export interface DeptWeeklyState {
+  deptId: string;
+  deptSlug: string;
+  deptName: string;
+  weeklyTicketBudget: number | null;
+  currentCount: number;
+  lastFiredAt: string | null;
+}
+
+export async function listDeptWeeklyState(): Promise<DeptWeeklyState[]> {
+  const ticketCounts = appDb
+    .select({
+      deptId: tickets.departmentId,
+      count: sql<number>`count(*)::int`.as('count'),
+    })
+    .from(tickets)
+    .where(sql`${tickets.createdAt} >= NOW() - INTERVAL '7 days'`)
+    .groupBy(tickets.departmentId)
+    .as('ticket_counts');
+
+  const rows = await appDb
+    .select({
+      deptId: departments.id,
+      deptSlug: departments.slug,
+      deptName: departments.name,
+      weeklyTicketBudget: departments.weeklyTicketBudget,
+      currentCount: sql<number>`COALESCE(${ticketCounts.count}, 0)`,
+    })
+    .from(departments)
+    .leftJoin(ticketCounts, eq(ticketCounts.deptId, departments.id))
+    .orderBy(departments.slug);
+
+  const events = await appDb
+    .select({
+      payload: throttleEvents.payload,
+      firedAt: throttleEvents.firedAt,
+    })
+    .from(throttleEvents)
+    .where(
+      and(
+        eq(throttleEvents.kind, 'dept_weekly_ticket_budget_exceeded'),
+        sql`${throttleEvents.firedAt} >= NOW() - INTERVAL '7 days'`,
+      ),
+    )
+    .orderBy(desc(throttleEvents.firedAt));
+
+  const lastFiredBySlug = new Map<string, string>();
+  for (const evt of events) {
+    const payload = evt.payload as { dept_slug?: string } | null;
+    const slug = payload?.dept_slug;
+    if (slug && !lastFiredBySlug.has(slug)) {
+      lastFiredBySlug.set(slug, evt.firedAt as string);
+    }
+  }
+
+  return rows.map((r) => ({
+    deptId: r.deptId,
+    deptSlug: r.deptSlug,
+    deptName: r.deptName,
+    weeklyTicketBudget: r.weeklyTicketBudget,
+    currentCount: Number(r.currentCount ?? 0),
+    lastFiredAt: lastFiredBySlug.get(r.deptSlug) ?? null,
   }));
 }

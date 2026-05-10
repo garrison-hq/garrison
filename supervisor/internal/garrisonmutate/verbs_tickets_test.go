@@ -244,3 +244,153 @@ func TestRegisteredHandlersAreRealNotStubs(t *testing.T) {
 		}
 	}
 }
+
+// M8 unit-level coverage for the pre-INSERT helpers that don't need
+// a live DB. Mirrors the existing parseCreateTicketArgs +
+// resolveParentTicketID unit tests in this file.
+
+func TestAssertExactlyOneCallerAnchor_BothSet(t *testing.T) {
+	deps := Deps{
+		ChatSessionID:   pgtype.UUID{Valid: true, Bytes: [16]byte{1}},
+		AgentInstanceID: pgtype.UUID{Valid: true, Bytes: [16]byte{2}},
+	}
+	err := assertExactlyOneCallerAnchor(deps)
+	if err == nil {
+		t.Errorf("both anchors set should error; got nil")
+	}
+}
+
+func TestAssertExactlyOneCallerAnchor_NeitherSet(t *testing.T) {
+	deps := Deps{}
+	err := assertExactlyOneCallerAnchor(deps)
+	if err == nil {
+		t.Errorf("neither anchor set should error; got nil")
+	}
+}
+
+func TestAssertExactlyOneCallerAnchor_ChatOnly(t *testing.T) {
+	deps := Deps{ChatSessionID: pgtype.UUID{Valid: true, Bytes: [16]byte{1}}}
+	if err := assertExactlyOneCallerAnchor(deps); err != nil {
+		t.Errorf("chat-only should succeed; got %v", err)
+	}
+}
+
+func TestAssertExactlyOneCallerAnchor_AgentOnly(t *testing.T) {
+	deps := Deps{AgentInstanceID: pgtype.UUID{Valid: true, Bytes: [16]byte{1}}}
+	if err := assertExactlyOneCallerAnchor(deps); err != nil {
+		t.Errorf("agent-only should succeed; got %v", err)
+	}
+}
+
+func TestPickTicketOriginAgent(t *testing.T) {
+	deps := Deps{AgentInstanceID: pgtype.UUID{Valid: true, Bytes: [16]byte{1}}}
+	if got := pickTicketOrigin(deps); got != "agent" {
+		t.Errorf("origin = %q; want agent", got)
+	}
+}
+
+func TestPickTicketOriginChat(t *testing.T) {
+	deps := Deps{ChatSessionID: pgtype.UUID{Valid: true, Bytes: [16]byte{1}}}
+	if got := pickTicketOrigin(deps); got != "chat" {
+		t.Errorf("origin = %q; want chat", got)
+	}
+}
+
+func TestDeref32Nil(t *testing.T) {
+	if deref32(nil) != 0 {
+		t.Errorf("nil pointer should dereference to 0")
+	}
+}
+
+func TestDeref32Value(t *testing.T) {
+	v := int32(42)
+	if deref32(&v) != 42 {
+		t.Errorf("got %d; want 42", deref32(&v))
+	}
+}
+
+func TestDependencyErrorHelpers(t *testing.T) {
+	r := dependencyCycleErr("cycle detected")
+	if r.Success || r.ErrorKind != string(ErrDependencyCycle) {
+		t.Errorf("dependencyCycleErr shape wrong: %+v", r)
+	}
+	r = dependencyChainTooDeepErr("too deep")
+	if r.Success || r.ErrorKind != string(ErrDependencyChainTooDeep) {
+		t.Errorf("dependencyChainTooDeepErr shape wrong: %+v", r)
+	}
+	r = deptWeeklyBudgetExceededErr("over budget")
+	if r.Success || r.ErrorKind != string(ErrDeptWeeklyBudgetExceeded) {
+		t.Errorf("deptWeeklyBudgetExceededErr shape wrong: %+v", r)
+	}
+}
+
+func TestParseCreateTicketArgs_AcceptsValid(t *testing.T) {
+	args, res := parseCreateTicketArgs([]byte(`{"objective":"x","department_slug":"engineering"}`))
+	if res != nil {
+		t.Fatalf("expected acceptance; got %+v", res)
+	}
+	if args.Objective != "x" || args.DepartmentSlug != "engineering" {
+		t.Errorf("args = %+v; want objective=x dept=engineering", args)
+	}
+}
+
+func TestParseCreateTicketArgs_TrimsWhitespace(t *testing.T) {
+	args, res := parseCreateTicketArgs([]byte(`{"objective":"  hello  ","department_slug":"  engineering  "}`))
+	if res != nil {
+		t.Fatalf("expected acceptance; got %+v", res)
+	}
+	if args.Objective != "hello" {
+		t.Errorf("objective = %q; want hello (trimmed)", args.Objective)
+	}
+	if args.DepartmentSlug != "engineering" {
+		t.Errorf("department_slug = %q; want engineering (trimmed)", args.DepartmentSlug)
+	}
+}
+
+func TestBuildCreateTicketMetadata_Empty(t *testing.T) {
+	body, res := buildCreateTicketMetadata(CreateTicketArgs{})
+	if res != nil {
+		t.Fatalf("expected acceptance; got %+v", res)
+	}
+	if string(body) != "{}" {
+		t.Errorf("body = %q; want empty JSON object", body)
+	}
+}
+
+func TestBuildCreateTicketMetadata_Populated(t *testing.T) {
+	body, res := buildCreateTicketMetadata(CreateTicketArgs{
+		Metadata: map[string]any{"key": "value"},
+	})
+	if res != nil {
+		t.Fatalf("expected acceptance; got %+v", res)
+	}
+	if !strings.Contains(string(body), `"key":"value"`) {
+		t.Errorf("body = %s; missing serialized metadata", body)
+	}
+}
+
+func TestValidationFailureShape(t *testing.T) {
+	r := validationFailure("test message")
+	if r.Success {
+		t.Error("Success should be false")
+	}
+	if r.ErrorKind != string(ErrValidationFailed) {
+		t.Errorf("ErrorKind = %q; want validation_failed", r.ErrorKind)
+	}
+	if !strings.Contains(r.Message, "test message") {
+		t.Errorf("message missing: %q", r.Message)
+	}
+}
+
+func TestResourceNotFoundShape(t *testing.T) {
+	r := resourceNotFound("dept %q not found", "engineering")
+	if r.Success {
+		t.Error("Success should be false")
+	}
+	if r.ErrorKind != string(ErrResourceNotFound) {
+		t.Errorf("ErrorKind = %q; want resource_not_found", r.ErrorKind)
+	}
+	if !strings.Contains(r.Message, "engineering") {
+		t.Errorf("message missing format arg: %q", r.Message)
+	}
+}

@@ -80,6 +80,8 @@ type AgentRoleSecret struct {
 	GrantedBy  string
 	CreatedAt  pgtype.Timestamptz
 	UpdatedAt  pgtype.Timestamptz
+	ID         pgtype.UUID
+	AgentID    pgtype.UUID
 }
 
 type ChatMessage struct {
@@ -110,6 +112,7 @@ type ChatMutationAudit struct {
 	AffectedResourceType *string
 	CreatedAt            pgtype.Timestamptz
 	RetentionClass       *string
+	AgentInstanceID      pgtype.UUID
 }
 
 type ChatSession struct {
@@ -129,17 +132,20 @@ type Company struct {
 	CreatedAt      pgtype.Timestamptz
 	DailyBudgetUsd pgtype.Numeric
 	PauseUntil     pgtype.Timestamptz
+	CustomerSlug   string
 }
 
 type Department struct {
-	ID             pgtype.UUID
-	Slug           string
-	Name           string
-	ConcurrencyCap int32
-	CreatedAt      pgtype.Timestamptz
-	CompanyID      pgtype.UUID
-	WorkspacePath  *string
-	Workflow       []byte
+	ID                            pgtype.UUID
+	Slug                          string
+	Name                          string
+	ConcurrencyCap                int32
+	CreatedAt                     pgtype.Timestamptz
+	CompanyID                     pgtype.UUID
+	WorkspacePath                 *string
+	Workflow                      []byte
+	DependencySatisfactionColumns []byte
+	WeeklyTicketBudget            *int32
 }
 
 type EventOutbox struct {
@@ -169,6 +175,21 @@ type HiringProposal struct {
 	ApprovedBy              pgtype.UUID
 	RejectedAt              pgtype.Timestamptz
 	RejectedReason          *string
+}
+
+type McpServer struct {
+	ID              pgtype.UUID
+	CustomerSlug    string
+	Name            string
+	Transport       string
+	Url             *string
+	BearerTokenPath *string
+	Status          string
+	FailureReason   *string
+	RegisteredBy    pgtype.UUID
+	RegisteredAt    pgtype.Timestamptz
+	CreatedAt       pgtype.Timestamptz
+	UpdatedAt       pgtype.Timestamptz
 }
 
 type SecretMetadatum struct {
@@ -203,6 +224,7 @@ type Ticket struct {
 	Origin                  string
 	CreatedViaChatSessionID pgtype.UUID
 	ParentTicketID          pgtype.UUID
+	DependsOnTicketID       pgtype.UUID
 }
 
 type TicketTransition struct {

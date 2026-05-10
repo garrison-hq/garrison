@@ -79,9 +79,13 @@ func (a *mockAuth) RevokeAccessToken() error { return nil }
 // --- mockSecrets ---
 
 type mockSecrets struct {
-	mu        sync.Mutex
-	calls     int
-	responses []mockRetrieveResponse
+	mu          sync.Mutex
+	calls       int
+	responses   []mockRetrieveResponse
+	createCalls int
+	updateCalls int
+	createErrs  []error
+	updateErrs  []error
 }
 
 type mockRetrieveResponse struct {
@@ -113,9 +117,23 @@ func (s *mockSecrets) ListSecrets(_ infisical.ListSecretsOptions) (infisical.Lis
 	return infisical.ListSecretsResult{}, nil
 }
 func (s *mockSecrets) Update(_ infisical.UpdateSecretOptions) (models.Secret, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	idx := s.updateCalls
+	s.updateCalls++
+	if idx < len(s.updateErrs) {
+		return models.Secret{}, s.updateErrs[idx]
+	}
 	return models.Secret{}, nil
 }
 func (s *mockSecrets) Create(_ infisical.CreateSecretOptions) (models.Secret, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	idx := s.createCalls
+	s.createCalls++
+	if idx < len(s.createErrs) {
+		return models.Secret{}, s.createErrs[idx]
+	}
 	return models.Secret{}, nil
 }
 func (s *mockSecrets) Delete(_ infisical.DeleteSecretOptions) (models.Secret, error) {
@@ -487,5 +505,80 @@ func TestClassifySDKError401(t *testing.T) {
 	err := classifySDKError(apiErr(http.StatusUnauthorized))
 	if !errors.Is(err, ErrVaultAuthExpired) {
 		t.Errorf("expected ErrVaultAuthExpired for 401, got %v", err)
+	}
+}
+
+// --- WriteSecret tests (M8 reconciler write path) ---
+
+func TestWriteSecret_HappyPath(t *testing.T) {
+	auth := &mockAuth{token: "tok"}
+	sec := &mockSecrets{}
+	c := newTestClient(auth, sec)
+	if err := c.WriteSecret(context.Background(), "mcpjungle/agents/abc", "bearer-1234"); err != nil {
+		t.Fatalf("WriteSecret: %v", err)
+	}
+	if sec.createCalls != 1 {
+		t.Errorf("Create calls = %d; want 1", sec.createCalls)
+	}
+	if sec.updateCalls != 0 {
+		t.Errorf("Update calls = %d; want 0 (no fallback)", sec.updateCalls)
+	}
+}
+
+func TestWriteSecret_ConflictFallsBackToUpdate(t *testing.T) {
+	auth := &mockAuth{token: "tok"}
+	sec := &mockSecrets{createErrs: []error{apiErr(http.StatusConflict)}}
+	c := newTestClient(auth, sec)
+	if err := c.WriteSecret(context.Background(), "mcpjungle/agents/abc", "bearer-1234"); err != nil {
+		t.Fatalf("WriteSecret: %v", err)
+	}
+	if sec.createCalls != 1 {
+		t.Errorf("Create calls = %d; want 1", sec.createCalls)
+	}
+	if sec.updateCalls != 1 {
+		t.Errorf("Update calls = %d; want 1 (conflict fallback)", sec.updateCalls)
+	}
+}
+
+func TestWriteSecret_BadRequestFallsBackToUpdate(t *testing.T) {
+	auth := &mockAuth{token: "tok"}
+	sec := &mockSecrets{createErrs: []error{apiErr(http.StatusBadRequest)}}
+	c := newTestClient(auth, sec)
+	if err := c.WriteSecret(context.Background(), "mcpjungle/agents/abc", "bearer-1234"); err != nil {
+		t.Fatalf("WriteSecret: %v", err)
+	}
+	if sec.updateCalls != 1 {
+		t.Errorf("Update calls = %d; want 1 (Infisical sometimes 400s on already-exists)", sec.updateCalls)
+	}
+}
+
+func TestWriteSecret_AuthExpiredWhenReauthFails(t *testing.T) {
+	// Create returns 401 → reauthenticate fails → ErrVaultAuthExpired.
+	auth := &mockAuth{token: "tok", loginErr: apiErr(http.StatusUnauthorized)}
+	sec := &mockSecrets{createErrs: []error{apiErr(http.StatusUnauthorized)}}
+	c := newTestClient(auth, sec)
+	err := c.WriteSecret(context.Background(), "mcpjungle/agents/abc", "bearer")
+	if !errors.Is(err, ErrVaultAuthExpired) {
+		t.Errorf("err = %v; want ErrVaultAuthExpired", err)
+	}
+}
+
+func TestWriteSecret_EmptyKeyRejected(t *testing.T) {
+	auth := &mockAuth{token: "tok"}
+	sec := &mockSecrets{}
+	c := newTestClient(auth, sec)
+	err := c.WriteSecret(context.Background(), "/", "bearer")
+	if err == nil {
+		t.Errorf("expected error on empty key; got nil")
+	}
+}
+
+func TestWriteSecret_GenericErrorClassified(t *testing.T) {
+	auth := &mockAuth{token: "tok"}
+	sec := &mockSecrets{createErrs: []error{apiErr(http.StatusInternalServerError)}}
+	c := newTestClient(auth, sec)
+	err := c.WriteSecret(context.Background(), "mcpjungle/agents/abc", "bearer")
+	if !errors.Is(err, ErrVaultUnavailable) {
+		t.Errorf("err = %v; want ErrVaultUnavailable on 5xx", err)
 	}
 }

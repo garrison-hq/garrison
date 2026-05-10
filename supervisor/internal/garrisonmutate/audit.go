@@ -12,8 +12,13 @@ import (
 // AuditTx is the transaction interface garrison-mutate verbs share with
 // the store package. Mirrors the seam used by internal/finalize for
 // per-tx queries. Concretely satisfied by *store.Queries.
+//
+// M8 added InsertAgentAnchoredAudit (carries agent_instance_id);
+// WriteAudit routes through it when AuditWriteParams.AgentInstanceID
+// is valid, falling back to InsertChatMutationAudit otherwise.
 type AuditTx interface {
 	InsertChatMutationAudit(ctx context.Context, params store.InsertChatMutationAuditParams) (store.InsertChatMutationAuditRow, error)
+	InsertAgentAnchoredAudit(ctx context.Context, params store.InsertAgentAnchoredAuditParams) (store.InsertAgentAnchoredAuditRow, error)
 }
 
 // AuditWriteParams groups the fields callers populate before calling
@@ -21,6 +26,7 @@ type AuditTx interface {
 type AuditWriteParams struct {
 	ChatSessionID        pgtype.UUID
 	ChatMessageID        pgtype.UUID
+	AgentInstanceID      pgtype.UUID // M8: non-zero routes through InsertAgentAnchoredAudit
 	Verb                 string
 	Args                 any // anything json.Marshalable; full args incl. operator-typed text per FR-473
 	Outcome              string
@@ -43,6 +49,23 @@ func WriteAudit(ctx context.Context, tx AuditTx, p AuditWriteParams) (pgtype.UUI
 	argsJSON, err := json.Marshal(p.Args)
 	if err != nil {
 		argsJSON = []byte(fmt.Sprintf(`{"_audit_marshal_error":%q}`, err.Error()))
+	}
+	if p.AgentInstanceID.Valid {
+		row, err := tx.InsertAgentAnchoredAudit(ctx, store.InsertAgentAnchoredAuditParams{
+			ChatSessionID:        p.ChatSessionID,
+			ChatMessageID:        p.ChatMessageID,
+			AgentInstanceID:      p.AgentInstanceID,
+			Verb:                 p.Verb,
+			ArgsJsonb:            argsJSON,
+			Outcome:              p.Outcome,
+			ReversibilityClass:   p.ReversibilityClass,
+			AffectedResourceID:   p.AffectedResourceID,
+			AffectedResourceType: p.AffectedResourceType,
+		})
+		if err != nil {
+			return pgtype.UUID{}, fmt.Errorf("garrisonmutate: insert agent-anchored audit row: %w", err)
+		}
+		return row.ID, nil
 	}
 	row, err := tx.InsertChatMutationAudit(ctx, store.InsertChatMutationAuditParams{
 		ChatSessionID:        p.ChatSessionID,

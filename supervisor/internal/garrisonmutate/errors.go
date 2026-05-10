@@ -17,6 +17,14 @@ const (
 	ErrInvalidTransition      MutateErrorKind = "invalid_transition"
 	ErrResourceNotFound       MutateErrorKind = "resource_not_found"
 	ErrToolCallCeilingReached MutateErrorKind = "tool_call_ceiling_reached"
+	// M8 dependency-graph rejections. Surface as error_kind in the
+	// verb Result; audit row outcome stays validation_failed so the
+	// audit CHECK constraint is unaffected.
+	ErrDependencyCycle        MutateErrorKind = "dependency_cycle"
+	ErrDependencyChainTooDeep MutateErrorKind = "dependency_chain_too_deep"
+	// M8 dept-weekly runaway gate. Surfaces as both error_kind AND
+	// audit outcome (matches throttle.KindDeptWeeklyBudgetExceeded).
+	ErrDeptWeeklyBudgetExceeded MutateErrorKind = "dept_weekly_ticket_budget_exceeded"
 )
 
 // String returns the textual form of the error_kind, suitable for
@@ -35,5 +43,8 @@ func AllVerbErrorKinds() []MutateErrorKind {
 		ErrConcurrencyCapFull,
 		ErrInvalidTransition,
 		ErrResourceNotFound,
+		ErrDependencyCycle,
+		ErrDependencyChainTooDeep,
+		ErrDeptWeeklyBudgetExceeded,
 	}
 }
