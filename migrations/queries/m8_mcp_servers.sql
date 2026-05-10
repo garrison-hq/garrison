@@ -25,6 +25,24 @@ INSERT INTO mcp_servers (
 )
 RETURNING id, created_at, status;
 
+-- name: ClaimMcpServerRowForWorker :one
+-- Atomic worker-side claim: flip the row from 'pending' to 'pending'
+-- only if it's currently 'pending', returning the id on success. Used
+-- by mcpserverwork.Worker.Handle to guard against concurrent dispatch
+-- (LISTEN + poll double-fire from the M1 dispatcher pattern).
+-- Returns no rows if another goroutine already claimed it.
+--
+-- We re-INSERT pending=pending here so the trigger doesn't refire;
+-- the only effect is that updated_at advances + the row is now
+-- locked at the row level for the rest of the caller's tx (which is
+-- implicit here because :one queries auto-tx in pgx). After the
+-- claim succeeds, the caller proceeds to actually call MCPJungle.
+UPDATE mcp_servers
+   SET updated_at = NOW()
+ WHERE id = sqlc.arg(id)
+   AND status = 'pending'
+RETURNING id;
+
 -- name: UpdateMcpServerStatus :exec
 -- Worker write path. On MCPJungle API success: status='registered',
 -- registered_at=NOW(). On failure: status='failed' + failure_reason. The

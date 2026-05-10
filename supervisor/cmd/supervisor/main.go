@@ -678,6 +678,7 @@ func buildMcpjungleSubsystem(
 		Queries: queries,
 		Client:  client,
 		Logger:  logger,
+		Pool:    pool,
 	})
 	if err != nil {
 		logger.Warn("mcpjungle: worker construction failed; reactive worker disabled",

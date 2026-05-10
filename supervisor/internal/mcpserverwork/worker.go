@@ -31,7 +31,10 @@ import (
 
 	"github.com/garrison-hq/garrison/supervisor/internal/mcpjungle"
 	"github.com/garrison-hq/garrison/supervisor/internal/store"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // VaultFetcher is the narrow seam the worker uses to look up the
@@ -49,6 +52,13 @@ type Deps struct {
 	Client  *mcpjungle.Client
 	Vault   VaultFetcher // may be nil if no row in the registry has a bearer_token_path
 	Logger  *slog.Logger
+	// Pool is optional. When set, Handle uses SELECT ... FOR UPDATE
+	// NOWAIT on the mcp_servers row to dedupe concurrent dispatch
+	// (LISTEN + poll double-fire) at the row-lock level. When nil,
+	// Handle falls back to a status-check-only guard which is best-
+	// effort and may double-process during the MCPJungle call window.
+	// Production wires this from cmd/supervisor/main.go's pool.
+	Pool *pgxpool.Pool
 }
 
 // Worker is the per-channel handler registered with the M1 dispatcher.
@@ -82,7 +92,56 @@ const Channel = "work.mcp_server.registration_requested"
 // dispatcher. eventID is the mcp_servers.id (the trigger duplicates it
 // from row.id into the M1 envelope so the dispatcher accepts the
 // payload).
+//
+// Concurrency: when deps.Pool is set, Handle wraps the per-row work
+// in a SELECT ... FOR UPDATE NOWAIT tx so concurrent dispatch (the
+// LISTEN + poll double-fire described in plan §"Dedupe on handling")
+// converges to one MCPJungle call per row. The second goroutine sees
+// lock_not_available and short-circuits.
 func (w *Worker) Handle(ctx context.Context, eventID pgtype.UUID) error {
+	if w.deps.Pool == nil {
+		return w.handleNoLock(ctx, eventID)
+	}
+	tx, err := w.deps.Pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("mcpserverwork: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	// SELECT FOR UPDATE NOWAIT — if another worker holds the row,
+	// we skip cleanly (the holder is processing it; double-work
+	// avoided). Use a raw query because the sqlc-generated
+	// GetMcpServerByID doesn't take a tx.
+	var status string
+	err = tx.QueryRow(ctx,
+		`SELECT status FROM mcp_servers WHERE id = $1 FOR UPDATE NOWAIT`, eventID).Scan(&status)
+	if err != nil {
+		if isLockNotAvailable(err) {
+			w.deps.Logger.Debug("mcpserverwork: row locked by another worker, skipping",
+				"mcp_server_id", uuidString(eventID))
+			return nil
+		}
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		return fmt.Errorf("mcpserverwork: SELECT FOR UPDATE: %w", err)
+	}
+	if status != "pending" {
+		return nil
+	}
+	q := w.deps.Queries.WithTx(tx)
+	row, err := q.GetMcpServerByID(ctx, eventID)
+	if err != nil {
+		return fmt.Errorf("mcpserverwork: GetMcpServerByID: %w", err)
+	}
+	if err := w.processWithTx(ctx, q, row); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// handleNoLock is the legacy path used by tests that don't wire Pool.
+// Best-effort status guard only.
+func (w *Worker) handleNoLock(ctx context.Context, eventID pgtype.UUID) error {
 	row, err := w.deps.Queries.GetMcpServerByID(ctx, eventID)
 	if err != nil {
 		return fmt.Errorf("mcpserverwork: GetMcpServerByID %s: %w", eventID, err)
@@ -93,6 +152,93 @@ func (w *Worker) Handle(ctx context.Context, eventID pgtype.UUID) error {
 		return nil
 	}
 	return w.process(ctx, row)
+}
+
+// isLockNotAvailable detects PostgreSQL's lock_not_available SQLSTATE
+// (55P03), returned by SELECT ... FOR UPDATE NOWAIT when another tx
+// holds the lock.
+func isLockNotAvailable(err error) bool {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code == "55P03"
+	}
+	return false
+}
+
+// processWithTx runs the registration state machine against a tx-
+// bound Queries so the SELECT FOR UPDATE lock survives until commit.
+func (w *Worker) processWithTx(ctx context.Context, q *store.Queries, row store.McpServer) error {
+	logger := w.deps.Logger.With("mcp_server_id", uuidString(row.ID), "name", row.Name)
+	spec := mcpjungle.ServerSpec{Name: row.Name, Transport: row.Transport}
+	if row.Url != nil {
+		spec.URL = *row.Url
+	}
+	if row.BearerTokenPath != nil && *row.BearerTokenPath != "" {
+		if w.deps.Vault == nil {
+			return w.failTx(ctx, q, row, "vault fetcher not configured but bearer_token_path is set")
+		}
+		token, err := w.deps.Vault.FetchOne(ctx, *row.BearerTokenPath)
+		if err != nil {
+			return w.failTx(ctx, q, row, fmt.Sprintf("vault fetch %s: %v", *row.BearerTokenPath, err))
+		}
+		spec.BearerToken = token
+	}
+	if _, err := w.deps.Client.RegisterServer(ctx, spec); err != nil {
+		return w.failTx(ctx, q, row, fmt.Sprintf("MCPJungle RegisterServer: %v", err))
+	}
+	if err := w.markRegisteredTx(ctx, q, row); err != nil {
+		logger.Error("mcpserverwork: mark-registered failed", "err", err)
+		return err
+	}
+	logger.Info("mcpserverwork: registered MCP server")
+	return nil
+}
+
+func (w *Worker) failTx(ctx context.Context, q *store.Queries, row store.McpServer, reason string) error {
+	reasonPtr := reason
+	if err := q.UpdateMcpServerStatus(ctx, store.UpdateMcpServerStatusParams{
+		Status:        "failed",
+		FailureReason: &reasonPtr,
+		ID:            row.ID,
+	}); err != nil {
+		return fmt.Errorf("mcpserverwork: UpdateMcpServerStatus(failed): %w", err)
+	}
+	return w.writeAuditTx(ctx, q, row, "failed", reason)
+}
+
+func (w *Worker) markRegisteredTx(ctx context.Context, q *store.Queries, row store.McpServer) error {
+	var nilReason *string
+	if err := q.UpdateMcpServerStatus(ctx, store.UpdateMcpServerStatusParams{
+		Status:        "registered",
+		FailureReason: nilReason,
+		ID:            row.ID,
+	}); err != nil {
+		return fmt.Errorf("mcpserverwork: UpdateMcpServerStatus(registered): %w", err)
+	}
+	return w.writeAuditTx(ctx, q, row, "success", "")
+}
+
+func (w *Worker) writeAuditTx(ctx context.Context, q *store.Queries, row store.McpServer, outcome, failureDetail string) error {
+	args := fmt.Sprintf(`{"name":%q,"transport":%q,"customer_slug":%q,"outcome_detail":%q}`,
+		row.Name, row.Transport, row.CustomerSlug, failureDetail)
+	resourceID := uuidString(row.ID)
+	resourceType := "mcp_server"
+	var nilUUID pgtype.UUID
+	_, err := q.InsertAgentAnchoredAudit(ctx, store.InsertAgentAnchoredAuditParams{
+		ChatSessionID:        nilUUID,
+		ChatMessageID:        nilUUID,
+		AgentInstanceID:      nilUUID,
+		Verb:                 "register_mcp_server",
+		ArgsJsonb:            []byte(args),
+		Outcome:              outcome,
+		ReversibilityClass:   2,
+		AffectedResourceID:   &resourceID,
+		AffectedResourceType: &resourceType,
+	})
+	if err != nil {
+		return fmt.Errorf("mcpserverwork: InsertAgentAnchoredAudit(%s): %w", outcome, err)
+	}
+	return nil
 }
 
 // process runs the registration state machine for one row. On any
