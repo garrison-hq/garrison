@@ -12,7 +12,7 @@ import (
 )
 
 const getTicketByID = `-- name: GetTicketByID :one
-SELECT id, department_id, objective, created_at, column_slug, acceptance_criteria, metadata, origin, created_via_chat_session_id, parent_ticket_id FROM tickets WHERE id = $1
+SELECT id, department_id, objective, created_at, column_slug, acceptance_criteria, metadata, origin, created_via_chat_session_id, parent_ticket_id, depends_on_ticket_id FROM tickets WHERE id = $1
 `
 
 func (q *Queries) GetTicketByID(ctx context.Context, id pgtype.UUID) (Ticket, error) {
@@ -29,6 +29,7 @@ func (q *Queries) GetTicketByID(ctx context.Context, id pgtype.UUID) (Ticket, er
 		&i.Origin,
 		&i.CreatedViaChatSessionID,
 		&i.ParentTicketID,
+		&i.DependsOnTicketID,
 	)
 	return i, err
 }
@@ -71,6 +72,19 @@ type InsertChatTicketParams struct {
 	ParentTicketID          pgtype.UUID
 }
 
+type InsertChatTicketRow struct {
+	ID                      pgtype.UUID
+	DepartmentID            pgtype.UUID
+	Objective               string
+	CreatedAt               pgtype.Timestamptz
+	ColumnSlug              string
+	AcceptanceCriteria      *string
+	Metadata                []byte
+	Origin                  string
+	CreatedViaChatSessionID pgtype.UUID
+	ParentTicketID          pgtype.UUID
+}
+
 // M5.3 garrison-mutate.create_ticket. Writes a ticket row with
 // origin='ceo_chat' and the FK back to the originating chat session
 // so forensic queries can join chat_session→tickets without
@@ -84,7 +98,7 @@ type InsertChatTicketParams struct {
 // handler validates same-department + non-closed parent BEFORE calling
 // this query (cross-table CHECK can't enforce both; verb error message
 // has to be operator-readable anyway).
-func (q *Queries) InsertChatTicket(ctx context.Context, arg InsertChatTicketParams) (Ticket, error) {
+func (q *Queries) InsertChatTicket(ctx context.Context, arg InsertChatTicketParams) (InsertChatTicketRow, error) {
 	row := q.db.QueryRow(ctx, insertChatTicket,
 		arg.DepartmentID,
 		arg.Objective,
@@ -94,7 +108,7 @@ func (q *Queries) InsertChatTicket(ctx context.Context, arg InsertChatTicketPara
 		arg.CreatedViaChatSessionID,
 		arg.ParentTicketID,
 	)
-	var i Ticket
+	var i InsertChatTicketRow
 	err := row.Scan(
 		&i.ID,
 		&i.DepartmentID,
@@ -113,7 +127,7 @@ func (q *Queries) InsertChatTicket(ctx context.Context, arg InsertChatTicketPara
 const insertTicket = `-- name: InsertTicket :one
 INSERT INTO tickets (department_id, objective)
 VALUES ($1, $2)
-RETURNING id, department_id, objective, created_at, column_slug, acceptance_criteria, metadata, origin, created_via_chat_session_id, parent_ticket_id
+RETURNING id, department_id, objective, created_at, column_slug, acceptance_criteria, metadata, origin, created_via_chat_session_id, parent_ticket_id, depends_on_ticket_id
 `
 
 type InsertTicketParams struct {
@@ -135,6 +149,7 @@ func (q *Queries) InsertTicket(ctx context.Context, arg InsertTicketParams) (Tic
 		&i.Origin,
 		&i.CreatedViaChatSessionID,
 		&i.ParentTicketID,
+		&i.DependsOnTicketID,
 	)
 	return i, err
 }

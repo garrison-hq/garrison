@@ -12,7 +12,7 @@ import (
 )
 
 const getDepartmentByID = `-- name: GetDepartmentByID :one
-SELECT id, slug, name, concurrency_cap, created_at, company_id, workspace_path, workflow FROM departments WHERE id = $1
+SELECT id, slug, name, concurrency_cap, created_at, company_id, workspace_path, workflow, dependency_satisfaction_columns, weekly_ticket_budget FROM departments WHERE id = $1
 `
 
 func (q *Queries) GetDepartmentByID(ctx context.Context, id pgtype.UUID) (Department, error) {
@@ -27,12 +27,14 @@ func (q *Queries) GetDepartmentByID(ctx context.Context, id pgtype.UUID) (Depart
 		&i.CompanyID,
 		&i.WorkspacePath,
 		&i.Workflow,
+		&i.DependencySatisfactionColumns,
+		&i.WeeklyTicketBudget,
 	)
 	return i, err
 }
 
 const getDepartmentBySlug = `-- name: GetDepartmentBySlug :one
-SELECT id, slug, name, concurrency_cap, created_at, company_id, workspace_path, workflow FROM departments WHERE slug = $1
+SELECT id, slug, name, concurrency_cap, created_at, company_id, workspace_path, workflow, dependency_satisfaction_columns, weekly_ticket_budget FROM departments WHERE slug = $1
 `
 
 func (q *Queries) GetDepartmentBySlug(ctx context.Context, slug string) (Department, error) {
@@ -47,6 +49,8 @@ func (q *Queries) GetDepartmentBySlug(ctx context.Context, slug string) (Departm
 		&i.CompanyID,
 		&i.WorkspacePath,
 		&i.Workflow,
+		&i.DependencySatisfactionColumns,
+		&i.WeeklyTicketBudget,
 	)
 	return i, err
 }
@@ -54,7 +58,7 @@ func (q *Queries) GetDepartmentBySlug(ctx context.Context, slug string) (Departm
 const insertDepartment = `-- name: InsertDepartment :one
 INSERT INTO departments (slug, name, concurrency_cap)
 VALUES ($1, $2, $3)
-RETURNING id, slug, name, concurrency_cap, created_at, company_id, workspace_path, workflow
+RETURNING id, slug, name, concurrency_cap, created_at, company_id, workspace_path, workflow, dependency_satisfaction_columns, weekly_ticket_budget
 `
 
 type InsertDepartmentParams struct {
@@ -75,6 +79,8 @@ func (q *Queries) InsertDepartment(ctx context.Context, arg InsertDepartmentPara
 		&i.CompanyID,
 		&i.WorkspacePath,
 		&i.Workflow,
+		&i.DependencySatisfactionColumns,
+		&i.WeeklyTicketBudget,
 	)
 	return i, err
 }

@@ -12,7 +12,7 @@ import (
 )
 
 const getChatMutationAuditByID = `-- name: GetChatMutationAuditByID :one
-SELECT id, chat_session_id, chat_message_id, verb, args_jsonb, outcome, reversibility_class, affected_resource_id, affected_resource_type, created_at, retention_class FROM chat_mutation_audit WHERE id = $1
+SELECT id, chat_session_id, chat_message_id, verb, args_jsonb, outcome, reversibility_class, affected_resource_id, affected_resource_type, created_at, retention_class, agent_instance_id FROM chat_mutation_audit WHERE id = $1
 `
 
 func (q *Queries) GetChatMutationAuditByID(ctx context.Context, id pgtype.UUID) (ChatMutationAudit, error) {
@@ -30,6 +30,7 @@ func (q *Queries) GetChatMutationAuditByID(ctx context.Context, id pgtype.UUID) 
 		&i.AffectedResourceType,
 		&i.CreatedAt,
 		&i.RetentionClass,
+		&i.AgentInstanceID,
 	)
 	return i, err
 }
@@ -88,7 +89,7 @@ func (q *Queries) InsertChatMutationAudit(ctx context.Context, arg InsertChatMut
 }
 
 const listChatMutationAuditForSession = `-- name: ListChatMutationAuditForSession :many
-SELECT id, chat_session_id, chat_message_id, verb, args_jsonb, outcome, reversibility_class, affected_resource_id, affected_resource_type, created_at, retention_class FROM chat_mutation_audit
+SELECT id, chat_session_id, chat_message_id, verb, args_jsonb, outcome, reversibility_class, affected_resource_id, affected_resource_type, created_at, retention_class, agent_instance_id FROM chat_mutation_audit
 WHERE chat_session_id = $1
 ORDER BY created_at DESC
 LIMIT $2
@@ -120,6 +121,7 @@ func (q *Queries) ListChatMutationAuditForSession(ctx context.Context, arg ListC
 			&i.AffectedResourceType,
 			&i.CreatedAt,
 			&i.RetentionClass,
+			&i.AgentInstanceID,
 		); err != nil {
 			return nil, err
 		}

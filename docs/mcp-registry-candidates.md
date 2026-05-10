@@ -25,9 +25,10 @@ The MCP ecosystem has matured substantially since M2.2.2 shipped:
 
 **Relevance**: not a candidate for Garrison directly. Is the spec to conform to if building a private subregistry.
 
-### MCPJungle (github.com/mcpjungle/MCPJungle)
+### MCPJungle (github.com/mcpjungle/MCPJungle) — CHOSEN FOR M8
 
 - Self-hosted MCP gateway combining registry + runtime proxy
+- **License**: MPL-2.0 (file-level copyleft on MCPJungle's own source; doesn't bind Garrison's separate Go code that talks to MCPJungle via HTTP)
 - Go-based (matches Garrison's stack posture)
 - SQLite or Postgres (Postgres matches Garrison)
 - Docker-deployable (matches Coolify)
@@ -36,10 +37,16 @@ The MCP ecosystem has matured substantially since M2.2.2 shipped:
 - CLI for administration, HTTP gateway for clients
 
 **Fit assessment for target-state Garrison**:
-- For: stack match (Go + Postgres + Docker), combines the two concerns (registry + proxy) that Garrison's architecture will need together, ACL story is the right shape for "this tenant's agents can only reach these MCP servers"
-- Against: maturity unknown at the M8 timeframe; need to re-check health signals closer to the actual integration milestone. Single-repo project — not clearly enterprise-backed.
+- For: stack match (Go + Postgres + Docker), combines the two concerns (registry + proxy) that Garrison's architecture will need together, per-agent ACL primitive (`McpClient.AllowList`) maps cleanly to "this agent can only reach these MCP servers"
+- Mixed: the ACL story is **per-agent native, per-tenant via Garrison-side naming convention** (no native tenant primitive in the model). Workable at single-tenant alpha; multi-tenant beta uses one MCPJungle instance per customer (option A) so per-instance namespaces give hard isolation
+- Against: per-client `AllowList` is currently a JSON-array-on-row primitive; source carries `// will be removed in favor of a separate table for ACLs` comment on `internal/model/mcp_client.go`. Watch-item — the upstream relational-ACL refactor may eventually land a tenant primitive, at which point Garrison's naming-convention enforcement becomes redundant
 
-**Disposition**: leading candidate for M8 integration pending maturity check.
+**Maturity check (2026-05-03, post-M7 ship)**:
+- 995 stars, last commit same day as the check
+- 68 open issues, active maintenance signal positive
+- Per-agent + naming-convention-per-tenant ACL surface verified by source-read spike (`docs/research/m8-mcpjungle-spike.md`)
+
+**Disposition**: chosen for M8 integration. Maturity gate fired positively at M7 kickoff per the cadence below; M8 plan re-confirms at plan time. Per-customer MCPJungle instance (option A) is the committed beta path for multi-tenant.
 
 ### MCPProxy (pricing.mcpproxy.app)
 
@@ -123,12 +130,19 @@ When M8-era work starts and a private MCP registry becomes load-bearing, the dec
 
 ## Re-evaluation cadence
 
-Re-check this doc at M7 kickoff (hiring flow milestone) since M7 is when SkillHub integration happens. That's the natural moment to assess whether the MCP-registry question has moved up the roadmap or stayed at M8.
+**M7 kickoff re-check fired 2026-05-03** (post-M7 ship). Source-read
+spike confirmed per-agent ACL primitive, the absence of a native
+tenant primitive, MPL-2.0 license, active-maintenance signals. See
+`docs/research/m8-mcpjungle-spike.md`. Disposition moves from
+leading-candidate to chosen.
 
-Until then: no integration work, no architectural commitments beyond this doc's leading-candidate designation.
+Next re-check: at M8 plan time (the candidates doc is binding input
+to the M8 plan; plan confirms the same signals haven't degraded).
 
 ## Related files
 
+- `docs/research/m8-mcpjungle-spike.md` — 2026-05-03 source-read spike confirming MCPJungle's ACL primitives + license + maturity signals
+- `specs/_context/m8-context.md` — M8 context doc citing this file as binding
 - `docs/architecture-target-state.md` (if/when written) — should reference this doc as "MCP registry is a target-state concern, see this file"
 - `docs/skill-registry-candidates.md` — parallel doc for SkillHub evaluation, kept separate per this doc's rationale
-- `docs/issues/agent-workspace-sandboxing.md` — unrelated but similar pattern (tracked target-state concern, not near-term work)
+- `docs/issues/agent-workspace-sandboxing.md` — closed by M7's per-agent container shipping; retained as historical precedent
