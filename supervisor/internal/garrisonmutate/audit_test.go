@@ -13,8 +13,9 @@ import (
 // fakeAuditTx records inserted audit params and lets tests inject a
 // return error.
 type fakeAuditTx struct {
-	inserted []store.InsertChatMutationAuditParams
-	err      error
+	inserted      []store.InsertChatMutationAuditParams
+	insertedAgent []store.InsertAgentAnchoredAuditParams
+	err           error
 }
 
 func (f *fakeAuditTx) InsertChatMutationAudit(ctx context.Context, p store.InsertChatMutationAuditParams) (store.InsertChatMutationAuditRow, error) {
@@ -23,6 +24,14 @@ func (f *fakeAuditTx) InsertChatMutationAudit(ctx context.Context, p store.Inser
 		return store.InsertChatMutationAuditRow{}, f.err
 	}
 	return store.InsertChatMutationAuditRow{ID: pgtype.UUID{Valid: true, Bytes: [16]byte{0xa, 0xb}}}, nil
+}
+
+func (f *fakeAuditTx) InsertAgentAnchoredAudit(ctx context.Context, p store.InsertAgentAnchoredAuditParams) (store.InsertAgentAnchoredAuditRow, error) {
+	f.insertedAgent = append(f.insertedAgent, p)
+	if f.err != nil {
+		return store.InsertAgentAnchoredAuditRow{}, f.err
+	}
+	return store.InsertAgentAnchoredAuditRow{ID: pgtype.UUID{Valid: true, Bytes: [16]byte{0xa, 0xc}}}, nil
 }
 
 func TestWriteAudit_MarshalsArgsAndForwards(t *testing.T) {

@@ -21,9 +21,17 @@ import (
 // Deps bundles the server's construction inputs. Logger is optional
 // (stderr default); the rest are required for any verb to write its
 // audit row.
+//
+// AgentInstanceID is M8's agent-caller seam: when supervisor wires
+// the in-tree MCP server for a spawned agent, it sets this field so
+// create_ticket's audit row anchors on agent_instance_id rather than
+// chat_session_id (FR-005, FR-401). For chat-side spawns it stays
+// zero-valued — assertExactlyOneCallerAnchor rejects the wiring bug
+// where both anchors land simultaneously.
 type Deps struct {
-	Pool          *pgxpool.Pool
-	ChatSessionID pgtype.UUID
-	ChatMessageID pgtype.UUID
-	Logger        *slog.Logger
+	Pool            *pgxpool.Pool
+	ChatSessionID   pgtype.UUID
+	ChatMessageID   pgtype.UUID
+	AgentInstanceID pgtype.UUID
+	Logger          *slog.Logger
 }

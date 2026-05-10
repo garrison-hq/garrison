@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/garrison-hq/garrison/supervisor/internal/store"
+	"github.com/garrison-hq/garrison/supervisor/internal/throttle"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -41,13 +42,66 @@ type CreateTicketArgs struct {
 	// to a parent ticket. Validation: parent must exist, share the
 	// child's department_id, and not be in column_slug='done'.
 	ParentTicketID string `json:"parent_ticket_id,omitempty"`
+	// M8 FR-101: cross-dept dependency. When set, the ticket cannot
+	// spawn until the predecessor is in one of the predecessor's
+	// department's dependency_satisfaction_columns (default
+	// {"qa_review","done"}). Optional; null = no dependency.
+	DependsOnTicketID string `json:"depends_on_ticket_id,omitempty"`
+}
+
+// dependencyCycleErr is the typed error_kind for graph cycles.
+func dependencyCycleErr(msg string) Result {
+	return Result{Success: false, ErrorKind: string(ErrDependencyCycle), Message: msg}
+}
+
+// dependencyChainTooDeepErr is the typed error_kind for depth-cap
+// rejections.
+func dependencyChainTooDeepErr(msg string) Result {
+	return Result{Success: false, ErrorKind: string(ErrDependencyChainTooDeep), Message: msg}
+}
+
+// deptWeeklyBudgetExceededErr is the typed error_kind for runaway
+// gate rejections.
+func deptWeeklyBudgetExceededErr(msg string) Result {
+	return Result{Success: false, ErrorKind: string(ErrDeptWeeklyBudgetExceeded), Message: msg}
+}
+
+// assertExactlyOneCallerAnchor is the wiring-invariant guard for the
+// M8 agent-caller surface. The supervisor's MCP server constructs a
+// per-spawn Deps for the agent's garrison-mutate connection, leaving
+// ChatSessionID zero-valued and setting AgentInstanceID. The chat
+// path does the opposite. Both anchors set is a supervisor wiring
+// bug; the verb refuses to write the audit row in that shape.
+//
+// Both anchors NULL is legal for Server-Action verbs (register_mcp_-
+// server's worker writes such rows); for create_ticket specifically
+// at least one must be set. This helper is called only from
+// create_ticket — other verbs may legitimately leave both NULL.
+func assertExactlyOneCallerAnchor(deps Deps) error {
+	if deps.ChatSessionID.Valid && deps.AgentInstanceID.Valid {
+		return errors.New("create_ticket: both chat_session_id and agent_instance_id set; supervisor wiring bug")
+	}
+	if !deps.ChatSessionID.Valid && !deps.AgentInstanceID.Valid {
+		return errors.New("create_ticket: neither chat_session_id nor agent_instance_id set; supervisor wiring bug")
+	}
+	return nil
 }
 
 // realCreateTicketHandler implements garrison-mutate.create_ticket.
 // Tier 3 reversibility per chat-threat-model.md §5: full pre-state
 // args captured in args_jsonb; ticket can be deleted but downstream
 // effects survive.
+//
+// M8 added the agent-caller surface: when Deps.AgentInstanceID is
+// set, the verb auto-inherits the agent's current ticket as parent
+// (FR-006), tags cross-dept creates in args_jsonb (FR-007), runs the
+// cycle/depth walker on depends_on_ticket_id (FR-103), and runs the
+// per-department weekly ticket budget gate (FR-201). The audit row
+// anchors on agent_instance_id rather than chat_session_id.
 func realCreateTicketHandler(ctx context.Context, deps Deps, raw json.RawMessage) (Result, error) {
+	if err := assertExactlyOneCallerAnchor(deps); err != nil {
+		return validationFailure("create_ticket: " + err.Error()), nil
+	}
 	args, validationRes := parseCreateTicketArgs(raw)
 	if validationRes != nil {
 		return *validationRes, nil
@@ -60,7 +114,7 @@ func realCreateTicketHandler(ctx context.Context, deps Deps, raw json.RawMessage
 	defer func() { _ = tx.Rollback(ctx) }()
 	q := store.New(tx)
 
-	deptID, deptRes, deptErr := lookupCreateTicketDept(ctx, q, deps, args)
+	dept, deptRes, deptErr := lookupCreateTicketDeptFull(ctx, q, deps, args)
 	if deptErr != nil {
 		return Result{}, deptErr
 	}
@@ -68,17 +122,13 @@ func realCreateTicketHandler(ctx context.Context, deps Deps, raw json.RawMessage
 		return *deptRes, nil
 	}
 
-	metadataJSON, metaRes := buildCreateTicketMetadata(args)
-	if metaRes != nil {
-		return *metaRes, nil
+	if res, err := applyAutoInheritParent(ctx, q, deps, &args, dept.ID); err != nil {
+		return Result{}, err
+	} else if res != nil {
+		return *res, nil
 	}
 
-	columnSlug := strings.TrimSpace(args.ColumnSlug)
-	if columnSlug == "" {
-		columnSlug = "todo"
-	}
-
-	parentTicketID, parentRes, parentErr := resolveParentTicketID(ctx, q, args.ParentTicketID, deptID)
+	parentTicketID, parentRes, parentErr := resolveParentTicketID(ctx, q, args.ParentTicketID, dept.ID)
 	if parentErr != nil {
 		return Result{}, parentErr
 	}
@@ -86,24 +136,52 @@ func realCreateTicketHandler(ctx context.Context, deps Deps, raw json.RawMessage
 		return *parentRes, nil
 	}
 
-	ticket, err := q.InsertChatTicket(ctx, store.InsertChatTicketParams{
-		DepartmentID:            deptID,
+	dependsOnTicketID, depRes, depErr := resolveDependsOn(ctx, q, args.DependsOnTicketID)
+	if depErr != nil {
+		return Result{}, depErr
+	}
+	if depRes != nil {
+		return *depRes, nil
+	}
+
+	if res, err := runDeptWeeklyGate(ctx, q, deps, args, dept); err != nil {
+		return Result{}, err
+	} else if res != nil {
+		return *res, nil
+	}
+
+	metadataJSON, metaRes := buildCreateTicketMetadata(args)
+	if metaRes != nil {
+		return *metaRes, nil
+	}
+	metadataJSON = tagCrossDeptCreate(ctx, q, deps, dept, metadataJSON)
+
+	columnSlug := strings.TrimSpace(args.ColumnSlug)
+	if columnSlug == "" {
+		columnSlug = "todo"
+	}
+
+	ticket, err := q.InsertTicketM8(ctx, store.InsertTicketM8Params{
+		DepartmentID:            dept.ID,
 		Objective:               args.Objective,
 		AcceptanceCriteria:      stringPtrOrNil(args.AcceptanceCriteria),
 		ColumnSlug:              columnSlug,
 		Metadata:                metadataJSON,
+		Origin:                  pickTicketOrigin(deps),
 		CreatedViaChatSessionID: deps.ChatSessionID,
 		ParentTicketID:          parentTicketID,
+		DependsOnTicketID:       dependsOnTicketID,
 	})
 	if err != nil {
 		return Result{}, fmt.Errorf("create_ticket: insert ticket: %w", err)
 	}
 
 	resourceID := uuidString(ticket.ID)
-	rt := "ticket"
+	rt := resourceTypeTicket
 	if _, err := WriteAudit(ctx, q, AuditWriteParams{
 		ChatSessionID:        deps.ChatSessionID,
 		ChatMessageID:        deps.ChatMessageID,
+		AgentInstanceID:      deps.AgentInstanceID,
 		Verb:                 "create_ticket",
 		Args:                 args,
 		Outcome:              "success",
@@ -127,6 +205,13 @@ func realCreateTicketHandler(ctx context.Context, deps Deps, raw json.RawMessage
 		AffectedResourceType: rt,
 	})
 
+	// FR-104: emit dependency_added when the new ticket carries a
+	// non-NULL depends_on_ticket_id. Best-effort; the listener
+	// fallback is the existing transition-listener seam.
+	if dependsOnTicketID.Valid {
+		emitDependencyAddedNotify(deps, dept.Slug, resourceID, uuidString(dependsOnTicketID))
+	}
+
 	return Result{
 		Success:             true,
 		AffectedResourceID:  resourceID,
@@ -136,6 +221,235 @@ func realCreateTicketHandler(ctx context.Context, deps Deps, raw json.RawMessage
 			resourceID, args.DepartmentSlug, columnSlug,
 		),
 	}, nil
+}
+
+// lookupCreateTicketDeptFull is M8's replacement for
+// lookupCreateTicketDept. Returns the full Department row so the dept-
+// weekly gate can read company_id + weekly_ticket_budget without a
+// second query.
+func lookupCreateTicketDeptFull(ctx context.Context, q *store.Queries, deps Deps, args CreateTicketArgs) (store.Department, *Result, error) {
+	dept, err := q.GetDepartmentBySlug(ctx, args.DepartmentSlug)
+	if err == nil {
+		return dept, nil, nil
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		r := resourceNotFound("create_ticket: department %q not found", args.DepartmentSlug)
+		return store.Department{}, &r, writeFailureAudit(ctx, deps, "create_ticket", args, ErrResourceNotFound, 3, "")
+	}
+	return store.Department{}, nil, fmt.Errorf("create_ticket: lookup department: %w", err)
+}
+
+// applyAutoInheritParent fills args.ParentTicketID from the agent's
+// current spawn's ticket_id when the agent caller omits it (FR-006).
+// No-op for chat callers. Skip auto-inherit when the inherited
+// parent is in a different department from the target — that's a
+// cross-dept create where the parent link would fail
+// resolveParentTicketID's same-dept invariant.
+//
+// Returns a non-nil *Result if the lookup fails in a user-facing way
+// (e.g. agent_instance_id orphaned).
+func applyAutoInheritParent(ctx context.Context, q *store.Queries, deps Deps, args *CreateTicketArgs, targetDeptID pgtype.UUID) (*Result, error) {
+	if !deps.AgentInstanceID.Valid {
+		return nil, nil
+	}
+	if strings.TrimSpace(args.ParentTicketID) != "" {
+		return nil, nil
+	}
+	parentID, err := q.GetAgentInstanceTicketID(ctx, deps.AgentInstanceID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("create_ticket: GetAgentInstanceTicketID: %w", err)
+	}
+	if !parentID.Valid {
+		return nil, nil
+	}
+	parent, err := q.GetTicketByID(ctx, parentID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("create_ticket: lookup auto-inherit parent: %w", err)
+	}
+	if parent.DepartmentID != targetDeptID {
+		// Cross-dept create: skip auto-inherit (the cross_dept_create
+		// tag still lands via tagCrossDeptCreate).
+		return nil, nil
+	}
+	args.ParentTicketID = uuidString(parentID)
+	return nil, nil
+}
+
+// resolveDependsOn parses args.DependsOnTicketID and runs the cycle +
+// depth-cap walker (FR-103). Returns the parsed UUID, a non-nil
+// *Result on user-facing rejection, or an err on transport failure.
+func resolveDependsOn(ctx context.Context, q *store.Queries, raw string) (pgtype.UUID, *Result, error) {
+	var zero pgtype.UUID
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return zero, nil, nil
+	}
+	var depID pgtype.UUID
+	if err := depID.Scan(trimmed); err != nil {
+		r := validationFailure("create_ticket: depends_on_ticket_id is not a valid UUID")
+		return zero, &r, nil
+	}
+	const depthCap = 32
+	chain, err := q.GetTicketDependencyChain(ctx, store.GetTicketDependencyChainParams{
+		StartID:  depID,
+		DepthCap: depthCap,
+	})
+	if err != nil {
+		return zero, nil, fmt.Errorf("create_ticket: GetTicketDependencyChain: %w", err)
+	}
+	visited := map[[16]byte]bool{depID.Bytes: true}
+	for _, row := range chain {
+		if row.Depth >= depthCap {
+			r := dependencyChainTooDeepErr(fmt.Sprintf("create_ticket: dependency chain exceeds %d hops (cap)", depthCap))
+			return zero, &r, nil
+		}
+		if visited[row.ChainID.Bytes] {
+			r := dependencyCycleErr("create_ticket: dependency chain forms a cycle")
+			return zero, &r, nil
+		}
+		visited[row.ChainID.Bytes] = true
+	}
+	return depID, nil, nil
+}
+
+// runDeptWeeklyGate consults throttle.CheckDeptWeekly against the
+// target department. On allowed: returns (nil, nil) and the caller
+// proceeds with the main tx. On rejected: rolls back the caller's
+// main tx and writes the throttle_events row + agent-anchored audit
+// row in a separate tx, then returns the typed Result. The separate
+// tx is necessary because the caller's defer rolls back its tx on
+// early return, which would erase the bookkeeping rows.
+func runDeptWeeklyGate(ctx context.Context, q *store.Queries, deps Deps, args CreateTicketArgs, dept store.Department) (*Result, error) {
+	decision, err := throttle.CheckDeptWeekly(ctx, q, dept.ID)
+	if err != nil {
+		return nil, fmt.Errorf("create_ticket: CheckDeptWeekly: %w", err)
+	}
+	if decision.Allowed {
+		return nil, nil
+	}
+	if err := writeDeptWeeklyRejection(ctx, deps, args, dept, decision); err != nil {
+		return nil, err
+	}
+	r := deptWeeklyBudgetExceededErr(fmt.Sprintf(
+		"create_ticket: department %q has hit its weekly ticket budget (current=%d, budget=%d)",
+		dept.Slug, decision.CurrentCount, deref32(decision.Budget),
+	))
+	return &r, nil
+}
+
+// writeDeptWeeklyRejection commits the throttle_events row + the
+// agent-anchored audit row for a dept-weekly gate rejection in a
+// fresh tx, isolated from the caller's main-flow tx (which rolls
+// back on the rejection path).
+func writeDeptWeeklyRejection(ctx context.Context, deps Deps, args CreateTicketArgs, dept store.Department, decision throttle.DeptWeeklyDecision) error {
+	tx, err := deps.Pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("create_ticket: begin rejection tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	q := store.New(tx)
+	callerID := uuidString(deps.AgentInstanceID)
+	if callerID == "" {
+		callerID = uuidString(deps.ChatSessionID)
+	}
+	if err := throttle.FireDeptWeekly(ctx, q, dept.CompanyID, decision, dept.ID, callerID); err != nil {
+		return fmt.Errorf("create_ticket: FireDeptWeekly: %w", err)
+	}
+	rt := resourceTypeTicket
+	resourceID := ""
+	if _, err := WriteAudit(ctx, q, AuditWriteParams{
+		ChatSessionID:        deps.ChatSessionID,
+		ChatMessageID:        deps.ChatMessageID,
+		AgentInstanceID:      deps.AgentInstanceID,
+		Verb:                 "create_ticket",
+		Args:                 args,
+		Outcome:              throttle.KindDeptWeeklyBudgetExceeded,
+		ReversibilityClass:   3,
+		AffectedResourceID:   &resourceID,
+		AffectedResourceType: &rt,
+	}); err != nil {
+		return fmt.Errorf("create_ticket: write throttle audit: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("create_ticket: commit rejection tx: %w", err)
+	}
+	return nil
+}
+
+// tagCrossDeptCreate annotates the metadata JSONB with
+// `cross_dept_create: true` when the agent caller's department
+// differs from the target department (FR-007). No-op for chat
+// callers. Best-effort: any lookup failure returns the metadata
+// unchanged.
+func tagCrossDeptCreate(ctx context.Context, q *store.Queries, deps Deps, target store.Department, metadata []byte) []byte {
+	if !deps.AgentInstanceID.Valid {
+		return metadata
+	}
+	parentID, err := q.GetAgentInstanceTicketID(ctx, deps.AgentInstanceID)
+	if err != nil || !parentID.Valid {
+		return metadata
+	}
+	parent, err := q.GetTicketByID(ctx, parentID)
+	if err != nil {
+		return metadata
+	}
+	if parent.DepartmentID == target.ID {
+		return metadata
+	}
+	// Splice the flag into the existing object. Simplest path:
+	// unmarshal → set → remarshal; if any step fails, leave the
+	// metadata unchanged.
+	var m map[string]any
+	if err := json.Unmarshal(metadata, &m); err != nil || m == nil {
+		m = map[string]any{}
+	}
+	m["cross_dept_create"] = true
+	if out, err := json.Marshal(m); err == nil {
+		return out
+	}
+	return metadata
+}
+
+// pickTicketOrigin chooses the tickets.origin enum value based on the
+// caller anchor. Agent caller → 'agent'; chat caller → 'chat'.
+func pickTicketOrigin(deps Deps) string {
+	if deps.AgentInstanceID.Valid {
+		return "agent"
+	}
+	return "chat"
+}
+
+// emitDependencyAddedNotify fires work.ticket.dependency_added.<dept>
+// (FR-104) post-commit. Best-effort; the listener handles missed
+// notifications via the existing transition-event poll fallback.
+func emitDependencyAddedNotify(deps Deps, deptSlug, ticketID, dependsOnID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	channel := "work.ticket.dependency_added." + deptSlug
+	payload := fmt.Sprintf(
+		`{"ticket_id":%q,"depends_on_ticket_id":%q,"dept":%q,"created_at":%q}`,
+		ticketID, dependsOnID, deptSlug, time.Now().UTC().Format(time.RFC3339Nano),
+	)
+	if _, err := deps.Pool.Exec(ctx, "SELECT pg_notify($1, $2)", channel, payload); err != nil && deps.Logger != nil {
+		deps.Logger.Warn("garrison-mutate: dependency_added notify failed",
+			"channel", channel, "ticket_id", ticketID, "err", err)
+	}
+}
+
+// deref32 returns *p, or 0 for nil. Used to render Budget in
+// rejection messages without panicking on the unlimited case (which
+// shouldn't reach this code path but defensively guard anyway).
+func deref32(p *int32) int32 {
+	if p == nil {
+		return 0
+	}
+	return *p
 }
 
 // EditTicketArgs is the JSON input shape for edit_ticket. Pointer-typed
