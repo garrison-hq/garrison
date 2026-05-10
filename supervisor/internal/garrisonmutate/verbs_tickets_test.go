@@ -244,3 +244,82 @@ func TestRegisteredHandlersAreRealNotStubs(t *testing.T) {
 		}
 	}
 }
+
+// M8 unit-level coverage for the pre-INSERT helpers that don't need
+// a live DB. Mirrors the existing parseCreateTicketArgs +
+// resolveParentTicketID unit tests in this file.
+
+func TestAssertExactlyOneCallerAnchor_BothSet(t *testing.T) {
+	deps := Deps{
+		ChatSessionID:   pgtype.UUID{Valid: true, Bytes: [16]byte{1}},
+		AgentInstanceID: pgtype.UUID{Valid: true, Bytes: [16]byte{2}},
+	}
+	err := assertExactlyOneCallerAnchor(deps)
+	if err == nil {
+		t.Errorf("both anchors set should error; got nil")
+	}
+}
+
+func TestAssertExactlyOneCallerAnchor_NeitherSet(t *testing.T) {
+	deps := Deps{}
+	err := assertExactlyOneCallerAnchor(deps)
+	if err == nil {
+		t.Errorf("neither anchor set should error; got nil")
+	}
+}
+
+func TestAssertExactlyOneCallerAnchor_ChatOnly(t *testing.T) {
+	deps := Deps{ChatSessionID: pgtype.UUID{Valid: true, Bytes: [16]byte{1}}}
+	if err := assertExactlyOneCallerAnchor(deps); err != nil {
+		t.Errorf("chat-only should succeed; got %v", err)
+	}
+}
+
+func TestAssertExactlyOneCallerAnchor_AgentOnly(t *testing.T) {
+	deps := Deps{AgentInstanceID: pgtype.UUID{Valid: true, Bytes: [16]byte{1}}}
+	if err := assertExactlyOneCallerAnchor(deps); err != nil {
+		t.Errorf("agent-only should succeed; got %v", err)
+	}
+}
+
+func TestPickTicketOriginAgent(t *testing.T) {
+	deps := Deps{AgentInstanceID: pgtype.UUID{Valid: true, Bytes: [16]byte{1}}}
+	if got := pickTicketOrigin(deps); got != "agent" {
+		t.Errorf("origin = %q; want agent", got)
+	}
+}
+
+func TestPickTicketOriginChat(t *testing.T) {
+	deps := Deps{ChatSessionID: pgtype.UUID{Valid: true, Bytes: [16]byte{1}}}
+	if got := pickTicketOrigin(deps); got != "chat" {
+		t.Errorf("origin = %q; want chat", got)
+	}
+}
+
+func TestDeref32Nil(t *testing.T) {
+	if deref32(nil) != 0 {
+		t.Errorf("nil pointer should dereference to 0")
+	}
+}
+
+func TestDeref32Value(t *testing.T) {
+	v := int32(42)
+	if deref32(&v) != 42 {
+		t.Errorf("got %d; want 42", deref32(&v))
+	}
+}
+
+func TestDependencyErrorHelpers(t *testing.T) {
+	r := dependencyCycleErr("cycle detected")
+	if r.Success || r.ErrorKind != string(ErrDependencyCycle) {
+		t.Errorf("dependencyCycleErr shape wrong: %+v", r)
+	}
+	r = dependencyChainTooDeepErr("too deep")
+	if r.Success || r.ErrorKind != string(ErrDependencyChainTooDeep) {
+		t.Errorf("dependencyChainTooDeepErr shape wrong: %+v", r)
+	}
+	r = deptWeeklyBudgetExceededErr("over budget")
+	if r.Success || r.ErrorKind != string(ErrDeptWeeklyBudgetExceeded) {
+		t.Errorf("deptWeeklyBudgetExceededErr shape wrong: %+v", r)
+	}
+}

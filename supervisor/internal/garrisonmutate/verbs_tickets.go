@@ -114,63 +114,24 @@ func realCreateTicketHandler(ctx context.Context, deps Deps, raw json.RawMessage
 	defer func() { _ = tx.Rollback(ctx) }()
 	q := store.New(tx)
 
-	dept, deptRes, deptErr := lookupCreateTicketDeptFull(ctx, q, deps, args)
-	if deptErr != nil {
-		return Result{}, deptErr
+	prep, res, prepErr := prepCreateTicket(ctx, q, deps, &args)
+	if prepErr != nil {
+		return Result{}, prepErr
 	}
-	if deptRes != nil {
-		return *deptRes, nil
-	}
-
-	if res, err := applyAutoInheritParent(ctx, q, deps, &args, dept.ID); err != nil {
-		return Result{}, err
-	} else if res != nil {
+	if res != nil {
 		return *res, nil
-	}
-
-	parentTicketID, parentRes, parentErr := resolveParentTicketID(ctx, q, args.ParentTicketID, dept.ID)
-	if parentErr != nil {
-		return Result{}, parentErr
-	}
-	if parentRes != nil {
-		return *parentRes, nil
-	}
-
-	dependsOnTicketID, depRes, depErr := resolveDependsOn(ctx, q, args.DependsOnTicketID)
-	if depErr != nil {
-		return Result{}, depErr
-	}
-	if depRes != nil {
-		return *depRes, nil
-	}
-
-	if res, err := runDeptWeeklyGate(ctx, q, deps, args, dept); err != nil {
-		return Result{}, err
-	} else if res != nil {
-		return *res, nil
-	}
-
-	metadataJSON, metaRes := buildCreateTicketMetadata(args)
-	if metaRes != nil {
-		return *metaRes, nil
-	}
-	metadataJSON = tagCrossDeptCreate(ctx, q, deps, dept, metadataJSON)
-
-	columnSlug := strings.TrimSpace(args.ColumnSlug)
-	if columnSlug == "" {
-		columnSlug = "todo"
 	}
 
 	ticket, err := q.InsertTicketM8(ctx, store.InsertTicketM8Params{
-		DepartmentID:            dept.ID,
+		DepartmentID:            prep.dept.ID,
 		Objective:               args.Objective,
 		AcceptanceCriteria:      stringPtrOrNil(args.AcceptanceCriteria),
-		ColumnSlug:              columnSlug,
-		Metadata:                metadataJSON,
+		ColumnSlug:              prep.columnSlug,
+		Metadata:                prep.metadataJSON,
 		Origin:                  pickTicketOrigin(deps),
 		CreatedViaChatSessionID: deps.ChatSessionID,
-		ParentTicketID:          parentTicketID,
-		DependsOnTicketID:       dependsOnTicketID,
+		ParentTicketID:          prep.parentTicketID,
+		DependsOnTicketID:       prep.dependsOnTicketID,
 	})
 	if err != nil {
 		return Result{}, fmt.Errorf("create_ticket: insert ticket: %w", err)
@@ -208,8 +169,8 @@ func realCreateTicketHandler(ctx context.Context, deps Deps, raw json.RawMessage
 	// FR-104: emit dependency_added when the new ticket carries a
 	// non-NULL depends_on_ticket_id. Best-effort; the listener
 	// fallback is the existing transition-listener seam.
-	if dependsOnTicketID.Valid {
-		emitDependencyAddedNotify(deps, dept.Slug, resourceID, uuidString(dependsOnTicketID))
+	if prep.dependsOnTicketID.Valid {
+		emitDependencyAddedNotify(deps, prep.dept.Slug, resourceID, uuidString(prep.dependsOnTicketID))
 	}
 
 	return Result{
@@ -218,9 +179,76 @@ func realCreateTicketHandler(ctx context.Context, deps Deps, raw json.RawMessage
 		AffectedResourceURL: ticketURLPrefix + resourceID,
 		Message: fmt.Sprintf(
 			"Created ticket %s in %s at column %q. The supervisor's spawn loop dispatches the appropriate agent automatically — do NOT call transition_ticket on this ticket as a follow-up unless you intend to override the agent's work.",
-			resourceID, args.DepartmentSlug, columnSlug,
+			resourceID, args.DepartmentSlug, prep.columnSlug,
 		),
 	}, nil
+}
+
+// createTicketPrep bundles every per-call value the handler resolves
+// before the INSERT. Extracted to keep realCreateTicketHandler's
+// cognitive complexity under Sonar S3776's threshold (15) by pulling
+// the dept/parent/depends-on/gate/metadata chain out of the main
+// function's branch tree.
+type createTicketPrep struct {
+	dept              store.Department
+	parentTicketID    pgtype.UUID
+	dependsOnTicketID pgtype.UUID
+	metadataJSON      []byte
+	columnSlug        string
+}
+
+// prepCreateTicket runs every pre-INSERT step that can yield a
+// caller-facing Result or an internal error. Returns (zero, *Result,
+// nil) on user-facing rejection (caller returns *res), (zero, nil,
+// err) on transport-level failure, or (prep, nil, nil) on success.
+func prepCreateTicket(ctx context.Context, q *store.Queries, deps Deps, args *CreateTicketArgs) (createTicketPrep, *Result, error) {
+	dept, deptRes, err := lookupCreateTicketDeptFull(ctx, q, deps, *args)
+	if err != nil {
+		return createTicketPrep{}, nil, err
+	}
+	if deptRes != nil {
+		return createTicketPrep{}, deptRes, nil
+	}
+	if res, err := applyAutoInheritParent(ctx, q, deps, args, dept.ID); err != nil {
+		return createTicketPrep{}, nil, err
+	} else if res != nil {
+		return createTicketPrep{}, res, nil
+	}
+	parentTicketID, parentRes, err := resolveParentTicketID(ctx, q, args.ParentTicketID, dept.ID)
+	if err != nil {
+		return createTicketPrep{}, nil, err
+	}
+	if parentRes != nil {
+		return createTicketPrep{}, parentRes, nil
+	}
+	dependsOnTicketID, depRes, err := resolveDependsOn(ctx, q, args.DependsOnTicketID)
+	if err != nil {
+		return createTicketPrep{}, nil, err
+	}
+	if depRes != nil {
+		return createTicketPrep{}, depRes, nil
+	}
+	if res, err := runDeptWeeklyGate(ctx, q, deps, *args, dept); err != nil {
+		return createTicketPrep{}, nil, err
+	} else if res != nil {
+		return createTicketPrep{}, res, nil
+	}
+	metadataJSON, metaRes := buildCreateTicketMetadata(*args)
+	if metaRes != nil {
+		return createTicketPrep{}, metaRes, nil
+	}
+	metadataJSON = tagCrossDeptCreate(ctx, q, deps, dept, metadataJSON)
+	columnSlug := strings.TrimSpace(args.ColumnSlug)
+	if columnSlug == "" {
+		columnSlug = "todo"
+	}
+	return createTicketPrep{
+		dept:              dept,
+		parentTicketID:    parentTicketID,
+		dependsOnTicketID: dependsOnTicketID,
+		metadataJSON:      metadataJSON,
+		columnSlug:        columnSlug,
+	}, nil, nil
 }
 
 // lookupCreateTicketDeptFull is M8's replacement for

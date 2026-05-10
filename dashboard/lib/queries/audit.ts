@@ -12,7 +12,6 @@ import { appDb } from '@/lib/db/appClient';
 import {
   chatMutationAudit,
   agentInstances,
-  agents,
   tickets,
 } from '@/drizzle/schema.supervisor';
 

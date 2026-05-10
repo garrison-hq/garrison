@@ -13,9 +13,16 @@ export function RegisterForm({ customerPrefix }: Readonly<{ customerPrefix: stri
 
   function onSubmit(formData: FormData) {
     setError(null);
-    const name = String(formData.get('name') ?? '').trim();
-    const url = String(formData.get('url') ?? '').trim();
-    const bearerTokenPath = String(formData.get('bearerTokenPath') ?? '').trim();
+    // FormData.get returns string | File | null; an <input type="text">
+    // only emits string entries, but Sonar S6551 flags the implicit
+    // File-to-string coercion. Narrow explicitly.
+    const readString = (key: string): string => {
+      const raw = formData.get(key);
+      return typeof raw === 'string' ? raw.trim() : '';
+    };
+    const name = readString('name');
+    const url = readString('url');
+    const bearerTokenPath = readString('bearerTokenPath');
 
     startTransition(async () => {
       const res = await registerMcpServer({ name, transport, url, bearerTokenPath });
@@ -38,8 +45,8 @@ export function RegisterForm({ customerPrefix }: Readonly<{ customerPrefix: stri
       <p className="text-text-3 text-xs">
         The supervisor&apos;s reactive worker picks up the pending row, calls MCPJungle&apos;s admin
         API, and flips status to <code>registered</code> or <code>failed</code>. Operators must
-        prefix every name with <code className="text-text-2">{customerPrefix}</code>
-         per the customer-prefix invariant (FR-307).
+        prefix every name with <code className="text-text-2">{customerPrefix}</code>{' '}
+        per the customer-prefix invariant (FR-307).
       </p>
 
       <label className="block">
@@ -75,7 +82,7 @@ export function RegisterForm({ customerPrefix }: Readonly<{ customerPrefix: stri
           name="url"
           type="text"
           required={requiresURL}
-          placeholder="http://upstream-mcp:9000"
+          placeholder="https://upstream-mcp:9000"
           className="mt-1 w-full px-2 py-1 bg-surface-2 border border-border-1 rounded text-sm font-mono"
         />
       </label>
