@@ -79,7 +79,20 @@ ALTER TABLE chat_mutation_audit
     'concurrency_cap_full', 'invalid_transition', 'resource_not_found',
     'tool_call_ceiling_reached',
     -- M8 runaway-control outcome.
-    'dept_weekly_ticket_budget_exceeded'
+    'dept_weekly_ticket_budget_exceeded',
+    -- M8 register_mcp_server worker outcome: MCPJungle API rejected
+    -- the registration request (network error, 4xx/5xx response, or
+    -- timeout). Pairs with mcp_servers.failure_reason for detail.
+    'failed'
+  ));
+
+-- M8 extends the M5.3 affected_resource_type CHECK to include
+-- 'mcp_server' so the reactive worker's audit row passes validation.
+ALTER TABLE chat_mutation_audit DROP CONSTRAINT IF EXISTS chat_mutation_audit_affected_resource_type_check;
+ALTER TABLE chat_mutation_audit
+  ADD CONSTRAINT chat_mutation_audit_affected_resource_type_check
+  CHECK (affected_resource_type IS NULL OR affected_resource_type IN (
+    'ticket', 'agent_role', 'hiring_proposal', 'mcp_server'
   ));
 
 -- 2. tickets — depends_on_ticket_id column + self-reference CHECK + partial index
@@ -196,7 +209,12 @@ DECLARE
   payload JSONB;
 BEGIN
   IF NEW.status = 'pending' THEN
+    -- event_id duplicates mcp_server_id so the M1 dispatcher envelope
+    -- (`{event_id: <uuid>}`) accepts the payload. The handler treats
+    -- event_id as the mcp_server_id and re-reads the row via
+    -- GetMcpServerByID before processing.
     payload := jsonb_build_object(
+      'event_id', NEW.id,
       'mcp_server_id', NEW.id,
       'customer_slug', NEW.customer_slug,
       'name', NEW.name,
@@ -266,7 +284,15 @@ ALTER TABLE tickets DROP COLUMN IF EXISTS depends_on_ticket_id;
 -- chat_mutation_audit — delete M8-era rows before reverting the CHECKs
 DELETE FROM chat_mutation_audit
   WHERE verb = 'register_mcp_server'
-     OR outcome = 'dept_weekly_ticket_budget_exceeded';
+     OR outcome = 'dept_weekly_ticket_budget_exceeded'
+     OR affected_resource_type = 'mcp_server';
+
+ALTER TABLE chat_mutation_audit DROP CONSTRAINT IF EXISTS chat_mutation_audit_affected_resource_type_check;
+ALTER TABLE chat_mutation_audit
+  ADD CONSTRAINT chat_mutation_audit_affected_resource_type_check
+  CHECK (affected_resource_type IS NULL OR affected_resource_type IN (
+    'ticket', 'agent_role', 'hiring_proposal'
+  ));
 
 ALTER TABLE chat_mutation_audit DROP CONSTRAINT IF EXISTS chat_mutation_audit_outcome_check;
 ALTER TABLE chat_mutation_audit
