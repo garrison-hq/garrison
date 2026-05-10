@@ -18,6 +18,8 @@ import (
 	"github.com/garrison-hq/garrison/supervisor/internal/events"
 	"github.com/garrison-hq/garrison/supervisor/internal/health"
 	"github.com/garrison-hq/garrison/supervisor/internal/hygiene"
+	"github.com/garrison-hq/garrison/supervisor/internal/mcpjungle"
+	"github.com/garrison-hq/garrison/supervisor/internal/mcpserverwork"
 	"github.com/garrison-hq/garrison/supervisor/internal/mempalace"
 	"github.com/garrison-hq/garrison/supervisor/internal/objstore"
 	"github.com/garrison-hq/garrison/supervisor/internal/pgdb"
@@ -282,6 +284,17 @@ func runDaemon() int {
 		return exitCode
 	}
 	dashboardAPIServer := buildDashboardAPIServer(cfg, pool, objstoreClient, sharedPalaceClient, logger)
+
+	// M8 T011 — MCPJungle client + reconciler + reactive worker.
+	// MCPJungleURL empty in fake-agent mode and the M2.x chaos suites;
+	// the supervisor skips the whole subsystem in that case.
+	mcpjungleClient, mcpWorker := buildMcpjungleSubsystem(ctx, cfg, queries, pool, vaultClient, logger)
+	if mcpWorker != nil {
+		dispatcher = buildDispatcherWithExtras(spawnDeps, map[string]events.Handler{
+			mcpserverwork.Channel: mcpWorker.Handle,
+		})
+	}
+	_ = mcpjungleClient
 
 	g, gctx := errgroup.WithContext(ctx)
 
@@ -580,6 +593,15 @@ func buildSharedPalaceClient(cfg *config.Config) *mempalace.Client {
 // can keep pinning the original todo-spawn contract while production
 // keeps `todo` as a real operator triage column.
 func buildDispatcher(spawnDeps spawn.Deps) *events.Dispatcher {
+	return buildDispatcherWithExtras(spawnDeps, nil)
+}
+
+// buildDispatcherWithExtras composes the dispatcher with the
+// M2.2 channels plus any caller-supplied additions. M8 T011 uses
+// this seam to wire the MCPJungle reactive worker
+// (work.mcp_server.registration_requested) and any other future
+// reactive subsystems without forking the M2.2 channel set.
+func buildDispatcherWithExtras(spawnDeps spawn.Deps, extras map[string]events.Handler) *events.Dispatcher {
 	engineerHandler := func(ctx context.Context, eventID pgtype.UUID) error {
 		return spawn.Spawn(ctx, spawnDeps, eventID, "engineer")
 	}
@@ -595,7 +617,106 @@ func buildDispatcher(spawnDeps spawn.Deps) *events.Dispatcher {
 	if os.Getenv("GARRISON_M21_BACKCOMPAT_DISPATCH") == "1" {
 		handlers[EngineeringTicketChannel] = engineerHandler
 	}
+	for ch, h := range extras {
+		handlers[ch] = h
+	}
 	return events.NewDispatcher(handlers)
+}
+
+// buildMcpjungleSubsystem constructs the M8 MCPJungle client, runs a
+// startup health check (degrade-with-warning per FR-308; supervisor
+// continues if the server is unreachable), kicks off the idempotent
+// reconciler that ensures every active agent has an McpClient + vault
+// grant, and returns the reactive worker the dispatcher will register
+// for work.mcp_server.registration_requested events.
+//
+// Returns (nil, nil) when cfg.MCPJungleURL is empty — the M2.x
+// chaos/integration suites and fake-agent mode boot without
+// MCPJungle and rely on this short-circuit.
+func buildMcpjungleSubsystem(
+	ctx context.Context,
+	cfg *config.Config,
+	queries *store.Queries,
+	pool *pgxpool.Pool,
+	vaultFetcher vault.Fetcher,
+	logger *slog.Logger,
+) (*mcpjungle.Client, *mcpserverwork.Worker) {
+	// Pin to the concrete *vault.Client because the reconciler needs
+	// WriteSecret in addition to Fetch (the Fetcher interface).
+	vaultClient, _ := vaultFetcher.(*vault.Client)
+	if cfg.MCPJungleURL == "" {
+		logger.Info("mcpjungle: GARRISON_MCPJUNGLE_URL unset; subsystem disabled (M2.x back-compat)")
+		return nil, nil
+	}
+	adminToken := fetchMcpjungleAdminToken(ctx, cfg, vaultClient, logger)
+	client := mcpjungle.NewClient(cfg.MCPJungleURL, adminToken, logger)
+	hctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := client.HealthCheck(hctx); err != nil {
+		logger.Warn("mcpjungle_unreachable_at_startup",
+			"url", cfg.MCPJungleURL, "err", err,
+			"posture", "degrade_with_warning (FR-308)")
+	} else if vaultClient != nil {
+		report, err := mcpjungle.ReconcileMcpClients(ctx, mcpjungle.ReconcileDeps{
+			Client:       client,
+			Pool:         pool,
+			Queries:      queries,
+			VaultClient:  vaultClient,
+			CustomerID:   cfg.CustomerID(),
+			CustomerSlug: "garrison",
+			Logger:       logger,
+		})
+		if err != nil {
+			logger.Warn("mcpjungle: reconcile failed at startup",
+				"err", err, "posture", "continue_with_partial_state")
+		} else {
+			logger.Info("mcpjungle: reconcile complete at startup",
+				"created", len(report.Created), "existing", len(report.Existing), "failed", len(report.Failed))
+		}
+	}
+	worker, err := mcpserverwork.New(mcpserverwork.Deps{
+		Queries: queries,
+		Client:  client,
+		Logger:  logger,
+	})
+	if err != nil {
+		logger.Warn("mcpjungle: worker construction failed; reactive worker disabled",
+			"err", err)
+		return client, nil
+	}
+	return client, worker
+}
+
+// fetchMcpjungleAdminToken pulls the admin bearer from vault at the
+// configured path (default mcpjungle/admin). Returns "" on any error
+// — the client surfaces ErrAdminTokenInvalid on the first request,
+// which is the right shape for an operator-fixable misconfiguration.
+func fetchMcpjungleAdminToken(ctx context.Context, cfg *config.Config, vaultClient vault.Fetcher, logger *slog.Logger) string {
+	if vaultClient == nil {
+		logger.Warn("mcpjungle: vault not wired; admin token unavailable",
+			"path", cfg.MCPJungleAdminTokenPath)
+		return ""
+	}
+	path := cfg.MCPJungleAdminTokenPath
+	if path == "" {
+		path = "mcpjungle/admin"
+	}
+	values, err := vaultClient.Fetch(ctx, []vault.GrantRow{{
+		EnvVarName: "MCPJUNGLE_ADMIN_TOKEN",
+		SecretPath: path,
+		CustomerID: cfg.CustomerID(),
+	}})
+	if err != nil {
+		logger.Warn("mcpjungle: fetch admin token from vault failed",
+			"path", path, "err", err)
+		return ""
+	}
+	val, ok := values["MCPJUNGLE_ADMIN_TOKEN"]
+	if !ok {
+		return ""
+	}
+	defer val.Zero()
+	return string(val.UnsafeBytes())
 }
 
 // chatInternalDatabaseURL returns the chat-container-side full-perms
