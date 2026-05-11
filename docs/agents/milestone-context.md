@@ -79,7 +79,7 @@ Activated by AGENTS.md's "Activate before writing code" rule. Read the entries f
 - SSE chat stream `lib/sse/chatStream.ts` — handles assistant/user/result event dispatch + the visible-buffer scrub on tool_use start.
 - M5.2 amended FR-322 chat-flavoured concise predicates for the activity feed (chat events render as "Chat thread <short> deleted by operator" etc.).
 
-## M5.3 — chat-driven mutations under autonomous-execution posture (active)
+## M5.3 — chat-driven mutations under autonomous-execution posture (shipped)
 
 - Eight sealed verbs in `internal/garrisonmutate/`: create_ticket, edit_ticket, transition_ticket, pause_agent, resume_agent, spawn_agent, edit_agent_config, propose_hire. Registry pinned by `TestVerbsRegistryMatchesEnumeration`.
 - Autonomous-execution posture: no per-call gate. Three observability layers — chip surface (live tool-call rendering), activity feed (post-commit `work.chat.*` events), audit row (`chat_mutation_audit`).
@@ -87,14 +87,38 @@ Activated by AGENTS.md's "Activate before writing code" rule. Read the entries f
 - Chat-namespaced channels: `work.chat.<entity>.<action>`. Rule 6 backstop: IDs only in payloads, never raw chat content.
 - See `docs/security/chat-threat-model.md` for the binding threat-model document (Rules 1–6, per-verb reversibility-tier table).
 
-## M7 — hiring (not yet active)
+## M5.4 — knowledge-base pane (shipped)
 
-When M7 becomes active, additionally activate:
-- MCP server authoring patterns (using `anthropics/skills/mcp-builder`).
-- `skills.sh` registry semantics for discovery and install.
-- **SkillHub (iflytek)** as the target-state private-skills component alongside the public `skills.sh` feed; see `docs/skill-registry-candidates.md` and `docs/architecture-reconciliation-2026-04-24.md` §2 for decision provenance.
+- `internal/objstore/` (MinIO client) + `internal/dashboardapi/` (Server-Component proxy on `:8081`). Company.md object stored at `s3://garrison-company/<companyId>/company.md`.
+- Scoped service-account credentials: root creds env-on-container only; supervisor uses a scoped IAM via Infisical paths `GARRISON_MINIO_ACCESS_KEY_PATH` / `GARRISON_MINIO_SECRET_KEY_PATH`.
+- Internal-network only (no host port forwarding); named volume `garrison-minio-data` for persistence.
 
-## M8 — MCP server registry (not yet active)
+## M6 — decomposition + hygiene + cost throttling (shipped)
 
-When M8 becomes active, additionally activate:
-- **MCPJungle** as the leading candidate for the M8-era MCP server registry (self-hosted, Go-based, Postgres-backed, combines registry + runtime proxy). Maturity re-check at M7 kickoff. See `docs/mcp-registry-candidates.md`.
+- `throttle_events` audit table + `work.throttle.event` pg_notify channel. `internal/throttle/` package: `Check` (spawn-prep gate), `FireBudgetDefer` + `FirePause` (audit writers), `OnRateLimit` (pipeline observer).
+- Per-company `daily_budget_usd` + `pause_until` columns on `companies`. NULL = unlimited / not paused.
+- Hygiene three-tab strip (failures / audit / all) with operator-initiated drag rows surfaced under `audit`.
+- Spawn-prep defers without rolling back the event when the throttle gate fires; the M1 poll-fallback retries on the next sweep.
+
+## M7 — first custom agent end-to-end (shipped)
+
+- `internal/agentpolicy/` embeds the immutable prompt-hardening preamble (`Body()`, `Hash()`, `PrependPreamble`). Phrased as policy, not identity assertion, to avoid Claude's built-in injection-detection refusal.
+- `internal/skillregistry/` carries the `skills.sh` HTTPS client + SkillHub auth-token-aware skeleton (private feed alongside public `skills.sh`).
+- `internal/skillinstall/` actuator + journal + recover for the per-agent skill-install pipeline.
+- Per-agent Docker containers (long-lived); supervisor exec'd via `agentcontainer.Controller.Exec`. Image-digest pin + cgroup caps + egress allow-list per `docs/security/agent-sandbox-threat-model.md`.
+- `internal/migrate7/` one-shot grandfathering migration: every M2.x agent gains an image_digest + per-agent container at startup. The `cfg.UseDirectExec` flag flips to false post-migrate; legacy direct-exec path remains for back-compat tests.
+- `agent_install_journal` table tracks step-by-step install progress for restart-recovery (FR-214a).
+
+## M8 — agent-spawned tickets + cross-dept deps + runaway control + MCPJungle (shipped)
+
+- `Deps.AgentInstanceID` field on `internal/garrisonmutate`'s Deps. `assertExactlyOneCallerAnchor` rejects supervisor wiring bugs. Audit routes through `InsertAgentAnchoredAudit` when the field is valid; chat-anchored rows continue via `InsertChatMutationAudit`.
+- `tickets.depends_on_ticket_id` + `departments.dependency_satisfaction_columns` (JSONB, default `["qa_review","done"]`). Spawn-prep defers when the predecessor isn't in the satisfaction set. Cycles + 32-hop depth-caps reject at `create_ticket` time with typed `dependency_cycle` / `dependency_chain_too_deep`.
+- Per-department `weekly_ticket_budget` runaway gate (NULL = unlimited per FR-200). Rejection bookkeeping (throttle_events + audit) commits in a fresh tx so the main-flow rollback doesn't erase it.
+- **MCPJungle** sidecar (Postgres-backed, enterprise-mode ACLs). Per-agent McpClient names follow `<customer_slug>.<role-slug>.<short-agent-id>`. Reconciler walks active agents at boot, writes bearer tokens to vault at `mcpjungle/agents/<agent-id>`, inserts the agent-scoped grant binding `MCPJUNGLE_BEARER_TOKEN`. `Client.URLForCustomer` is the structural seam for beta per-customer instances.
+- Reactive worker `internal/mcpserverwork/` consumes `pg_notify('work.mcp_server.registration_requested')` from the M8 trigger. Uses row-level `SELECT FOR UPDATE NOWAIT` for LISTEN+poll dedupe.
+- Server-Action-only `register_mcp_server` verb lives in `internal/garrisonmutate/server_action_verbs.go` (disjoint from chat-side `Verbs` per the M7 F3 lean pattern).
+- Customer-prefix invariant (FR-307) enforced both supervisor-side and dashboard-side. `customer_slug` column on `companies` (default `'garrison'`); FK from `mcp_servers.customer_slug`.
+
+## M9 — scheduled / triggered wake-ups (planned)
+
+Not yet active. See `ARCHITECTURE.md` §M9 paragraph for the design sketch (cron-driven proactive spawn, `scheduled_tasks` table with fire-on-recovery semantics, two firing modes `ticket` + `oneshot`).

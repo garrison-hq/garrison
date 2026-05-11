@@ -274,9 +274,9 @@ MCP-server registry (M8).
 | **M5.2** | CEO chat dashboard surface. Three-pane layout, message stream, composer, multi-session UX, end/archive/delete affordances, idle-pill chip. | Shipped 2026-04-29. |
 | **M5.3** | Chat-driven mutations under autonomous-execution posture. In-tree `garrison-mutate` MCP server with sealed 8-verb set (create/edit/transition tickets, pause/resume/spawn/edit-config agents, propose hires); per-turn tool-call ceiling; chat threat-model amendment. | Shipped 2026-04-30. |
 | **M5.4** | "WHAT THE CEO KNOWS" knowledge-base pane. Tabbed `KnowsPane` replacing M5.2 placeholder: Company.md (MinIO-backed, CEO-editable, CodeMirror v6) + recent palace writes + recent KG facts (supervisor proxy). New 4th container (MinIO); new packages `internal/objstore/` + `internal/dashboardapi/`. | Shipped 2026-05-01. |
-| **M6** | CEO ticket decomposition + memory hygiene dashboard + cost-based throttling. | Not started. |
-| **M7** | Hiring flow via skills.sh + SkillHub (private skills registry). | Not started. |
-| **M8** | Agent-spawned tickets, cross-department dependencies, MCP-server registry (MCPJungle leading candidate). | Not started. |
+| **M6** | Ticket decomposition + memory-hygiene three-tab strip + per-company cost throttling. New `throttle_events` audit table + `work.throttle.event` pg_notify. Spawn-prep defer when daily budget or rate-limit pause is active. | Shipped 2026-05-03. |
+| **M7** | First custom agent end-to-end. Three-thread merge: SkillHub-backed hiring proposals with operator approval, per-agent Docker containers with image-digest pinning + cgroup caps + egress allow-list, immutable prompt-hardening preamble. New `agent_install_journal` + `agent_container_events` tables. `migrate7` one-shot grandfathering. | Shipped 2026-05-03. |
+| **M8** | Closes the event-driven zero-human loop. Agent-callable `create_ticket` with `agent_instance_id` audit anchor + auto-inherit parent + cycle/depth walker + cross-dept tagging. `tickets.depends_on_ticket_id` with spawn-prep gate. Per-department `weekly_ticket_budget` runaway gate. MCPJungle sidecar (Postgres-backed, MPL-2.0, enterprise-mode ACLs) with per-agent McpClient + bearer-token vault grant; reactive worker for `register_mcp_server` Server Action. | Shipped 2026-05-11. |
 
 Each milestone ships end-to-end functional before the next begins.
 No scaffolding for future milestones lands early. See

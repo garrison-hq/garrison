@@ -41,8 +41,8 @@ These documents govern this project. Read the ones relevant to your current task
 |---|---|---|
 | Rationale | `RATIONALE.md` | 13 architectural decisions with alternatives considered and trade-offs accepted. Do not re-litigate decisions here. |
 | Architecture | `ARCHITECTURE.md` | System components, data model, event flow, build plan, dashboard surfaces. |
-| Active milestone context | `specs/_context/m{N}-context.md` (active: M5.3 — `specs/_context/m5-3-context.md`) | Binding constraints for the active milestone. The active milestone's context file is always the most operationally relevant document for code work. |
-| Per-milestone agent context | `docs/agents/milestone-context.md` | The "activate before writing code" detail per milestone (M1 → M5.3). Read the entries for the current milestone plus all prior milestones whose code remains in the codebase. |
+| Active milestone context | `specs/_context/m{N}-context.md` (latest shipped: M8 — `specs/_context/m8-context.md`; next planned: M9 scheduled wake-ups) | Binding constraints for the active milestone. The active milestone's context file is always the most operationally relevant document for code work. |
+| Per-milestone agent context | `docs/agents/milestone-context.md` | The "activate before writing code" detail per milestone (M1 → M8 shipped). Read the entries for the current milestone plus all prior milestones whose code remains in the codebase. |
 | Repository layout | `docs/agents/repository-layout.md` | Annotated file tree. Read on first session in the repo or when uncertain where a file belongs. |
 | Constitution | `.specify/memory/constitution.md` | Spec-kit's constitution file. Populated via `/speckit.constitution`. |
 | Research spikes | `docs/research/m{N}-spike.md` | Observed behavior of external tools that a milestone depends on. Binding input to the milestone's context file. |
@@ -73,7 +73,7 @@ If a lower authority contradicts a higher one, the higher one wins. Flag the con
 
 Before producing any code in this repository, explicitly bring relevant domain knowledge into working memory. The per-milestone "activate" lists live in [`docs/agents/milestone-context.md`](docs/agents/milestone-context.md) so they're loaded on demand, not in every session.
 
-The activation rule: read the entries for the **current milestone plus all prior milestones whose code remains in the codebase**. Future-milestone entries are listed only so the operator can plan ahead — do not pre-activate them. M5.3 sessions have no business carrying M7 hiring-flow or M8 MCP-registry context; it dilutes attention and tempts scope creep.
+The activation rule: read the entries for the **current milestone plus all prior milestones whose code remains in the codebase**. Future-milestone entries are listed only so the operator can plan ahead — do not pre-activate them. M9 (scheduled wake-ups) sessions have no business carrying M10+ context; it dilutes attention and tempts scope creep.
 
 ---
 
@@ -148,10 +148,11 @@ These apply throughout the supervisor code:
 Specs are narrow per milestone. Each milestone's spec covers only that milestone's concerns. The active milestone's `specs/_context/m{N}-context.md` enumerates what is in scope; ARCHITECTURE.md and `docs/issues/` enumerate work that is intentionally deferred.
 
 Standing out-of-scope for any non-named milestone:
-- ~~**Workspace sandboxing / Docker-per-agent**~~ — **scope-merged into M7 (2026-05-02)**, see `docs/research/m7-spike.md` §4 + `docs/security/agent-sandbox-threat-model.md`. The container is the natural skill-install boundary, so M7 resolves the per-agent runtime and the install actuator in one ship. While M7 is active this is *in*-scope; once M7 ships it returns to "sealed and binding" rather than "deferred."
+- ~~**Workspace sandboxing / Docker-per-agent**~~ — **shipped in M7 (2026-05-03)**. Sealed; per-agent runtime + image-digest pin + cgroup caps + egress allow-list are binding.
+- ~~**MCP-server registry**~~ — **shipped in M8 (2026-05-11)** via MCPJungle sidecar. Sealed; per-agent McpClient names follow `<customer_slug>.<role>.<short-id>`; bearer tokens land at vault `mcpjungle/agents/<agent-id>`.
 - **Cost-telemetry blind-spot fix** — see `docs/issues/cost-telemetry-blind-spot.md`. Successful finalize runs read `$0.00` for `total_cost_usd`; surface the caveat in any cost UI but do not fix the supervisor signal-handling here.
-- **Mutating sealed M2/M2.3 surfaces** — supervisor spawn semantics, finalize tool schema, vault rules, `garrison_agent_*` Postgres roles, MemPalace MCP wiring. These are sealed unless the active milestone's context file explicitly amends them.
-- Future-milestone surfaces — M5.3 sessions don't carry M7 hiring or M8 MCP-registry work; M7 sessions don't carry M8 work; etc.
+- **Mutating sealed M2/M2.3/M7/M8 surfaces** — supervisor spawn semantics, finalize tool schema, vault rules, `garrison_agent_*` Postgres roles, MemPalace MCP wiring, per-agent container model, MCPJungle naming convention. These are sealed unless the active milestone's context file explicitly amends them.
+- Future-milestone surfaces — M9 sessions don't carry M10+ work; etc.
 
 When tempted to broaden scope because "we'll need it later," stop. Note it as an open question in the spec or the retro. Do not implement it.
 
@@ -218,7 +219,7 @@ These are installed and will auto-activate when relevant:
 - `supabase/agent-skills` — general Postgres best practices (despite the name, not Supabase-specific)
 - Dashboard-relevant skills (Next.js 16 / React 19 patterns, `frontend-design`, shadcn/ui) — added when M3 became active; remain available for M3+ work.
 
-Add when M7 becomes active:
+Added when M7 became active (still relevant for M8+ MCP-registry work):
 - `anthropics/skills` for `mcp-builder`.
 
 Skills are lower authority than this file, the rationale, and the milestone context.
@@ -230,7 +231,7 @@ Skills are lower authority than this file, the rationale, and the milestone cont
 The annotated file tree lives at [`docs/agents/repository-layout.md`](docs/agents/repository-layout.md). Read it on first session in the repo or when uncertain where a file belongs. Top-level shape:
 
 - `supervisor/` — Go binary. `cmd/supervisor/` (main + MCP subcommands), `internal/` (per-domain packages), `tools/vaultlog/` (custom go vet analyzer).
-- `dashboard/` — Next.js 16 app. M3/M4/M5.1/M5.2 surfaces.
+- `dashboard/` — Next.js 16 app. M3/M4/M5.1/M5.2/M5.4 + M7 hiring + M8 (/admin/mcp-servers, agent-anchored audit filter, runaway panel) surfaces.
 - `migrations/` — SQL, consumed by sqlc (Go) and Drizzle (TS).
 - `specs/` — per-milestone spec-kit artifacts; `specs/_context/m{N}-context.md` is binding for the active milestone.
 - `docs/` — non-spec documentation: `architecture.md`, `agents/` (this file's reference docs), `research/` (spikes), `security/` (threat models), `retros/`, `issues/`, `ops-checklist.md`.
