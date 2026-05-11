@@ -74,20 +74,24 @@ won over Redis Streams / RabbitMQ / NATS for this workload.
 ```mermaid
 flowchart LR
     OP[Operator] --> DASH[Dashboard<br/>Next.js 16]
-    DASH -->|insert/edit/transition tickets,<br/>edit agent configs| PG[(Postgres 17)]
+    DASH -->|insert/edit/transition tickets,<br/>edit agent configs,<br/>register MCP server M8| PG[(Postgres 17)]
     DASH -->|chat over SSE| CHAT[Chat runtime]
     DASH -->|GET/PUT Company.md,<br/>read recent palace + KG| API[Supervisor<br/>dashboardapi]
     PG -->|pg_notify| SUP[Supervisor]
-    VAULT[(Infisical Vault)] -.->|secrets, supervisor-only| SUP
-    SUP -->|spawn with env-injected secrets| A[Agent subprocess]
+    VAULT[(Infisical Vault)] -.->|secrets + MCPJungle admin<br/>+ per-agent bearer tokens<br/>supervisor-only| SUP
+    SUP -->|docker exec into<br/>per-agent container M7| A[Agent runtime<br/>per-agent Docker<br/>+ immutable preamble]
     SUP --> CHAT
     SUP --> API
+    SUP -->|reconcile McpClients,<br/>register MCP servers M8| MJ[MCPJungle<br/>MCP-server registry M8]
     A -->|read state via pgmcp| PG
     A -->|read+write memory via MCP| MP[(MemPalace)]
     A -->|finalize_ticket MCP| FIN[Atomic commit]
+    A -->|garrison-mutate MCP<br/>create_ticket etc. M8| PG
+    A -->|tool calls via<br/>per-agent bearer M8| MJ
+    MJ -->|allow-listed proxy| EXT[Third-party<br/>MCP servers]
     FIN --> PG
     FIN --> MP
-    CHAT -->|garrison-mutate MCP<br/>8 verbs, sealed allow-list| PG
+    CHAT -->|garrison-mutate MCP<br/>9 verbs, sealed allow-list| PG
     CHAT --> MP
     API -->|read/write Company.md| MIN[(MinIO<br/>garrison-company bucket)]
     API -->|recent drawers + KG triples| MP
@@ -127,31 +131,52 @@ Components:
   Docker named volume (`garrison-minio-data`); root credentials
   env-on-container only; supervisor uses scoped service-account
   credentials from Infisical.
-- **Dashboard (M3 + M4 + M5.1 + M5.2 + M5.4)** — Next.js 16 + React
-  19 app. Read-only Kanban / activity / hygiene / vault / agents /
-  invites (M3), full mutation surface for tickets and agent configs
-  (M4), CEO chat surface with three-pane layout + per-thread
-  multi-session UX (M5.1 + M5.2), and the right-pane KnowsPane
+- **Dashboard (M3 + M4 + M5.1 + M5.2 + M5.4 + M6 + M7 + M8)** —
+  Next.js 16 + React 19 app. Read-only Kanban / activity / hygiene /
+  vault / agents / invites (M3), full mutation surface for tickets
+  and agent configs (M4), CEO chat surface with three-pane layout +
+  per-thread multi-session UX (M5.1 + M5.2), right-pane KnowsPane
   (M5.4) with Company.md edit + recent palace writes + recent KG
-  facts.
+  facts, hygiene three-tab strip + throttle-events sub-table (M6),
+  `/admin/hires` operator review surface for hiring proposals (M7),
+  `/admin/mcp-servers` registry surface + `/activity?agent_instance_id`
+  agent-anchored audit filter + `/hygiene` runaway-control panel (M8).
 - **Chat runtime (M5.1 → M5.3)** — per-message ephemeral
   `garrison-claude:m5` container spawned by the supervisor's chat
   worker. M5.3 wires the in-tree `garrison-mutate` MCP server with
-  a sealed 8-verb set (create/edit/transition tickets, pause/resume/
+  a sealed verb set (create/edit/transition tickets, pause/resume/
   spawn/edit-config agents, propose hires) under autonomous-execution
-  posture (no per-call operator approval; concurrency conflicts
-  surface as typed errors).
-- **Agent subprocess** — `claude` CLI with a scoped agent.md, a
-  working directory, vault-injected env vars, and MCP servers wired
-  in: `pgmcp` (read-only Postgres), `mempalace` (memory), and
-  `finalize_ticket` (the single transactional commit tool added in
-  M2.2.1 — agents cannot transition a ticket any other way). M1's
-  `sh -c` placeholder is preserved as `GARRISON_FAKE_AGENT_CMD` for
-  fast tests.
+  posture; M7 added `propose_skill_change` + `bump_skill_version` for
+  hiring-flow re-entry. Server-Action-only `register_mcp_server` (M8)
+  lives in a disjoint registry, never exposed to chat.
+- **Agent runtime (M2.1 + M7)** — `claude` CLI running inside a
+  per-agent long-lived Docker container (M7; previously direct
+  subprocess in M2.1–M5.x). Image digest is pinned per agent;
+  cgroup CPU + memory caps + egress allow-list per the M7
+  sandbox threat model. The immutable prompt-hardening preamble
+  (`internal/agentpolicy/`) is prepended to every system prompt.
+  MCP servers wired in: `pgmcp` (read-only Postgres), `mempalace`
+  (memory), `finalize_ticket` (the single transactional commit
+  tool added in M2.2.1 — agents cannot transition a ticket any
+  other way), and `garrison-mutate` (M8 added the agent-caller
+  surface so agents can `create_ticket` for downstream work,
+  audited with an `agent_instance_id` anchor). M1's `sh -c`
+  placeholder is preserved as `GARRISON_FAKE_AGENT_CMD` for fast
+  tests.
+- **MCPJungle (M8)** — Postgres-backed MCP-server registry/proxy
+  sidecar (MPL-2.0, enterprise-mode ACLs). Per-agent McpClient
+  rows under `<customer_slug>.<role-slug>.<short-id>`; each
+  bearer token lives at vault path `mcpjungle/agents/<agent-id>`.
+  Server-Action `register_mcp_server` lands an `mcp_servers` row
+  with `status='pending'`; the reactive `mcpserverwork` worker
+  flips status to `registered`/`failed` via MCPJungle's admin API
+  and writes the canonical audit row anchored on the final
+  outcome (FR-306 single-row invariant). Single-instance for M8
+  alpha; the `Client.URLForCustomer` method is the structural
+  seam for the beta per-customer-instance pivot.
 
-Not yet shipped: CEO ticket decomposition + memory hygiene
-dashboard (M6), hiring flow (M7), and agent-spawned tickets + MCP
-registry (M8). See [Milestones](#milestones).
+The full system is shipped through M8; M9 (scheduled / triggered
+wake-ups) is the next planned milestone. See [Milestones](#milestones).
 
 For the full system picture (data model, event flow, dashboard
 surfaces) see `ARCHITECTURE.md`. For the reasoning behind every
@@ -159,7 +184,7 @@ non-obvious choice, see `RATIONALE.md`.
 
 ---
 
-## M1 → M5 in one paragraph each
+## M1 → M8 in one paragraph each
 
 **M1** is the event bus and supervisor core. Postgres schema with
 `departments`, `tickets`, `event_outbox`, `agent_instances`. A
@@ -247,14 +272,28 @@ leak-scan + size-cap + ETag-aware GET/PUT) and
 forward auth against the better-auth `sessions` table); two new
 dependencies (`minio-go/v7` Go; `@uiw/react-codemirror` + `@codemirror/lang-markdown` TS).
 
-Two open follow-ups remain tracked under [`docs/issues/`](./docs/issues/):
-workspace sandboxing (Docker-per-agent, deferred post-M5) and the
-cost-telemetry blind spot (supervisor signal-handling fix that lets
-`result` event land before kill).
+One open follow-up remains tracked under [`docs/issues/`](./docs/issues/):
+the cost-telemetry blind spot (supervisor signal-handling fix that
+lets `result` event land before kill). Workspace sandboxing
+(Docker-per-agent) shipped in M7.
 
-What M1 → M5 **do not** include: CEO ticket decomposition + memory
-hygiene dashboard (M6), hiring (M7), agent-spawned tickets +
-MCP-server registry (M8).
+**M6** (2026-05-03) added per-company cost throttling (daily budget,
+rate-limit pause, `throttle_events` audit table) + the hygiene three-
+tab strip (failures / audit / all). **M7** (2026-05-03) shipped the
+first custom agent end-to-end: SkillHub-backed hiring proposals,
+per-agent Docker containers with cgroup caps + egress allow-list +
+image-digest pin, and an immutable prompt-hardening preamble.
+**M8** (2026-05-11) closed the event-driven zero-human loop: agents
+call `create_ticket` for follow-up work (audited with an
+`agent_instance_id` anchor); cross-department dependencies gate spawn-
+prep until the predecessor is satisfied; a per-department weekly
+budget catches runaway loops; MCPJungle (sidecar) is the MCP-server
+registry, with per-agent McpClient names following
+`<customer_slug>.<role>.<short-id>` and bearer tokens stored in
+vault.
+
+The full system is now shipped through M8. **M9** (scheduled /
+triggered wake-ups) is the next planned milestone.
 
 ---
 
@@ -274,9 +313,9 @@ MCP-server registry (M8).
 | **M5.2** | CEO chat dashboard surface. Three-pane layout, message stream, composer, multi-session UX, end/archive/delete affordances, idle-pill chip. | Shipped 2026-04-29. |
 | **M5.3** | Chat-driven mutations under autonomous-execution posture. In-tree `garrison-mutate` MCP server with sealed 8-verb set (create/edit/transition tickets, pause/resume/spawn/edit-config agents, propose hires); per-turn tool-call ceiling; chat threat-model amendment. | Shipped 2026-04-30. |
 | **M5.4** | "WHAT THE CEO KNOWS" knowledge-base pane. Tabbed `KnowsPane` replacing M5.2 placeholder: Company.md (MinIO-backed, CEO-editable, CodeMirror v6) + recent palace writes + recent KG facts (supervisor proxy). New 4th container (MinIO); new packages `internal/objstore/` + `internal/dashboardapi/`. | Shipped 2026-05-01. |
-| **M6** | CEO ticket decomposition + memory hygiene dashboard + cost-based throttling. | Not started. |
-| **M7** | Hiring flow via skills.sh + SkillHub (private skills registry). | Not started. |
-| **M8** | Agent-spawned tickets, cross-department dependencies, MCP-server registry (MCPJungle leading candidate). | Not started. |
+| **M6** | Ticket decomposition + memory-hygiene three-tab strip + per-company cost throttling. New `throttle_events` audit table + `work.throttle.event` pg_notify. Spawn-prep defer when daily budget or rate-limit pause is active. | Shipped 2026-05-03. |
+| **M7** | First custom agent end-to-end. Three-thread merge: SkillHub-backed hiring proposals with operator approval, per-agent Docker containers with image-digest pinning + cgroup caps + egress allow-list, immutable prompt-hardening preamble. New `agent_install_journal` + `agent_container_events` tables. `migrate7` one-shot grandfathering. | Shipped 2026-05-03. |
+| **M8** | Closes the event-driven zero-human loop. Agent-callable `create_ticket` with `agent_instance_id` audit anchor + auto-inherit parent + cycle/depth walker + cross-dept tagging. `tickets.depends_on_ticket_id` with spawn-prep gate. Per-department `weekly_ticket_budget` runaway gate. MCPJungle sidecar (Postgres-backed, MPL-2.0, enterprise-mode ACLs) with per-agent McpClient + bearer-token vault grant; reactive worker for `register_mcp_server` Server Action. | Shipped 2026-05-11. |
 
 Each milestone ships end-to-end functional before the next begins.
 No scaffolding for future milestones lands early. See

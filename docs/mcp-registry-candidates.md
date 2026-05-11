@@ -1,6 +1,6 @@
 # MCP server registry/proxy candidates — target-state evaluation
 
-**Status**: target-state concern, deferred to M8-ish (when Garrison agents need to call third-party MCP servers for Hey Anton-style product work).
+**Status**: ✅ Shipped in M8 (2026-05-11). MCPJungle is the committed registry. See `docs/retros/m8.md` for the implementation retro and `specs/018-m8-zero-human-loop/` for the spec/plan/tasks.
 **Surfaced**: 2026-04-24, during the post-UUID-fix matrix run.
 **Relationship to SkillHub**: similar pattern (private registry for agent components) but substantively different concerns. Kept as a separate doc, not bundled under a "registries" heading. See §"Why not paired with SkillHub" below.
 
