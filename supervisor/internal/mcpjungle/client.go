@@ -39,6 +39,13 @@ type Client struct {
 	Logger *slog.Logger
 }
 
+// apiPrefix is MCPJungle's versioned API mount point. Upstream serves
+// the management API under /api/v0 (verified against the current
+// image: POST /clients → 404, POST /api/v0/clients → 201); only
+// /health lives at the root. healthcheck.go therefore does NOT use
+// this prefix.
+const apiPrefix = "/api/v0"
+
 // NewClient constructs a Client with sensible defaults. baseURL is
 // trimmed of any trailing slash so request paths don't double-slash.
 func NewClient(baseURL, adminToken string, logger *slog.Logger) *Client {
@@ -79,23 +86,36 @@ func (c *Client) CreateMcpClient(ctx context.Context, params CreateMcpClientPara
 	if err != nil {
 		return CreateMcpClientResult{}, fmt.Errorf("mcpjungle: marshal CreateMcpClient body: %w", err)
 	}
-	resp, err := c.do(ctx, http.MethodPost, "/clients", bytes.NewReader(body))
+	resp, err := c.do(ctx, http.MethodPost, apiPrefix+"/clients", bytes.NewReader(body))
 	if err != nil {
 		return CreateMcpClientResult{}, err
 	}
 	defer resp.Body.Close()
 	switch resp.StatusCode {
 	case http.StatusCreated:
+		// Current MCPJungle returns a GORM-shaped body with a numeric
+		// "ID"; json.Number tolerates both that and a string id from
+		// older builds. encoding/json matches "ID" case-insensitively.
 		var out struct {
-			ID   string `json:"id"`
-			Name string `json:"name"`
+			ID   json.Number `json:"id"`
+			Name string      `json:"name"`
 		}
 		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 			return CreateMcpClientResult{}, fmt.Errorf("mcpjungle: parse CreateMcpClient response: %w", err)
 		}
-		return CreateMcpClientResult{ID: out.ID, Name: out.Name}, nil
+		return CreateMcpClientResult{ID: out.ID.String(), Name: out.Name}, nil
 	case http.StatusConflict:
 		return CreateMcpClientResult{}, ErrServerRegistrationConflict
+	case http.StatusInternalServerError:
+		// Current MCPJungle surfaces unique-constraint violations as a
+		// 500 with the Postgres "duplicate key" error text rather than
+		// a 409. Map it to the conflict error so reconcile stays
+		// idempotent across boots.
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		if bytes.Contains(b, []byte("duplicate key")) {
+			return CreateMcpClientResult{}, ErrServerRegistrationConflict
+		}
+		return CreateMcpClientResult{}, c.statusErrBody(resp.StatusCode, b, "CreateMcpClient")
 	case http.StatusUnauthorized:
 		return CreateMcpClientResult{}, ErrAdminTokenInvalid
 	default:
@@ -106,7 +126,7 @@ func (c *Client) CreateMcpClient(ctx context.Context, params CreateMcpClientPara
 // DeleteMcpClient issues DELETE /clients/<name>. Returns nil on 204;
 // ErrClientNotFound on 404.
 func (c *Client) DeleteMcpClient(ctx context.Context, name string) error {
-	resp, err := c.do(ctx, http.MethodDelete, "/clients/"+url.PathEscape(name), nil)
+	resp, err := c.do(ctx, http.MethodDelete, apiPrefix+"/clients/"+url.PathEscape(name), nil)
 	if err != nil {
 		return err
 	}
@@ -132,7 +152,7 @@ func (c *Client) UpdateAllowList(ctx context.Context, name string, allowList []s
 	if err != nil {
 		return fmt.Errorf("mcpjungle: marshal UpdateAllowList body: %w", err)
 	}
-	resp, err := c.do(ctx, http.MethodPatch, "/clients/"+url.PathEscape(name)+"/allowlist", bytes.NewReader(body))
+	resp, err := c.do(ctx, http.MethodPatch, apiPrefix+"/clients/"+url.PathEscape(name)+"/allowlist", bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -162,7 +182,7 @@ func (c *Client) RegisterServer(ctx context.Context, spec ServerSpec) (string, e
 	if err != nil {
 		return "", fmt.Errorf("mcpjungle: marshal RegisterServer body: %w", err)
 	}
-	resp, err := c.do(ctx, http.MethodPost, "/servers", bytes.NewReader(body))
+	resp, err := c.do(ctx, http.MethodPost, apiPrefix+"/servers", bytes.NewReader(body))
 	if err != nil {
 		return "", err
 	}
@@ -188,7 +208,7 @@ func (c *Client) RegisterServer(ctx context.Context, spec ServerSpec) (string, e
 // DeregisterServer issues DELETE /servers/<name>. Returns nil on 204;
 // ErrServerNotFound on 404.
 func (c *Client) DeregisterServer(ctx context.Context, name string) error {
-	resp, err := c.do(ctx, http.MethodDelete, "/servers/"+url.PathEscape(name), nil)
+	resp, err := c.do(ctx, http.MethodDelete, apiPrefix+"/servers/"+url.PathEscape(name), nil)
 	if err != nil {
 		return err
 	}
@@ -234,6 +254,15 @@ func (c *Client) do(ctx context.Context, method, path string, body io.Reader) (*
 
 // statusErr builds a contextual error for unexpected HTTP status codes.
 // Includes a snippet of the response body for log forensics.
+// statusErrBody mirrors statusErr for callers that already consumed
+// the response body (e.g. the duplicate-key sniff in CreateMcpClient).
+func (c *Client) statusErrBody(status int, body []byte, op string) error {
+	if len(body) > 512 {
+		body = body[:512]
+	}
+	return fmt.Errorf("mcpjungle: %s returned status %d: %s", op, status, strings.TrimSpace(string(body)))
+}
+
 func (c *Client) statusErr(resp *http.Response, op string) error {
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 	return fmt.Errorf("mcpjungle: %s returned status %d: %s", op, resp.StatusCode, strings.TrimSpace(string(body)))
