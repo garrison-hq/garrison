@@ -172,10 +172,19 @@ func (c *Client) UpdateAllowList(ctx context.Context, name string, allowList []s
 // RegisterServer issues POST /servers to add a new MCP server to
 // MCPJungle's registry. Called by the mcpserverwork worker reactively
 // after a dashboard register_mcp_server Server Action commits.
+//
+// Garrison's transport vocabulary (mcp_servers CHECK constraint) says
+// "http"; current MCPJungle upstream rejects that with 400 and accepts
+// "streamable_http" instead. Translate at this boundary so the Garrison
+// schema and dashboard form stay stable across upstream renames.
 func (c *Client) RegisterServer(ctx context.Context, spec ServerSpec) (string, error) {
+	transport := spec.Transport
+	if transport == "http" {
+		transport = "streamable_http"
+	}
 	body, err := json.Marshal(map[string]any{
 		"name":         spec.Name,
-		"transport":    spec.Transport,
+		"transport":    transport,
 		"url":          spec.URL,
 		"bearer_token": spec.BearerToken,
 	})
