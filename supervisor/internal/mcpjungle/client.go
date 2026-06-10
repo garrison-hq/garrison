@@ -78,9 +78,12 @@ func (c *Client) URLForCustomer(_ pgtype.UUID) string {
 // already exists" for the reconciler's idempotent path);
 // ErrAdminTokenInvalid on 401; ErrUnreachable on connection refused.
 func (c *Client) CreateMcpClient(ctx context.Context, params CreateMcpClientParams) (CreateMcpClientResult, error) {
+	// params.Name is a CLIENT name (dotted form registers fine upstream);
+	// the allow-list entries are SERVER names and need the FR-307
+	// boundary translation.
 	body, err := json.Marshal(map[string]any{
 		"name":         params.Name,
-		"allow_list":   params.AllowList,
+		"allow_list":   upstreamAllowList(params.AllowList),
 		"access_token": params.AccessToken,
 	})
 	if err != nil {
@@ -148,7 +151,9 @@ func (c *Client) DeleteMcpClient(ctx context.Context, name string) error {
 // allow-list in sync with agents.mcp_servers_jsonb after an operator
 // approves a skill-change proposal.
 func (c *Client) UpdateAllowList(ctx context.Context, name string, allowList []string) error {
-	body, err := json.Marshal(map[string]any{"allow_list": allowList})
+	// name is a CLIENT name (dots fine upstream); the allow-list entries
+	// are SERVER names and need the FR-307 boundary translation.
+	body, err := json.Marshal(map[string]any{"allow_list": upstreamAllowList(allowList)})
 	if err != nil {
 		return fmt.Errorf("mcpjungle: marshal UpdateAllowList body: %w", err)
 	}
@@ -169,6 +174,34 @@ func (c *Client) UpdateAllowList(ctx context.Context, name string, allowList []s
 	}
 }
 
+// UpstreamServerName translates a Garrison server name (FR-307
+// "<customer_slug>.<name>", dotted) into the form current MCPJungle
+// accepts for SERVER names: ^[a-zA-Z0-9_-]+$ with no consecutive
+// underscores — dots are rejected with 400. Client names are NOT
+// subject to this regex upstream (dotted McpClient names register
+// fine), so only server-name call sites translate.
+//
+// '.' maps to '-'. A garrison name that itself contains '-' could in
+// principle collide post-translation ("garrison.a-b" vs
+// "garrison-a.b"); acceptable for the one-customer alpha and flagged
+// for the FR-307 doc amendment.
+func UpstreamServerName(name string) string {
+	return strings.ReplaceAll(name, ".", "-")
+}
+
+// upstreamAllowList translates every entry of a Garrison allow-list
+// (server names from agents.mcp_servers_jsonb, dotted) for upstream.
+func upstreamAllowList(allowList []string) []string {
+	if allowList == nil {
+		return nil
+	}
+	out := make([]string, len(allowList))
+	for i, n := range allowList {
+		out[i] = UpstreamServerName(n)
+	}
+	return out
+}
+
 // RegisterServer issues POST /servers to add a new MCP server to
 // MCPJungle's registry. Called by the mcpserverwork worker reactively
 // after a dashboard register_mcp_server Server Action commits.
@@ -176,14 +209,15 @@ func (c *Client) UpdateAllowList(ctx context.Context, name string, allowList []s
 // Garrison's transport vocabulary (mcp_servers CHECK constraint) says
 // "http"; current MCPJungle upstream rejects that with 400 and accepts
 // "streamable_http" instead. Translate at this boundary so the Garrison
-// schema and dashboard form stay stable across upstream renames.
+// schema and dashboard form stay stable across upstream renames. The
+// server name is translated per UpstreamServerName for the same reason.
 func (c *Client) RegisterServer(ctx context.Context, spec ServerSpec) (string, error) {
 	transport := spec.Transport
 	if transport == "http" {
 		transport = "streamable_http"
 	}
 	body, err := json.Marshal(map[string]any{
-		"name":         spec.Name,
+		"name":         UpstreamServerName(spec.Name),
 		"transport":    transport,
 		"url":          spec.URL,
 		"bearer_token": spec.BearerToken,
@@ -217,7 +251,7 @@ func (c *Client) RegisterServer(ctx context.Context, spec ServerSpec) (string, e
 // DeregisterServer issues DELETE /servers/<name>. Returns nil on 204;
 // ErrServerNotFound on 404.
 func (c *Client) DeregisterServer(ctx context.Context, name string) error {
-	resp, err := c.do(ctx, http.MethodDelete, apiPrefix+"/servers/"+url.PathEscape(name), nil)
+	resp, err := c.do(ctx, http.MethodDelete, apiPrefix+"/servers/"+url.PathEscape(UpstreamServerName(name)), nil)
 	if err != nil {
 		return err
 	}
