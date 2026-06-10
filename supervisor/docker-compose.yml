@@ -25,6 +25,12 @@
 # access flows through the filtered proxy. Residual security envelope
 # documented in docs/security/vault-threat-model.md § "M2.2 deployment
 # assumptions (socket-proxy)".
+#
+# M7.1 adds the agent-egress substrate:
+#   garrison-agents       — internal network (no direct route out) for
+#                           per-agent containers + egress-proxy + postgres
+#   egress-proxy          — squid CONNECT allow-list (./egress/squid.conf);
+#                           the only egress from garrison-agents
 
 services:
   postgres:
@@ -34,6 +40,12 @@ services:
       POSTGRES_DB: garrison
       POSTGRES_USER: supervisor
       POSTGRES_PASSWORD: ${GARRISON_POSTGRES_PASSWORD:?GARRISON_POSTGRES_PASSWORD required}
+    # M7.1 — dual-homed onto the agents network: the service-name
+    # alias keeps the existing agent DSN hostnames (postgres:5432)
+    # resolving from agent containers without any DSN change.
+    networks:
+      - default
+      - garrison-agents
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -58,9 +70,9 @@ services:
   # EXEC=1      — allow /containers/*/exec + /exec/*/start
   # CONTAINERS=1— allow /containers/*/json (inspect; docker exec's preflight)
   # EVERY OTHER FLAG DEFAULTS TO 0 (DENY):
-  #   IMAGES=0, VOLUMES=0, NETWORKS=0, BUILD=0, SWARM=0, CONFIGS=0,
+  #   VOLUMES=0, NETWORKS=0, BUILD=0, SWARM=0, CONFIGS=0,
   #   DISTRIBUTION=0, NODES=0, PLUGINS=0, SERVICES=0, SESSION=0,
-  #   SYSTEM=0, TASKS=0, ALLOW_START=0, ALLOW_STOP=0, ALLOW_RESTARTS=0,
+  #   SYSTEM=0, TASKS=0, ALLOW_STOP=0,
   #   COMMIT=0, AUTH=0, PING=0, INFO=0, EVENTS=0, VERSION=0
   docker-proxy:
     # Pin by digest at deploy time. Keep :latest here only for local
@@ -83,10 +95,35 @@ services:
       # time. The M7 spec's proxy extension listed /containers/create
       # only; image inspect is the missing read needed alongside it.
       IMAGES: 1
+      # M7.1 — Controller.Restart is the timeout/shutdown backstop for
+      # in-container claude execs (POST /containers/<id>/restart?t=5):
+      # there is no process-group handle through the exec API, so the
+      # supervisor restarts the container to guarantee teardown.
+      ALLOW_RESTARTS: 1
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     # Listens on TCP :2375 inside the container. Not published to host —
     # only reachable over the compose network via DNS.
+    restart: unless-stopped
+
+  # M7.1 — squid egress proxy: the only route out of the internal
+  # garrison-agents network. Dual-homed (default + garrison-agents) so
+  # CONNECTs it allows can actually reach the internet. The committed
+  # allow-list lives at ./egress/squid.conf (api.anthropic.com:443
+  # only — spec FR-009); denied CONNECTs surface as TCP_DENIED/403
+  # lines in `docker logs garrison-egress-proxy` (the image entrypoint
+  # tail -F's the access log to stdout; docker's default json-file
+  # rotation is the retention policy).
+  # Digest-pinned per operator approval; captured from ubuntu/squid
+  # :latest (squid 6.13 on ubuntu 24.04) via docker pull on 2026-06-11.
+  egress-proxy:
+    image: ubuntu/squid@sha256:6a097f68bae708cedbabd6188d68c7e2e7a38cedd05a176e1cc0ba29e3bbe029
+    container_name: garrison-egress-proxy
+    networks:
+      - default
+      - garrison-agents
+    volumes:
+      - ./egress/squid.conf:/etc/squid/squid.conf:ro
     restart: unless-stopped
 
   # M2.3: Infisical backing Postgres (isolated from garrison-postgres).
@@ -264,6 +301,12 @@ services:
       GARRISON_MCP_CONFIG_DIR: ${GARRISON_SHARED_DIR:+${GARRISON_SHARED_DIR}/mcp/}
       GARRISON_SUPERVISOR_BIN_OVERRIDE: ${GARRISON_SHARED_DIR:+${GARRISON_SHARED_DIR}/bin/supervisor}
       GARRISON_DOCKER_BIN: ${GARRISON_SHARED_DIR:+${GARRISON_SHARED_DIR}/bin/docker}
+      # M7.1 — per-agent workspace/skills bases. Kept in lockstep with
+      # the identical-path binds below (same default, same override)
+      # so supervisor-side MkdirAll lands where agent-container bind
+      # sources resolve host-side.
+      GARRISON_AGENT_WORKSPACE_FS: ${GARRISON_AGENT_WORKSPACE_FS:-/var/lib/garrison/workspaces}
+      GARRISON_AGENT_SKILLS_FS: ${GARRISON_AGENT_SKILLS_FS:-/var/lib/garrison/skills}
       # claude 2.1.170 defers MCP tools behind its ToolSearch built-in
       # when a server connects after the first model call; for ticket
       # agents that can strand finalize/mempalace/pgmcp mid-run
@@ -281,6 +324,15 @@ services:
       # in this container AND on the docker host, so the chat
       # runtime's `docker run -v` bind sources resolve host-side.
       - ${GARRISON_SHARED_DIR:-/tmp/garrison-shared}:${GARRISON_SHARED_DIR:-/tmp/garrison-shared}
+      # M7.1 — identical-path binds for the per-agent workspace and
+      # skills trees, same precedent as the shared dir above. The
+      # supervisor MkdirAll's per-agent dirs under these paths; agent
+      # container create-time binds name the SAME absolute paths, and
+      # bind sources resolve on the docker host — so the host must see
+      # what the supervisor wrote. See docs/ops-checklist.md for host
+      # dir creation.
+      - ${GARRISON_AGENT_WORKSPACE_FS:-/var/lib/garrison/workspaces}:${GARRISON_AGENT_WORKSPACE_FS:-/var/lib/garrison/workspaces}
+      - ${GARRISON_AGENT_SKILLS_FS:-/var/lib/garrison/skills}:${GARRISON_AGENT_SKILLS_FS:-/var/lib/garrison/skills}
     restart: unless-stopped
 
   # M3 — operator dashboard (Next.js 16 + React 19; standalone build).
@@ -321,6 +373,17 @@ services:
     ports:
       - "3000:3000"
     restart: unless-stopped
+
+networks:
+  # M7.1 — internal network holding the per-agent containers, the
+  # egress proxy, and postgres. `internal: true` means no direct route
+  # out of the host: agent egress exists ONLY as CONNECTs through
+  # garrison-egress-proxy's allow-list. Fixed `name:` (instead of the
+  # compose-prefixed default) because the supervisor passes it as a
+  # create-time NetworkMode for agent containers.
+  garrison-agents:
+    name: garrison-agents
+    internal: true
 
 volumes:
   postgres-data:
