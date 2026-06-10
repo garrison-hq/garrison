@@ -19,9 +19,7 @@ import (
 
 	"github.com/garrison-hq/garrison/supervisor/internal/agentcontainer"
 	"github.com/garrison-hq/garrison/supervisor/internal/agents"
-	"github.com/garrison-hq/garrison/supervisor/internal/claudeproto"
 	"github.com/garrison-hq/garrison/supervisor/internal/concurrency"
-	"github.com/garrison-hq/garrison/supervisor/internal/finalize"
 	"github.com/garrison-hq/garrison/supervisor/internal/mcpconfig"
 	"github.com/garrison-hq/garrison/supervisor/internal/mempalace"
 	"github.com/garrison-hq/garrison/supervisor/internal/store"
@@ -722,18 +720,13 @@ func runRealClaude(
 		budget = 0.10 // M2.2 default per NFR-201
 	}
 	systemPrompt := mempalace.ComposeSystemPrompt(agent.AgentMD, wakeUpStdout, ticketIDText, instanceIDText)
-	argv := []string{
-		"-p", taskDescription,
-		"--output-format", "stream-json",
-		"--verbose",
-		"--no-session-persistence",
-		"--model", model,
-		"--max-budget-usd", strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.6f", budget), "0"), "."),
-		"--mcp-config", mcpPath,
-		"--strict-mcp-config",
-		"--system-prompt", systemPrompt,
-		"--permission-mode", "bypassPermissions",
-	}
+	argv := buildClaudeArgv(argvParams{
+		TaskDescription: taskDescription,
+		Model:           model,
+		BudgetUSD:       budget,
+		MCPConfigPath:   mcpPath,
+		SystemPrompt:    systemPrompt,
+	})
 
 	// M7 T011 / decision #5: when the operator has migrated agents into
 	// per-agent containers (UseDirectExec=false post-migrate7), the
@@ -798,12 +791,7 @@ func runRealClaude(
 	// Zero() is called in the deferred cleanup above (after cmd.Start copies
 	// the values into the OS process).
 	if len(fetched) > 0 {
-		env := os.Environ()
-		for envVar, sv := range fetched {
-			//nolint:vaultlog // UnsafeBytes is the only safe path for env-var injection
-			env = append(env, envVar+"="+string(sv.UnsafeBytes()))
-		}
-		cmd.Env = env
+		cmd.Env = appendSecretEnv(os.Environ(), fetched)
 	}
 
 	// Step 7: cmd.Start.
@@ -836,255 +824,109 @@ func runRealClaude(
 		}
 	}
 
-	// Step 9 + stderr goroutine: the NDJSON pipeline reads stdout to
-	// EOF; a sibling goroutine mirrors stderr into slog. Both must drain
-	// their pipes BEFORE cmd.Wait runs — os/exec's StdoutPipe docs are
-	// explicit that calling Wait before all reads complete is incorrect
-	// (a concurrent Wait closes the pipe while the scanner is still
-	// reading, losing the last events).
-	var (
-		result      Result
-		pipelineErr error
-	)
-	pipelineDone := make(chan struct{})
-	stderrDone := make(chan struct{})
-
-	// M2.2.1 T011: wire the finalize observer. Expected iff the role +
-	// column match the M2.2.1 finalize flow (engineer@in_dev or
-	// qa-engineer@qa_review). For all other (role, column) pairs
-	// FinalizeDeps is zero-valued and Run's finalize branches short-
-	// circuit, preserving M2.2 behaviour.
-	finalizeExpected := finalizeExpectedForRole(roleSlug, payload.ColumnSlug)
-	finalizeState := &FinalizeState{Expected: finalizeExpected}
+	// Steps 9–12 live in runClaudeSession (runner.go) since M7.1 T009:
+	// the NDJSON pipeline + stderr mirror + shutdown sequencing +
+	// adjudication + terminal write are transport-independent. The
+	// direct-exec transport below wraps the process-group kill ladder
+	// and the drain-then-cmd.Wait + extractExit reap exactly as the
+	// pre-T009 inline block did.
+	directTransport := transport{
+		Stdout: stdout,
+		Stderr: stderr,
+		Terminate: func(escalate bool) error {
+			if escalate {
+				return killProcessGroup(cmd, syscall.SIGKILL)
+			}
+			return killProcessGroup(cmd, syscall.SIGTERM)
+		},
+		ExitDetail: func(context.Context) WaitDetail {
+			// cmd.Wait closes stdout/stderr pipes, but the runner only
+			// calls ExitDetail after both are drained (concurrency rule
+			// 8), so no data is lost; it just returns the ProcessState.
+			_ = cmd.Wait()
+			exitCode, sigName := extractExit(cmd.ProcessState)
+			wait := WaitDetail{ExitCode: exitCode}
+			if errors.Is(execCtx.Err(), context.DeadlineExceeded) {
+				wait.ContextErr = context.DeadlineExceeded
+			}
+			if sigName != "" {
+				wait.Signaled = true
+				wait.Signal = signalFromName(sigName)
+			}
+			return wait
+		},
+	}
+	workspacePath := ""
+	if dept.WorkspacePath != nil {
+		workspacePath = *dept.WorkspacePath
+	}
 	fromCol, toCol := transitionColumns(roleSlug, payload.ColumnSlug)
-	onCommit := func(rawPayload json.RawMessage) error {
-		if deps.Palace == nil {
-			logger.Error("finalize onCommit: deps.Palace is nil; skipping atomic write")
-			return fmt.Errorf("finalize: no palace client wired")
-		}
-		parsed, verr := finalize.Validate(rawPayload)
-		if verr != nil {
-			// The finalize MCP server already validated this payload
-			// before it sent ok=true, so a re-validation failure here
-			// indicates a schema drift between server and spawn — a bug.
-			logger.Error("finalize onCommit: re-validation failed",
-				"err", verr.Error(),
-				"field", verr.Field)
-			return fmt.Errorf("finalize re-validate: %w", verr)
-		}
-		// Cost at this moment may be NULL — the supervisor's stream
-		// parser fires OnCommit on the finalize tool_result, which
-		// typically arrives before the result event. Writing NULL here
-		// is correct; any later cost signal is log-observed only.
-		cost, _ := parseCostToNumeric(result.TotalCostUSD)
-		if !result.ResultSeen {
-			cost = pgtype.Numeric{}
-		}
-		wing := ""
-		if agent.PalaceWing != nil {
-			wing = *agent.PalaceWing
-		}
-		return WriteFinalize(execCtx, FinalizeWriteDeps{
-			Pool:         deps.Pool,
-			Queries:      deps.Queries,
-			Palace:       deps.Palace,
-			Logger:       logger,
-			WriteTimeout: deps.FinalizeWriteTimeout,
-		}, parsed, FinalizeMeta{
-			AgentInstanceID: instanceID,
-			TicketID:        ticketUUID,
-			EventID:         eventID,
-			Wing:            wing,
-			FromColumn:      fromCol,
-			ToColumn:        toCol,
-			Cost:            cost,
-			WakeUpStatus:    string(wakeUpStatus),
-		})
-	}
-
-	go func() {
-		defer close(pipelineDone)
-		result = Result{}
-		// M6 T008: rate-limit pause actuator. Wires the FirePause call
-		// into a short independent tx so the in-flight stream read isn't
-		// blocked. CompanyID is captured here at policy construction
-		// (resolved via dept earlier in this function); on FirePause
-		// failure the closure logs at warn level and the spawn keeps
-		// running per FR-043.
-		var onRateLimitRejected func(context.Context, claudeproto.RateLimitEvent)
-		if dept.CompanyID.Valid && deps.Throttle.Pool != nil {
-			companyID := dept.CompanyID
-			throttleDeps := deps.Throttle
-			onRateLimitRejected = func(rlCtx context.Context, e claudeproto.RateLimitEvent) {
-				detail := throttle.RateLimitDetail{
-					Status:        e.Info.Status,
-					RateLimitType: e.Info.RateLimitType,
-					TotalCostUSD:  result.TotalCostUSD,
-				}
-				if err := pgx.BeginFunc(rlCtx, throttleDeps.Pool, func(tx pgx.Tx) error {
-					return throttle.FirePause(rlCtx, throttleDeps, store.New(tx), companyID, detail)
-				}); err != nil {
-					logger.Warn("throttle: FirePause failed; in-flight spawn continues",
-						"company_id", formatUUID(companyID),
-						"err", err)
-				}
-			}
-		}
-		policy := NewFinalizePolicy(logger, instanceID, ticketUUID, &result, FinalizeDeps{
-			Expected:            finalizeExpected,
-			State:               finalizeState,
-			OnCommit:            onCommit,
-			ResultGrace:         deps.FinalizeResultGrace,
-			OnRateLimitRejected: onRateLimitRejected,
-		}, onBail)
-		result, pipelineErr = Run(execCtx, stdout, policy, logger)
-	}()
-	go func() {
-		defer close(stderrDone)
-		scanner := bufio.NewScanner(stderr)
-		scanner.Buffer(make([]byte, 0, 64<<10), 1<<20)
-		for scanner.Scan() {
-			logger.Info(scanner.Text(), "stream", "stderr")
-		}
-	}()
-
-	// Step 10: wait for the pipeline to drain (stdout EOF, which
-	// happens when the subprocess exits) with supervisor-shutdown
-	// sequencing. Pipeline completion is the signal that all events
-	// have been observed; cmd.Wait below reaps the subprocess.
-	var (
-		shutdownCtxErr    error
-		shutdownSigkilled bool
-	)
-	select {
-	case <-pipelineDone:
-		// Subprocess wrote its final line and closed stdout — natural
-		// exit (including the exec.CommandContext timeout path, which
-		// routes through cmd.Cancel → killProcessGroup(SIGTERM) →
-		// WaitDelay escalation, eventually closing stdout).
-	case <-ctx.Done():
-		shutdownCtxErr = ctx.Err()
-		if err := killProcessGroup(cmd, syscall.SIGTERM); err != nil {
-			logger.Warn("killProcessGroup(SIGTERM) on shutdown returned error", "err", err)
-		}
-		select {
-		case <-pipelineDone:
-		case <-time.After(ShutdownSignalGrace):
-			if err := killProcessGroup(cmd, syscall.SIGKILL); err != nil {
-				logger.Warn("killProcessGroup(SIGKILL) on shutdown returned error", "err", err)
-			}
-			shutdownSigkilled = true
-			<-pipelineDone
-		}
-	}
-	<-stderrDone
-
-	// Now safe to reap. cmd.Wait closes stdout/stderr pipes but those
-	// are already drained, so no data is lost; it just returns the
-	// ProcessState.
-	_ = cmd.Wait()
-
-	if shutdownSigkilled && deps.SigkillEscalations != nil {
-		deps.SigkillEscalations.Add(1)
-	}
-
-	if pipelineErr != nil && !result.ParseError {
-		logger.Warn("pipeline.Run returned a non-parse error", "err", pipelineErr)
-	}
-
-	// Collect the wait-side detail Adjudicate needs.
-	exitCode, sigName := extractExit(cmd.ProcessState)
-	var execCtxErr error
-	switch {
-	case shutdownCtxErr != nil:
-		execCtxErr = context.Canceled
-	case errors.Is(execCtx.Err(), context.DeadlineExceeded):
-		execCtxErr = context.DeadlineExceeded
-	}
-	wait := WaitDetail{
-		ContextErr:        execCtxErr,
-		ShutdownInitiated: shutdownCtxErr != nil,
-		ExitCode:          exitCode,
-	}
-	if sigName != "" && !wait.ShutdownInitiated && !errors.Is(execCtxErr, context.DeadlineExceeded) && !bailed.Load() {
-		wait.Signaled = true
-		wait.Signal = signalFromName(sigName)
-	}
-
-	// Step 11: post-run acceptance gate.
-	//
-	// M2.1 used hello.txt + contents==ticket_id as the fake-agent and
-	// real-claude engineer acceptance check. M2.2's engineer writes
-	// changes/hello-<ticket>.md per the seed agent.md, and qa-engineer
-	// writes no artefact file at all — so the M1 check returns false
-	// and Adjudicate would misclassify a successful run as
-	// acceptance_failed. For M2.2 roles the supervisor trusts the
-	// terminal `result` event + the mempalace writes (hygiene checker's
-	// concern); no supervisor-side file check runs. acceptanceGateSatisfied
-	// treats M2.2 roles as pre-passing so the M1 fallback doesn't trip.
-	// M2.1 compat: when the engineer is being spawned against the old
-	// `todo` column the hello.txt check still applies.
-	helloTxtOK := acceptanceGateSatisfied(roleSlug, payload.ColumnSlug)
-	if !helloTxtOK && dept.WorkspacePath != nil && *dept.WorkspacePath != "" {
-		helloTxtOK = checkHelloTxt(*dept.WorkspacePath, payload.TicketID)
-	}
-
-	// M2.2.1 T011: if the pipeline's OnCommit already committed the
-	// atomic write, WriteFinalize wrote the terminal agent_instances
-	// row inside its own transaction — we MUST NOT call
-	// writeTerminalCostAndWakeup again (double-write the terminal row
-	// + attempt a second InsertTicketTransition). The subprocess's
-	// post-commit events were already observed + logged by the
-	// pipeline; nothing more to do for this spawn.
-	if finalizeState.Committed {
-		logger.Info("finalize already committed atomic tx; skipping M2.1 terminal write",
-			"ticket_id", payload.TicketID,
-			"instance_id", formatUUID(instanceID),
-		)
-		return nil
-	}
-
-	// Adjudicate receives a snapshot of the finalize state so the new
-	// precedence rows (budget > finalize_invalid, timeout > finalize_
-	// never_called, etc.) fire correctly per T002.
-	status, exitReason := Adjudicate(result, wait, helloTxtOK, *finalizeState)
-
-	// Cost stays NULL unless a result event landed; that keeps the
-	// aggregate cost query honest about what Claude actually billed.
-	cost, _ := parseCostToNumeric(result.TotalCostUSD)
-	if !result.ResultSeen {
-		cost = pgtype.Numeric{}
-	}
-
-	logger.Info("claude subprocess terminal",
-		"status", status,
-		"exit_reason", exitReason,
-		"total_cost_usd", result.TotalCostUSD,
-		"result_seen", result.ResultSeen,
-		"assistant_seen", result.AssistantSeen,
-	)
-
-	termCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), TerminalWriteGrace)
-	defer cancel()
-	insertTransition := status == "succeeded"
-
-	// M2.2: role-slug-based from/to column mapping. Engineer transitions
-	// in_dev → qa_review; qa-engineer transitions qa_review → done. Any
-	// other role (fake-agent M2.1 tests that default to "engineer" via
-	// Spawn's backward-compat branch) lands on the M2.1 todo → done path.
-	// fromCol, toCol were computed earlier for the finalize onCommit; reuse.
-	return writeTerminalCostAndWakeup(termCtx, deps, terminalWriteParams{
+	return runClaudeSession(ctx, deps, directTransport, sessionParams{
 		InstanceID:       instanceID,
 		EventID:          eventID,
-		TicketID:         ticketUUID,
-		Status:           status,
-		ExitReason:       exitReason,
-		Cost:             cost,
-		WakeUpStatus:     string(wakeUpStatus),
-		InsertTransition: insertTransition,
+		TicketUUID:       ticketUUID,
+		TicketIDText:     payload.TicketID,
+		RoleSlug:         roleSlug,
+		OriginColumn:     payload.ColumnSlug,
+		Agent:            agent,
+		Dept:             dept,
+		WakeUpStatus:     wakeUpStatus,
+		FinalizeExpected: finalizeExpectedForRole(roleSlug, payload.ColumnSlug),
 		FromCol:          fromCol,
 		ToCol:            toCol,
+		WorkspacePath:    workspacePath,
+		ExecCtx:          execCtx,
+		Bailed:           &bailed,
+		OnBail:           onBail,
+		Logger:           logger,
 	})
+}
+
+// argvParams carries the per-invocation inputs buildClaudeArgv renders
+// into the claude CLI flag sequence. Both transports use it; only
+// MCPConfigPath differs between direct-exec (host path under
+// deps.MCPConfigDir) and the container path (in-container /tmp path,
+// T011).
+type argvParams struct {
+	TaskDescription string
+	Model           string
+	BudgetUSD       float64
+	MCPConfigPath   string
+	SystemPrompt    string
+}
+
+// buildClaudeArgv renders the legacy direct-exec claude argv (M2.1 → M7
+// shape, byte-for-byte). TestBuildClaudeArgvGoldenLegacy pins the exact
+// flag sequence so the container path (T011) provably runs the same
+// invocation contract (FR-013).
+func buildClaudeArgv(p argvParams) []string {
+	return []string{
+		"-p", p.TaskDescription,
+		"--output-format", "stream-json",
+		"--verbose",
+		"--no-session-persistence",
+		"--model", p.Model,
+		"--max-budget-usd", strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.6f", p.BudgetUSD), "0"), "."),
+		"--mcp-config", p.MCPConfigPath,
+		"--strict-mcp-config",
+		"--system-prompt", p.SystemPrompt,
+		"--permission-mode", "bypassPermissions",
+	}
+}
+
+// appendSecretEnv appends NAME=value pairs for every fetched vault secret
+// to env and returns it. This is the single sanctioned production
+// UnsafeBytes env-injection call site (AGENTS.md vaultlog rule: spawn env
+// injection + Rule 1 leak scan are the only two); the container path
+// (T011) reuses this helper rather than adding a third site. Values are
+// never logged or placed in argv; the caller owns Zero()ing the fetched
+// map after the env is handed to the subprocess/exec.
+func appendSecretEnv(env []string, fetched map[string]vault.SecretValue) []string {
+	for envVar, sv := range fetched {
+		//nolint:vaultlog // UnsafeBytes is the only safe path for env-var injection
+		env = append(env, envVar+"="+string(sv.UnsafeBytes()))
+	}
+	return env
 }
 
 // acceptanceGateSatisfied returns true for (role, origin-column) pairs

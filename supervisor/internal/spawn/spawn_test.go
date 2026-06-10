@@ -341,3 +341,59 @@ func TestAcceptanceGateSatisfied(t *testing.T) {
 		}
 	}
 }
+
+// TestBuildClaudeArgvGoldenLegacy pins the exact legacy direct-exec flag
+// sequence (M7.1 T009 / FR-013). buildClaudeArgv must reproduce the
+// pre-extraction inline argv byte-for-byte so the container path (T011)
+// shares the same invocation contract with only the --mcp-config path
+// differing. Any drift here is a behavior change for the soak window.
+func TestBuildClaudeArgvGoldenLegacy(t *testing.T) {
+	const taskDescription = "You are the engineer on ticket 11111111-1111-1111-1111-111111111111 " +
+		"(agent_instance 22222222-2222-2222-2222-222222222222). Read it, then execute " +
+		"your completion protocol from the system prompt."
+	argv := buildClaudeArgv(argvParams{
+		TaskDescription: taskDescription,
+		Model:           "claude-sonnet-4-5",
+		BudgetUSD:       0.10,
+		MCPConfigPath:   "/var/lib/garrison/mcp/mcp-config-22222222-2222-2222-2222-222222222222.json",
+		SystemPrompt:    "SYSTEM PROMPT SENTINEL",
+	})
+	want := []string{
+		"-p", taskDescription,
+		"--output-format", "stream-json",
+		"--verbose",
+		"--no-session-persistence",
+		"--model", "claude-sonnet-4-5",
+		"--max-budget-usd", "0.1",
+		"--mcp-config", "/var/lib/garrison/mcp/mcp-config-22222222-2222-2222-2222-222222222222.json",
+		"--strict-mcp-config",
+		"--system-prompt", "SYSTEM PROMPT SENTINEL",
+		"--permission-mode", "bypassPermissions",
+	}
+	if len(argv) != len(want) {
+		t.Fatalf("argv length = %d; want %d\nargv: %q", len(argv), len(want), argv)
+	}
+	for i := range want {
+		if argv[i] != want[i] {
+			t.Errorf("argv[%d] = %q; want %q", i, argv[i], want[i])
+		}
+	}
+
+	// Budget rendering keeps the inline fmt.Sprintf("%.6f")+TrimRight
+	// chain's exact output for non-default budgets too.
+	budgetCases := []struct {
+		budget float64
+		want   string
+	}{
+		{0.10, "0.1"},
+		{0.25, "0.25"},
+		{1.0, "1"},
+		{0.123456, "0.123456"},
+	}
+	for _, c := range budgetCases {
+		got := buildClaudeArgv(argvParams{BudgetUSD: c.budget})
+		if got[9] != c.want {
+			t.Errorf("budget %v rendered %q; want %q", c.budget, got[9], c.want)
+		}
+	}
+}
