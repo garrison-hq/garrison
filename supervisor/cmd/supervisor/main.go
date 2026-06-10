@@ -290,12 +290,6 @@ func runDaemon() int {
 		AgentContainer: agentCtrl,
 	}
 
-	// Roster-derived routes: every active agent's listens_for channels
-	// become dispatch routes for its role, so M7-hired departments
-	// receive work without a code change (the additive-registration
-	// promise from the M2.1 plan, previously never wired).
-	dispatcherExtras := buildRosterRoutes(agentsCache, spawnDeps, logger)
-
 	healthServer := health.NewServer(cfg, state, pool)
 
 	// M5.4 — objstore client + dashboardapi server. Both are gated on
@@ -313,11 +307,21 @@ func runDaemon() int {
 	// MCPJungleURL empty in fake-agent mode and the M2.x chaos suites;
 	// the supervisor skips the whole subsystem in that case.
 	mcpjungleClient, mcpWorker := buildMcpjungleSubsystem(ctx, cfg, queries, pool, vaultClient, logger)
+	var workerExtras map[string]events.Handler
 	if mcpWorker != nil {
-		dispatcherExtras[mcpserverwork.Channel] = mcpWorker.Handle
+		workerExtras = map[string]events.Handler{mcpserverwork.Channel: mcpWorker.Handle}
 	}
 	_ = mcpjungleClient
-	dispatcher := buildDispatcherWithExtras(spawnDeps, dispatcherExtras)
+	dispatcher := buildDispatcherWithExtras(spawnDeps, workerExtras)
+
+	// Roster-derived routes live in the dispatcher's DYNAMIC overlay:
+	// every active agent's listens_for channels become dispatch routes
+	// for its role, so M7-hired departments receive work without a code
+	// change. The overlay is rebuilt on every agents.changed
+	// notification (see StartChangeListener below), so an approved hire
+	// starts dispatching within one poll interval — no supervisor
+	// restart (FR-014 amendment, 2026-06-10).
+	dispatcher.SetDynamicRoutes(buildRosterRoutes(agentsCache, spawnDeps, logger))
 
 	g, gctx := errgroup.WithContext(ctx)
 
@@ -342,15 +346,19 @@ func runDaemon() int {
 
 	startDashboardAPIServerIfWired(g, gctx, dashboardAPIServer, cfg, logger)
 
-	// M4 — agents.changed cache invalidator (T014 / FR-100).
-	// The dashboard's editAgent server action emits
-	// pg_notify('agents.changed', role_slug) on every successful
-	// agents-row write; the listener drives Cache.Reset so the
-	// next spawn picks up the new config. The listener owns its
-	// own dedicated pgx.Conn (LISTEN is connection-scoped) and
-	// cleanly exits on root-context cancellation per AGENTS.md
-	// §Concurrency rule 1.
-	if err := agents.StartChangeListener(gctx, pool, agentsCache); err != nil {
+	// M4 — agents.changed cache invalidator (T014 / FR-100), extended
+	// 2026-06-10: agents.changed now also fires from a DB trigger on
+	// agents INSERT/UPDATE (covering hire approval from any surface),
+	// and the onReset hook rebuilds the dispatcher's roster route
+	// overlay so a fresh hire dispatches without a restart. The
+	// listener owns its own dedicated pgx.Conn (LISTEN is
+	// connection-scoped) and cleanly exits on root-context
+	// cancellation per AGENTS.md §Concurrency rule 1.
+	onRosterReset := func(_ context.Context) {
+		dispatcher.SetDynamicRoutes(buildRosterRoutes(agentsCache, spawnDeps, logger))
+		logger.Info("roster routes rebuilt after agents.changed")
+	}
+	if err := agents.StartChangeListener(gctx, pool, agentsCache, onRosterReset); err != nil {
 		logger.Warn("agents.changed listener failed to start; agent edits will not propagate to the supervisor cache until restart", "err", err)
 	}
 

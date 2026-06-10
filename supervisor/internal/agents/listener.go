@@ -37,11 +37,17 @@ const (
 // context per AGENTS.md §Concurrency rule 1; on ctx.Done() it closes
 // the connection cleanly and returns nil.
 //
+// onReset, when non-nil, runs after every successful Cache.Reset.
+// cmd/supervisor uses it to rebuild the dispatcher's roster-derived
+// route overlay so an approved hire starts dispatching without a
+// supervisor restart (FR-014 amendment, 2026-06-10). It runs on the
+// listener goroutine — keep it fast and non-blocking.
+//
 // Returns an error from the initial LISTEN setup. Goroutine errors
 // post-startup are logged via slog and recovered (the listener
 // reconnects with backoff so a transient connection drop doesn't
 // silently disable cache invalidation).
-func StartChangeListener(ctx context.Context, pool *pgxpool.Pool, cache *Cache) error {
+func StartChangeListener(ctx context.Context, pool *pgxpool.Pool, cache *Cache, onReset func(context.Context)) error {
 	if pool == nil {
 		return errors.New("agents: StartChangeListener requires non-nil pool")
 	}
@@ -61,7 +67,7 @@ func StartChangeListener(ctx context.Context, pool *pgxpool.Pool, cache *Cache) 
 		return fmt.Errorf("agents: LISTEN %s: %w", ChannelName, err)
 	}
 
-	go runListenerLoop(ctx, conn, cache)
+	go runListenerLoop(ctx, conn, cache, onReset)
 
 	return nil
 }
@@ -70,7 +76,7 @@ func StartChangeListener(ctx context.Context, pool *pgxpool.Pool, cache *Cache) 
 // StartChangeListener so the per-iteration handlers can compose
 // without piling up into one cognitively-heavy function (linter
 // S3776).
-func runListenerLoop(ctx context.Context, conn *pgxpool.Conn, cache *Cache) {
+func runListenerLoop(ctx context.Context, conn *pgxpool.Conn, cache *Cache, onReset func(context.Context)) {
 	defer conn.Release()
 
 	backoff := initialBackoff
@@ -93,7 +99,9 @@ func runListenerLoop(ctx context.Context, conn *pgxpool.Conn, cache *Cache) {
 		}
 
 		backoff = initialBackoff
-		applyNotification(ctx, cache, notification.Payload)
+		if applyNotification(ctx, cache, notification.Payload) && onReset != nil {
+			onReset(ctx)
+		}
 	}
 }
 
@@ -117,18 +125,21 @@ func handleListenError(ctx context.Context, conn *pgxpool.Conn, err error, backo
 	}
 }
 
-// applyNotification calls Cache.Reset and logs the outcome.
-func applyNotification(ctx context.Context, cache *Cache, roleSlug string) {
+// applyNotification calls Cache.Reset and logs the outcome. Returns
+// true when the reset succeeded so the caller can run its onReset hook
+// against a fresh snapshot only.
+func applyNotification(ctx context.Context, cache *Cache, roleSlug string) bool {
 	if err := cache.Reset(ctx, roleSlug); err != nil {
 		slog.WarnContext(ctx, "agents.changed: cache reset failed",
 			slog.String("role_slug", roleSlug),
 			slog.String("err", err.Error()),
 		)
-		return
+		return false
 	}
 	slog.InfoContext(ctx, "agents.changed: cache reset complete",
 		slog.String("role_slug", roleSlug),
 	)
+	return true
 }
 
 // pgx.Conn type alias for tests that want to construct a fake.
