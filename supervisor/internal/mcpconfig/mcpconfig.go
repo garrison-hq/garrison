@@ -257,6 +257,24 @@ func (fp FinalizeParams) enabled() bool {
 	return fp.SupervisorBin != "" && fp.AgentInstanceID != "" && fp.DatabaseURL != ""
 }
 
+// GarrisonMutateParams bundles the values the M8 agent-caller
+// garrison-mutate entry needs. SupervisorBin and AgentInstanceID
+// mirror FinalizeParams; DatabaseURL is the supervisor's MAIN DSN
+// (the verbs INSERT tickets + audit rows — the agent_ro DSN cannot).
+// The agent-mode server restricts the verb surface to create_ticket
+// (FR-005) and anchors audit rows on agent_instance_id (FR-401).
+// Leaving any field empty disables the entry (M2.x-era callers and
+// tests keep the three-entry shape).
+type GarrisonMutateParams struct {
+	SupervisorBin   string
+	AgentInstanceID string
+	DatabaseURL     string
+}
+
+func (gp GarrisonMutateParams) enabled() bool {
+	return gp.SupervisorBin != "" && gp.AgentInstanceID != "" && gp.DatabaseURL != ""
+}
+
 // WriteParams bundles all parameters for Write / WriteWithOps so the
 // function signatures stay within SonarQube's S107 parameter-count limit.
 type WriteParams struct {
@@ -266,6 +284,7 @@ type WriteParams struct {
 	DSN              string
 	Mempalace        MempalaceParams
 	Finalize         FinalizeParams
+	GarrisonMutate   GarrisonMutateParams
 	ExtraServersJSON []byte
 }
 
@@ -343,6 +362,21 @@ func WriteWithOps(_ context.Context, ops fileOps, p WriteParams) (string, error)
 			Env: map[string]string{
 				"GARRISON_AGENT_INSTANCE_ID": p.Finalize.AgentInstanceID,
 				"GARRISON_DATABASE_URL":      p.Finalize.DatabaseURL,
+			},
+		}
+	}
+
+	// M8 FR-005 agent-caller entry: ticket agents get the
+	// garrison-mutate server in agent mode (create_ticket only; audit
+	// anchors on agent_instance_id per FR-401). Same in-tree server the
+	// chat container uses, different caller anchor.
+	if p.GarrisonMutate.enabled() {
+		servers["garrison-mutate"] = mcpServerSpec{
+			Command: p.GarrisonMutate.SupervisorBin,
+			Args:    []string{"mcp", "garrison-mutate"},
+			Env: map[string]string{
+				"GARRISON_AGENT_INSTANCE_ID": p.GarrisonMutate.AgentInstanceID,
+				"GARRISON_DATABASE_URL":      p.GarrisonMutate.DatabaseURL,
 			},
 		}
 	}

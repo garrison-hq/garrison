@@ -129,6 +129,12 @@ type Deps struct {
 	SupervisorBin   string
 	AgentRODSN      string
 
+	// DatabaseURL is the supervisor's main (write-capable) DSN, used
+	// only for the M8 agent-caller garrison-mutate MCP entry — its
+	// verbs INSERT tickets + audit rows, which agent_ro cannot. Empty
+	// disables the entry (M2.x test harnesses keep the 3-entry shape).
+	DatabaseURL string
+
 	// M2.2 additions — mempalace entry in the per-invocation MCP config,
 	// plus wake-up/hygiene collaborators that land in spawn.go via T013.
 	DockerBin          string
@@ -668,6 +674,15 @@ func runRealClaude(
 			SupervisorBin:   deps.SupervisorBin,
 			AgentInstanceID: formatUUID(instanceID),
 			DatabaseURL:     deps.AgentRODSN,
+		},
+		// M8 FR-005: agent-callable create_ticket via the in-tree
+		// garrison-mutate server in agent mode (audit anchors on
+		// agent_instance_id per FR-401; verb surface restricted in
+		// garrisonmutate.listToolsFor/dispatch).
+		GarrisonMutate: mcpconfig.GarrisonMutateParams{
+			SupervisorBin:   deps.SupervisorBin,
+			AgentInstanceID: formatUUID(instanceID),
+			DatabaseURL:     deps.DatabaseURL,
 		},
 		ExtraServersJSON: agent.McpConfig, // M2.3 T013: agent-specific servers; Rule 3 checks these
 	})

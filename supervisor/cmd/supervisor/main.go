@@ -264,6 +264,9 @@ func runDaemon() int {
 		MCPConfigDir:       cfg.MCPConfigDir,
 		SupervisorBin:      supervisorBin,
 		AgentRODSN:         cfg.AgentRODSN(),
+		// M8 agent-caller: main DSN for the garrison-mutate entry's
+		// writes (tickets + agent-anchored audit rows).
+		DatabaseURL: cfg.DatabaseURL,
 		// M2.2 — docker/mempalace fields for MCP-config building + wake-up.
 		DockerBin:          cfg.DockerBin,
 		MempalaceContainer: cfg.MempalaceContainer,

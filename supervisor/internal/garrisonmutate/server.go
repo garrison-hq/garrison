@@ -37,18 +37,32 @@ func Serve(ctx context.Context, stdin io.Reader, stdout io.Writer, deps Deps) er
 	if deps.Pool == nil {
 		return errors.New("garrisonmutate: Pool is required")
 	}
-	if !deps.ChatSessionID.Valid {
-		return errors.New("garrisonmutate: ChatSessionID is required (GARRISON_CHAT_SESSION_ID)")
-	}
-	if !deps.ChatMessageID.Valid {
-		return errors.New("garrisonmutate: ChatMessageID is required (GARRISON_CHAT_MESSAGE_ID)")
+	// Exactly one caller anchor (M8 FR-005/FR-401): either the chat
+	// session+message pair (M5.3 chat mode) or an agent instance id
+	// (M8 agent mode). Both or neither is a supervisor wiring bug.
+	chatMode := deps.ChatSessionID.Valid && deps.ChatMessageID.Valid
+	agentMode := deps.AgentInstanceID.Valid
+	switch {
+	case deps.ChatSessionID.Valid != deps.ChatMessageID.Valid:
+		return errors.New("garrisonmutate: chat anchor requires both GARRISON_CHAT_SESSION_ID and GARRISON_CHAT_MESSAGE_ID")
+	case chatMode && agentMode:
+		return errors.New("garrisonmutate: both chat and agent caller anchors set; supervisor wiring bug")
+	case !chatMode && !agentMode:
+		return errors.New("garrisonmutate: caller anchor required: GARRISON_CHAT_SESSION_ID+GARRISON_CHAT_MESSAGE_ID or GARRISON_AGENT_INSTANCE_ID")
 	}
 	deps.Logger = logger
-	logger.Info("garrison-mutate: starting",
-		"chat_session_id", uuidString(deps.ChatSessionID),
-		"chat_message_id", uuidString(deps.ChatMessageID),
-		"verbs", len(Verbs),
-	)
+	if agentMode {
+		logger.Info("garrison-mutate: starting (agent mode)",
+			"agent_instance_id", uuidString(deps.AgentInstanceID),
+			"verbs", len(agentVerbNames()),
+		)
+	} else {
+		logger.Info("garrison-mutate: starting",
+			"chat_session_id", uuidString(deps.ChatSessionID),
+			"chat_message_id", uuidString(deps.ChatMessageID),
+			"verbs", len(Verbs),
+		)
+	}
 	srv := &server{deps: deps, logger: logger}
 	return srv.loop(ctx, stdin, stdout)
 }
@@ -155,7 +169,7 @@ func (s *server) dispatch(ctx context.Context, req jsonRPCRequest) jsonRPCRespon
 			ServerInfo:      serverInfo{Name: serverName, Version: serverVersion},
 		}
 	case "tools/list":
-		resp.Result = toolsListResult{Tools: listTools()}
+		resp.Result = toolsListResult{Tools: listToolsFor(s.deps)}
 	case "tools/call":
 		var params toolsCallParams
 		if err := json.Unmarshal(req.Params, &params); err != nil {
