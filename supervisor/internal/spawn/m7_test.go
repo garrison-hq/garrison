@@ -46,12 +46,16 @@ type fakeExecCall struct {
 func (f *fakeController) Create(ctx context.Context, spec agentcontainer.ContainerSpec) (string, error) {
 	return "fake-id", nil
 }
-func (f *fakeController) Start(ctx context.Context, id string) error  { return nil }
-func (f *fakeController) Stop(ctx context.Context, id string) error   { return nil }
-func (f *fakeController) Remove(ctx context.Context, id string) error { return nil }
-func (f *fakeController) Exec(ctx context.Context, id string, cmd []string, stdin io.Reader) (io.ReadCloser, io.ReadCloser, error) {
-	f.execCalls = append(f.execCalls, fakeExecCall{ContainerID: id, Cmd: append([]string{}, cmd...)})
-	return io.NopCloser(emptyReader{}), io.NopCloser(emptyReader{}), nil
+func (f *fakeController) Start(ctx context.Context, id string) error   { return nil }
+func (f *fakeController) Stop(ctx context.Context, id string) error    { return nil }
+func (f *fakeController) Restart(ctx context.Context, id string) error { return nil }
+func (f *fakeController) Remove(ctx context.Context, id string) error  { return nil }
+func (f *fakeController) Exec(ctx context.Context, id string, spec agentcontainer.ExecSpec) (*agentcontainer.ExecSession, error) {
+	f.execCalls = append(f.execCalls, fakeExecCall{ContainerID: id, Cmd: append([]string{}, spec.Cmd...)})
+	return &agentcontainer.ExecSession{
+		Stdout: io.NopCloser(emptyReader{}),
+		Stderr: io.NopCloser(emptyReader{}),
+	}, nil
 }
 func (f *fakeController) ConnectNetwork(ctx context.Context, id, name string) error { return nil }
 func (f *fakeController) Reconcile(ctx context.Context, expected []agentcontainer.ExpectedContainer) (agentcontainer.ReconcileReport, error) {
@@ -142,9 +146,9 @@ type fakeControllerExecFails struct {
 	err error
 }
 
-func (f *fakeControllerExecFails) Exec(ctx context.Context, id string, cmd []string, stdin io.Reader) (io.ReadCloser, io.ReadCloser, error) {
-	f.execCalls = append(f.execCalls, fakeExecCall{ContainerID: id, Cmd: append([]string{}, cmd...)})
-	return nil, nil, f.err
+func (f *fakeControllerExecFails) Exec(ctx context.Context, id string, spec agentcontainer.ExecSpec) (*agentcontainer.ExecSession, error) {
+	f.execCalls = append(f.execCalls, fakeExecCall{ContainerID: id, Cmd: append([]string{}, spec.Cmd...)})
+	return nil, f.err
 }
 
 func TestRunRealClaudeViaContainerExecFailureSurfacesAsSpawnFailed(t *testing.T) {

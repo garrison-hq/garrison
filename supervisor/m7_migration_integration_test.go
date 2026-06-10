@@ -38,10 +38,11 @@ func (f *fakeMigrationController) Start(ctx context.Context, id string) error {
 	f.startedIDs = append(f.startedIDs, id)
 	return nil
 }
-func (f *fakeMigrationController) Stop(ctx context.Context, id string) error   { return nil }
-func (f *fakeMigrationController) Remove(ctx context.Context, id string) error { return nil }
-func (f *fakeMigrationController) Exec(ctx context.Context, id string, cmd []string, stdin io.Reader) (io.ReadCloser, io.ReadCloser, error) {
-	return nil, nil, nil
+func (f *fakeMigrationController) Stop(ctx context.Context, id string) error    { return nil }
+func (f *fakeMigrationController) Restart(ctx context.Context, id string) error { return nil }
+func (f *fakeMigrationController) Remove(ctx context.Context, id string) error  { return nil }
+func (f *fakeMigrationController) Exec(ctx context.Context, id string, spec agentcontainer.ExecSpec) (*agentcontainer.ExecSession, error) {
+	return nil, nil
 }
 func (f *fakeMigrationController) ConnectNetwork(ctx context.Context, id, name string) error {
 	return nil

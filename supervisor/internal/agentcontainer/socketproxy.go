@@ -201,57 +201,99 @@ func (c *socketProxyController) ConnectNetwork(ctx context.Context, id, network 
 	return nil
 }
 
-// Exec runs cmd inside the container using docker's exec API. The
-// streaming surface (hijacked stdout/stderr) is set up here as a
-// scaffolded shape; T011 wires the full stdin-pipe + line-buffered
-// stdout consumer for the spawn replacement. For T004 the method
-// shape is verified against the fake (TestExecPreservesNDJSON in the
-// fake-impl tests below) and against the request body shape
-// (TestExecCreatesExecInstance).
-func (c *socketProxyController) Exec(ctx context.Context, id string, cmd []string, stdin io.Reader) (io.ReadCloser, io.ReadCloser, error) {
+// Exec runs spec.Cmd inside the container using docker's exec API.
+// No stdin attach, no connection hijacking (FR-004): the exec-start
+// response body is a normal chunked application/vnd.docker.raw-stream
+// fed through the in-process demultiplexer (spike F2). Per-exec
+// spec.Env rides the exec-create body — the only secret/runtime-env
+// transit (FR-002).
+func (c *socketProxyController) Exec(ctx context.Context, id string, spec ExecSpec) (*ExecSession, error) {
 	createBody, _ := json.Marshal(map[string]any{
-		"AttachStdin":  stdin != nil,
+		"AttachStdin":  false,
 		"AttachStdout": true,
 		"AttachStderr": true,
 		"Tty":          false,
-		"Cmd":          cmd,
+		"Cmd":          spec.Cmd,
+		"Env":          spec.Env,
+		"WorkingDir":   spec.WorkingDir,
 	})
 	resp, err := c.do(ctx, http.MethodPost, containersPathPrefix+id+"/exec", bytes.NewReader(createBody))
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	defer resp.Body.Close()
+	// 404 = container missing; 409 = container exists but isn't
+	// running. Both mean "no container to exec into" — callers route
+	// to spawn_failed and the boot reconciler is the repair path
+	// (FR-019).
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusConflict {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return nil, fmt.Errorf("%w: exec-create: %s", ErrContainerNotFound, body)
+	}
 	if resp.StatusCode != http.StatusCreated {
-		return nil, nil, c.statusErr(resp, "exec-create")
+		return nil, c.statusErr(resp, "exec-create")
 	}
 	var out struct {
 		ID string `json:"Id"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, nil, fmt.Errorf("agentcontainer: parse exec create: %w", err)
+		return nil, fmt.Errorf("agentcontainer: parse exec create: %w", err)
 	}
 
-	// Start the exec — the docker-engine wire format multiplexes
-	// stdout/stderr over a single hijacked connection (8-byte frame
-	// header per chunk). T011 ships the demultiplexer; for T004 the
-	// scaffolded shape returns the raw stream as stdout and an
-	// empty stderr reader.
 	startBody, _ := json.Marshal(map[string]any{"Detach": false, "Tty": false})
 	startResp, err := c.do(ctx, http.MethodPost, "/exec/"+out.ID+"/start", bytes.NewReader(startBody))
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	if startResp.StatusCode != http.StatusOK {
 		_ = startResp.Body.Close()
-		return nil, nil, c.statusErr(startResp, "exec-start")
+		return nil, c.statusErr(startResp, "exec-start")
 	}
-	// Spawn an stdin pump if the caller provided stdin. The hijacked
-	// connection direction here is request-only; for T011 we'll need
-	// a TCP-hijack equivalent. Scaffolded as a one-way drain.
-	if stdin != nil {
-		go func() { _, _ = io.Copy(io.Discard, stdin) }()
+	stdout, stderr := demuxRawStream(startResp.Body)
+	return &ExecSession{
+		ID:     out.ID,
+		Stdout: stdout,
+		Stderr: stderr,
+		inspect: func(ctx context.Context) (bool, int, error) {
+			return c.execInspect(ctx, out.ID)
+		},
+	}, nil
+}
+
+// execInspect reads GET /exec/<id>/json — the exit-code source for
+// ExecSession.ExitCode's poll loop. Allowed under the proxy's EXEC=1.
+func (c *socketProxyController) execInspect(ctx context.Context, execID string) (running bool, exitCode int, err error) {
+	resp, err := c.do(ctx, http.MethodGet, "/exec/"+execID+"/json", nil)
+	if err != nil {
+		return false, -1, err
 	}
-	return startResp.Body, io.NopCloser(strings.NewReader("")), nil
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return false, -1, c.statusErr(resp, "exec-inspect")
+	}
+	var out struct {
+		Running  bool `json:"Running"`
+		ExitCode int  `json:"ExitCode"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return false, -1, fmt.Errorf("agentcontainer: parse exec inspect: %w", err)
+	}
+	return out.Running, out.ExitCode, nil
+}
+
+// Restart issues POST /containers/<id>/restart with a 5s grace window
+// — the M7.1 SIGKILL analog (FR-016). The idle `sleep infinity` PID 1
+// returns and every in-flight exec stream EOFs.
+func (c *socketProxyController) Restart(ctx context.Context, id string) error {
+	resp, err := c.do(ctx, http.MethodPost, containersPathPrefix+id+"/restart?t=5", nil)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		return c.statusErr(resp, "restart")
+	}
+	return nil
 }
 
 // containerJSON is the response shape for GET /containers/json.

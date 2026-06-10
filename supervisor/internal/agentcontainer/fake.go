@@ -1,10 +1,10 @@
 package agentcontainer
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 )
 
@@ -24,10 +24,10 @@ type FakeController struct {
 	// Containers tracks the in-memory state machine. Keyed by ID.
 	Containers map[string]*FakeContainerState
 
-	// ExecOutputs configurable per container — when Exec is called,
-	// the fake reads the queue's next entry and returns it as stdout.
-	// If empty, the fake echoes stdin.
-	ExecOutputs map[string][]string
+	// ExecResults scripts Exec per container: each call pops the
+	// queue's next entry. An empty queue yields a default session
+	// (empty streams, exit 0).
+	ExecResults map[string][]FakeExecResult
 
 	// CreateError, StartError, etc. let tests inject failures.
 	CreateError      error
@@ -35,19 +35,31 @@ type FakeController struct {
 	StopError        error
 	RemoveError      error
 	ExecError        error
+	RestartError     error
 	ImageDigestValue string
 	ImageDigestError error
 
-	nextID int
+	nextID     int
+	nextExecID int
 }
 
 type FakeCall struct {
 	Method string
 	Spec   ContainerSpec // for Create
-	ID     string        // for Start / Stop / Remove / Exec / ConnectNetwork
-	Cmd    []string      // for Exec
-	Stdin  string        // for Exec — read from the input reader at call time
+	ID     string        // for Start / Stop / Restart / Remove / Exec / ConnectNetwork
+	Exec   ExecSpec      // for Exec — the full per-exec spec (Cmd/Env/WorkingDir)
 	NetID  string        // for ConnectNetwork
+}
+
+// FakeExecResult scripts one Exec invocation: the streamed output, the
+// exit code ExitCode reports once the streams drain, and the optional
+// errors for the Exec call itself or the exit-code inspect.
+type FakeExecResult struct {
+	Stdout     string
+	Stderr     string
+	ExitCode   int
+	InspectErr error // ExitCode returns (-1, InspectErr)
+	Err        error // Exec itself fails; no session is returned
 }
 
 // FakeContainerState tracks per-container state in the fake.
@@ -61,7 +73,7 @@ type FakeContainerState struct {
 func NewFakeController() *FakeController {
 	return &FakeController{
 		Containers:       map[string]*FakeContainerState{},
-		ExecOutputs:      map[string][]string{},
+		ExecResults:      map[string][]FakeExecResult{},
 		ImageDigestValue: "sha256:fake-digest-deadbeef",
 	}
 }
@@ -135,41 +147,56 @@ func (f *FakeController) ConnectNetwork(_ context.Context, id, network string) e
 	return nil
 }
 
-// Exec reads stdin into a captured buffer (so tests can assert what
-// the supervisor wrote) and returns either the queued ExecOutputs
-// or echoes stdin back as stdout.
-func (f *FakeController) Exec(ctx context.Context, id string, cmd []string, stdin io.Reader) (io.ReadCloser, io.ReadCloser, error) {
+// Exec pops the next scripted FakeExecResult for the container (or a
+// zero default) and returns it as a finished ExecSession with the
+// scripted exit code.
+func (f *FakeController) Exec(_ context.Context, id string, spec ExecSpec) (*ExecSession, error) {
 	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.ExecError != nil {
-		f.mu.Unlock()
-		return nil, nil, f.ExecError
+		return nil, f.ExecError
 	}
 	if _, ok := f.Containers[id]; !ok {
-		f.mu.Unlock()
-		return nil, nil, errContainerNotFoundf(id)
+		return nil, errContainerNotFoundf(id)
 	}
-	queue := f.ExecOutputs[id]
-	f.mu.Unlock()
-
-	stdinCapture := ""
-	if stdin != nil {
-		buf, _ := io.ReadAll(stdin)
-		stdinCapture = string(buf)
+	res := FakeExecResult{}
+	if queue := f.ExecResults[id]; len(queue) > 0 {
+		res = queue[0]
+		f.ExecResults[id] = queue[1:]
 	}
+	f.Calls = append(f.Calls, FakeCall{Method: "Exec", ID: id, Exec: spec})
+	if res.Err != nil {
+		return nil, res.Err
+	}
+	f.nextExecID++
+	return &ExecSession{
+		ID:     fmt.Sprintf("fake-exec-%d", f.nextExecID),
+		Stdout: io.NopCloser(strings.NewReader(res.Stdout)),
+		Stderr: io.NopCloser(strings.NewReader(res.Stderr)),
+		inspect: func(context.Context) (bool, int, error) {
+			if res.InspectErr != nil {
+				return false, -1, res.InspectErr
+			}
+			return false, res.ExitCode, nil
+		},
+	}, nil
+}
 
+// Restart records the call and leaves the container running — the
+// fake analog of the idle `sleep infinity` PID 1 coming back.
+func (f *FakeController) Restart(_ context.Context, id string) error {
 	f.mu.Lock()
-	f.Calls = append(f.Calls, FakeCall{Method: "Exec", ID: id, Cmd: cmd, Stdin: stdinCapture})
-	if len(queue) > 0 {
-		out := queue[0]
-		f.ExecOutputs[id] = queue[1:]
-		f.mu.Unlock()
-		return io.NopCloser(bytes.NewReader([]byte(out))), io.NopCloser(bytes.NewReader(nil)), nil
+	defer f.mu.Unlock()
+	if f.RestartError != nil {
+		return f.RestartError
 	}
-	f.mu.Unlock()
-
-	// Echo stdin back as stdout — the simplest line-buffering
-	// preserve check.
-	return io.NopCloser(bytes.NewReader([]byte(stdinCapture))), io.NopCloser(bytes.NewReader(nil)), nil
+	st, ok := f.Containers[id]
+	if !ok {
+		return errContainerNotFoundf(id)
+	}
+	st.State = "running"
+	f.Calls = append(f.Calls, FakeCall{Method: "Restart", ID: id})
+	return nil
 }
 
 // Reconcile uses the in-memory Containers map as "actual state".

@@ -15,7 +15,9 @@ package agentcontainer
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"time"
 )
 
 // Controller is the consumer-side surface every agentcontainer impl
@@ -35,19 +37,25 @@ type Controller interface {
 	// Stop issues POST /containers/<id>/stop with a 10s grace window.
 	Stop(ctx context.Context, containerID string) error
 
+	// Restart issues POST /containers/<id>/restart with a 5s grace
+	// window. The M7.1 SIGKILL analog (FR-016 backstop): restarting
+	// the container kills every in-flight exec and returns the idle
+	// `sleep infinity` PID 1. Requires ALLOW_RESTARTS on the proxy.
+	Restart(ctx context.Context, containerID string) error
+
 	// Remove issues DELETE /containers/<id> with force=true.
 	Remove(ctx context.Context, containerID string) error
 
-	// Exec runs cmd inside the existing container, piping stdin in
-	// and reading stdout/stderr out. Used by T011's spawn swap; the
-	// returned readers stream the docker exec hijacked connection
-	// line-by-line (verified compatible with internal/claudeproto's
-	// NDJSON scanner per spike §8 P2).
+	// Exec runs spec.Cmd inside the existing container and returns an
+	// ExecSession streaming the demuxed stdout/stderr. No stdin attach
+	// and no connection hijacking (FR-004): the exec-start response is
+	// a normal chunked application/vnd.docker.raw-stream demultiplexed
+	// in-process (spike F2). Per-exec spec.Env is the ONLY transit for
+	// secrets/runtime env (FR-002).
 	//
-	// If ctx is cancelled while the exec is in flight, the
-	// implementation issues POST /exec/<id>/kill (or the equivalent)
-	// and returns ctx.Err().
-	Exec(ctx context.Context, containerID string, cmd []string, stdin io.Reader) (stdout, stderr io.ReadCloser, err error)
+	// Exec-create against a missing or stopped container maps to
+	// ErrContainerNotFound so spawn lands in spawn_failed (FR-019).
+	Exec(ctx context.Context, containerID string, spec ExecSpec) (*ExecSession, error)
 
 	// ConnectNetwork attaches the container to a named Docker network
 	// (opt-in sidecar reach per sandbox Rule 3). Called after Create
@@ -65,6 +73,69 @@ type Controller interface {
 	// every spawn re-validates against the running container's
 	// recorded digest.
 	ImageDigest(ctx context.Context, imageRef string) (string, error)
+}
+
+// ExecSpec is the input to Exec. Fields map to the Docker Engine
+// API's /containers/<id>/exec body.
+type ExecSpec struct {
+	Cmd        []string // full argv, argv[0] absolute
+	Env        []string // per-exec env — the ONLY transit for secrets/runtime env (FR-002)
+	WorkingDir string   // "/workspace" for claude execs (FR-006)
+}
+
+// Exit-code polling knobs (plan §1): after the demuxed stream EOFs the
+// exec is usually already done, so the first inspect fires immediately
+// and at most execExitPollBudget inspects run, execExitPollInterval
+// apart, before ExitCode gives up with (-1, error).
+const (
+	execExitPollBudget   = 10
+	execExitPollInterval = 200 * time.Millisecond
+)
+
+// ExecSession is one in-flight (or finished) exec. Stdout/Stderr are
+// the demuxed raw-stream sides; closing Stdout tears down the raw
+// response body and with it the demux goroutine (concurrency rule 1).
+type ExecSession struct {
+	ID     string
+	Stdout io.ReadCloser // demuxed stream 1
+	Stderr io.ReadCloser // demuxed stream 2
+
+	// inspect reports the exec's Running flag + exit code. The
+	// production impl binds GET /exec/<id>/json; the fake scripts it.
+	inspect func(ctx context.Context) (running bool, exitCode int, err error)
+	// pollInterval overrides execExitPollInterval when > 0 (tests).
+	pollInterval time.Duration
+}
+
+// ExitCode polls the exec's inspect endpoint until Running=false, then
+// returns its ExitCode. If the exec is still running after the poll
+// budget, returns (-1, error) — the caller's adjudication falls back
+// to result-frame evidence.
+func (s *ExecSession) ExitCode(ctx context.Context) (int, error) {
+	if s.inspect == nil {
+		return -1, errors.New("agentcontainer: exec session has no inspect binding")
+	}
+	interval := s.pollInterval
+	if interval <= 0 {
+		interval = execExitPollInterval
+	}
+	for attempt := 0; attempt < execExitPollBudget; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return -1, ctx.Err()
+			case <-time.After(interval):
+			}
+		}
+		running, code, err := s.inspect(ctx)
+		if err != nil {
+			return -1, err
+		}
+		if !running {
+			return code, nil
+		}
+	}
+	return -1, fmt.Errorf("agentcontainer: exec %s still running after %d exit-code polls", s.ID, execExitPollBudget)
 }
 
 // ContainerSpec is the input to Create. Fields map 1:1 to Docker

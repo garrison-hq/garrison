@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/garrison-hq/garrison/supervisor/internal/agentcontainer"
 	"github.com/garrison-hq/garrison/supervisor/internal/agentpolicy"
 	"github.com/garrison-hq/garrison/supervisor/internal/agents"
 	"github.com/garrison-hq/garrison/supervisor/internal/store"
@@ -111,9 +112,8 @@ var ErrContainerControllerMissing = errors.New("spawn: AgentContainer Controller
 //
 // The full pipe-drain + adjudicator integration is captured here in
 // outline form. The legacy path's piping pattern (claudeproto's
-// NDJSON scanner over StdoutPipe) ports cleanly to the io.ReadClosers
-// the Controller.Exec returns; T017 / T018 integration tests exercise
-// the end-to-end flow.
+// NDJSON scanner over StdoutPipe) ports cleanly to the ExecSession's
+// demuxed Stdout/Stderr readers; T011 lands the real pipeline.
 func runRealClaudeViaContainer(
 	ctx context.Context,
 	deps Deps,
@@ -125,10 +125,16 @@ func runRealClaudeViaContainer(
 		return writeFailContainerPath(ctx, deps, inv, ExitSpawnFailed)
 	}
 	containerID := containerNameForRole(inv.RoleSlug)
-	stdout, stderr, err := deps.AgentContainer.Exec(ctx, containerID, append([]string{"claude"}, inv.Argv...), nil)
+	sess, err := deps.AgentContainer.Exec(ctx, containerID, agentcontainer.ExecSpec{
+		Cmd: append([]string{"claude"}, inv.Argv...),
+	})
 	if err != nil {
 		logger.Error("AgentContainer.Exec failed", "container_id", containerID, "err", err)
 		return writeFailContainerPath(ctx, deps, inv, ExitSpawnFailed)
+	}
+	var stdout, stderr io.ReadCloser
+	if sess != nil {
+		stdout, stderr = sess.Stdout, sess.Stderr
 	}
 	defer func() {
 		if stdout != nil {
