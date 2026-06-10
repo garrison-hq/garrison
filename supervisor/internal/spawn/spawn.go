@@ -194,6 +194,14 @@ type Deps struct {
 	// nil tolerated only when UseDirectExec=true; otherwise spawn fails
 	// fast with ExitSpawnFailed.
 	AgentContainer agentcontainer.Controller
+
+	// M7.1 T010 / FR-017: per-agent in-flight slot. The container path
+	// serializes spawns per agent — one claude exec per per-agent
+	// container at a time. Enforcement is active only when the container
+	// path is selected (!UseDirectExec && AgentContainer != nil); nil
+	// disables it (direct-exec/test back-compat). Production wires one
+	// shared instance from cmd/supervisor.
+	Inflight *AgentInflight
 }
 
 // UseFake decides which branch Spawn runs. UseFakeAgent wins if set;
@@ -215,6 +223,11 @@ type spawnPrep struct {
 	ticketUUID pgtype.UUID
 	dept       store.Department
 	payload    spawnPayload
+
+	// release frees the per-agent in-flight slot (M7.1 T010 / FR-017).
+	// nil when enforcement was inert. Spawn defers it so the slot is
+	// held until after the run branch returns — past the terminal write.
+	release func()
 }
 
 // Spawn handles one work.ticket.created event end-to-end. Idempotent: a
@@ -240,6 +253,13 @@ func Spawn(ctx context.Context, deps Deps, eventID pgtype.UUID, roleSlug string)
 	}
 	if err != nil || prep.done {
 		return err
+	}
+	// M7.1 T010: the per-agent slot (when held) is released only after
+	// the run branch returns — i.e. past the terminal write — so a
+	// retried event for the same agent cannot interleave with the tail
+	// of this spawn.
+	if prep.release != nil {
+		defer prep.release()
 	}
 	if deps.UseFake() {
 		return runFakeAgent(ctx, deps, prep.instanceID, eventID, prep.ticketUUID, prep.payload)
@@ -305,6 +325,32 @@ func prepareSpawn(ctx context.Context, deps Deps, eventID pgtype.UUID, roleSlug 
 			"running", running,
 		)
 		return spawnPrep{done: true}, nil
+	}
+
+	// M7.1 T010 / FR-017: per-agent in-flight slot. A second event for
+	// the same agent defers exactly like cap-full: rollback, event left
+	// unprocessed, retried on the next poll sweep. Acquired before
+	// InsertRunningInstance so a deferred event never carries an
+	// instance row.
+	releaseSlot, slotFree := acquireAgentSlot(ctx, deps, dept, roleSlug)
+	if !slotFree {
+		_ = tx.Rollback(ctx)
+		deps.Logger.Info("defer: agent spawn already in flight",
+			"event_id", formatUUID(eventID),
+			"department_id", payload.DepartmentID,
+			"role_slug", roleSlug,
+		)
+		return spawnPrep{done: true}, nil
+	}
+	slotHandedOff := false
+	if releaseSlot != nil {
+		// Every later failure/defer path in this function releases the
+		// slot; the success return hands it to Spawn via spawnPrep.
+		defer func() {
+			if !slotHandedOff {
+				releaseSlot()
+			}
+		}()
 	}
 
 	// M6 T007: throttle gate. Companies opt-in via daily_budget_usd
@@ -377,12 +423,35 @@ func prepareSpawn(ctx context.Context, deps Deps, eventID pgtype.UUID, roleSlug 
 	if err := tx.Commit(ctx); err != nil {
 		return spawnPrep{}, fmt.Errorf("spawn: commit dedupe+running: %w", err)
 	}
+	slotHandedOff = true
 	return spawnPrep{
 		instanceID: instanceID,
 		ticketUUID: ticketUUID,
 		dept:       dept,
 		payload:    payload,
+		release:    releaseSlot,
 	}, nil
+}
+
+// acquireAgentSlot claims the per-agent in-flight slot for the agent
+// resolved by (department, role) via the in-memory AgentsCache. ok=false
+// means a spawn for the same agent is already in flight — the caller
+// defers exactly like cap-full. A nil release with ok=true means
+// enforcement was inert: the gate is active only when the container
+// path is selected (!UseDirectExec && AgentContainer != nil) and its
+// collaborators are wired (Inflight, AgentsCache). Agent-resolution
+// failure also passes through open — runRealClaude resolves again and
+// writes the agent_missing terminal, so gating here would only change
+// which surface reports it.
+func acquireAgentSlot(ctx context.Context, deps Deps, dept store.Department, roleSlug string) (release func(), ok bool) {
+	if deps.UseDirectExec || deps.AgentContainer == nil || deps.Inflight == nil || deps.AgentsCache == nil {
+		return nil, true
+	}
+	agent, err := deps.AgentsCache.GetForDepartmentAndRole(ctx, dept.ID, roleSlug)
+	if err != nil {
+		return nil, true
+	}
+	return deps.Inflight.TryAcquire(formatUUID(agent.ID))
 }
 
 // decodeSpawnPayload unmarshals the event payload and parses both
