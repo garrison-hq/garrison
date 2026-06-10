@@ -296,7 +296,9 @@ func composeApproveHireAgentMD(prop store.HiringProposal) string {
 // supervisor fail-closed with finalize_never_called and the ticket
 // stalled in in_dev (2026-06-10 acceptance run). Mirrors the calibrated
 // M2.2.2 engineer baseline in compressed form; operators refine via
-// update_agent_md.
+// update_agent_md. Context guidance points at the wake-up block, not
+// mempalace tools — container-executed agents don't carry the
+// mempalace MCP server (M7.1 FR-015).
 const hiredAgentWorkingProtocol = `
 ## Working protocol (non-negotiable)
 
@@ -307,7 +309,8 @@ blockers, diary entry, and KG triples. Producing the deliverable as
 plain text WITHOUT calling finalize_ticket is a failed run — the
 supervisor marks it finalize_never_called and the ticket stalls.
 
-1. Read the ticket objective; consult MemPalace for context.
+1. Read the ticket objective; use the wake-up context provided at
+   turn start for prior-work context.
 2. Produce the deliverable.
 3. Call finalize_ticket. If it returns a schema error, fix the named
    field and call it again — do not give up after one attempt.
