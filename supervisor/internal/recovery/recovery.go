@@ -2,20 +2,21 @@
 // agent_instances row left in 'running' by a previously-crashed supervisor.
 // It runs exactly once per process, between advisory-lock acquisition and
 // the initial fallback poll.
+//
+// NFR-006 amendment (2026-06-10): the original 5-minute stale-row window
+// is gone. Recovery runs while holding the single-supervisor advisory
+// lock and before this process has spawned anything, so every 'running'
+// row belongs to a dead predecessor by construction. The window meant a
+// fast crash+restart (the normal compose/systemd path) reconciled
+// nothing, leaving the stranded row to wedge its department on the
+// concurrency cap until a later restart — observed live in the M1-M8
+// acceptance run.
 package recovery
 
 import (
 	"context"
 	"fmt"
-	"time"
 )
-
-// RecoveryWindow is the NFR-006 stale-row grace period. Any agent_instances
-// row with status='running' and started_at older than this is reconciled to
-// 'failed' / 'supervisor_restarted' at startup. The window is baked into the
-// SQL of store.RecoverStaleRunning; this constant exists so Go callers can
-// reference the same value without duplicating the literal.
-const RecoveryWindow = 5 * time.Minute
 
 // Querier is the subset of *store.Queries that RunOnce needs. Keeping the
 // interface narrow here means unit tests can stub it without a real Postgres

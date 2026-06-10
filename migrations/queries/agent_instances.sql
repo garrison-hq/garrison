@@ -65,12 +65,22 @@ SELECT COUNT(*) FROM agent_instances
 WHERE department_id = $1 AND status = 'running';
 
 -- name: RecoverStaleRunning :execrows
+-- Runs once at startup, after the advisory lock is acquired. The lock
+-- guarantees no other supervisor is alive, and this process has not
+-- spawned anything yet, so every 'running' row belongs to a dead
+-- predecessor by construction. The original NFR-006 5-minute window
+-- left rows younger than 5 minutes stranded after a fast crash+restart
+-- (the normal compose/systemd restart path): recovery found nothing,
+-- the row never cleared, and its department wedged on the concurrency
+-- cap indefinitely — observed live in the 2026-06-10 acceptance run.
+-- Host-topology orphan claude processes that outlive a SIGKILLed
+-- supervisor cannot update these rows anyway; their finalize attempts
+-- stay safe via the FR-260 already-committed check.
 UPDATE agent_instances
 SET status = 'failed',
     exit_reason = 'supervisor_restarted',
     finished_at = NOW()
-WHERE status = 'running'
-  AND started_at < NOW() - INTERVAL '5 minutes';
+WHERE status = 'running';
 
 -- name: SelectAgentInstanceFinalizedState :one
 -- M2.2.1 FR-260 + T008: the finalize MCP server calls this on every
