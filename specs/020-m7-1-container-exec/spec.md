@@ -18,6 +18,13 @@ Decisions Q1–Q8 from the context's "Open questions" section were
 resolved with the operator on 2026-06-10 and are bound in the
 requirements below; they are not open for re-litigation at clarify.
 
+## Clarifications
+
+### Session 2026-06-10
+
+- Q: Does claude fail fast or hang on a denied CONNECT (proxy 403)? → A: Fails fast — probed live against a deny-all squid: exit in ~1 s with `api_error_status: 403` and a proper terminal result frame (`is_error: true`). Denial is NOT the no-network hang (spike F3); it surfaces as a claude-error-class exit immediately. The in-container timeout remains the backstop for true network blackholes only.
+- Q: Is exec-inspect's `Pid` host- or container-namespace? → A: Host-namespace (probed: the reported Pid is visible in host `ps`; the container's own `/proc` shows container-namespace PIDs). It is therefore not usable for in-container verification from a containerized supervisor — and not needed: an exec is container-scoped by construction, so SC-001 verifies via the exec lifecycle (exec id belongs to the agent container) plus the init frame's `/workspace` cwd.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - A ticket executes inside the agent's sandbox (Priority: P1)
@@ -148,10 +155,11 @@ recreation; boot again; verify no-op.
 - Egress proxy container down at spawn time → claude cannot reach the
   API; the run must terminate within the timeout budget with a typed
   failure, not hang indefinitely (in-container `timeout` wrapper, Q3).
-- Behavior of claude on a *denied* CONNECT (proxy 403):
-  [NEEDS CLARIFICATION: spike characterized allowed-proxy and
-  no-network (hang, F3) but not deny-at-proxy; a short probe decides
-  whether denial fails fast or rides the timeout].
+- Denied CONNECT at the proxy (403) → claude fails fast (~1 s,
+  `api_error_status: 403`, terminal result frame; clarified
+  2026-06-10) and adjudicates as a claude-error-class exit — it does
+  not ride the timeout. Only true network blackholes (proxy absent,
+  packets dropped) reach the in-container timeout.
 - Agent container missing or stopped at spawn time → typed
   `spawn_failed`-class exit, event stays retryable per existing
   semantics; the boot reconciler (US4) is the repair path.
@@ -187,10 +195,11 @@ Transport (spike F2 is ground truth):
   transit for secrets and runtime env (no container-level Env, no
   argv).
 - **FR-003**: The exec transport MUST surface the exec's exit code
-  (exec-inspect) to the adjudication layer.
-  [NEEDS CLARIFICATION: whether exec-inspect's PID field is
-  host-namespace or container-namespace — affects only which
-  "verifiably inside the container" check SC-001 uses.]
+  (exec-inspect) to the adjudication layer. Exec-inspect's `Pid` is
+  host-namespace (clarified 2026-06-10) and is not used for
+  verification; in-container attribution rests on the exec being
+  container-scoped by construction plus the init frame's `/workspace`
+  cwd (SC-001).
 - **FR-004**: No stdin attachment: the prompt rides argv exactly as in
   direct-exec; connection hijacking is out of contract.
 
@@ -308,9 +317,9 @@ without them):
 
 - **SC-001**: With container execution on, a seeded ticket completes
   dispatch → in-container exec → finalize → transition with zero
-  manual intervention, and the run is verifiably in-container (init
-  frame cwd `/workspace`, plus the PID check pending FR-003's
-  clarification).
+  manual intervention, and the run is verifiably in-container (the
+  exec is scoped to the agent container by construction; init frame
+  cwd is `/workspace`).
 - **SC-002**: Runbook 03 §3.4 passes in full: caps non-zero,
   `example.com` denied, `api.anthropic.com` reachable; §3.6 probe
   leaks no secret values.
@@ -326,7 +335,9 @@ without them):
   zero container mutations.
 - **SC-006**: A run with the egress proxy stopped terminates with a
   typed failure within the configured budget (no indefinite hang —
-  the F3 failure mode is structurally prevented).
+  the F3 failure mode is structurally prevented); a run whose CONNECT
+  is denied by a live proxy fails within seconds (clarified
+  2026-06-10).
 - **SC-007**: Spike prevention accounting for the retro: issues that
   would have surfaced without the spike (per RATIONALE §13's
   validation habit) are tallied against post-ship surprises.
@@ -349,11 +360,3 @@ without them):
 - mcpjungle bearer injection (M8 T010) is not wired in this milestone;
   the exec-Env mechanism this spec ships is the seam it will use.
 
-## Flagged for /speckit.clarify
-
-Only two items, both behavior probes rather than decisions:
-
-1. Denied-CONNECT behavior (edge case above) — fail-fast vs
-   ride-the-timeout; affects failure latency only.
-2. Exec-inspect PID namespace (FR-003) — selects the SC-001
-   in-container verification mechanism.
