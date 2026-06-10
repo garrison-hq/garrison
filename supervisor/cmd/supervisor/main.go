@@ -290,7 +290,11 @@ func runDaemon() int {
 		AgentContainer: agentCtrl,
 	}
 
-	dispatcher := buildDispatcher(spawnDeps)
+	// Roster-derived routes: every active agent's listens_for channels
+	// become dispatch routes for its role, so M7-hired departments
+	// receive work without a code change (the additive-registration
+	// promise from the M2.1 plan, previously never wired).
+	dispatcherExtras := buildRosterRoutes(agentsCache, spawnDeps, logger)
 
 	healthServer := health.NewServer(cfg, state, pool)
 
@@ -310,11 +314,10 @@ func runDaemon() int {
 	// the supervisor skips the whole subsystem in that case.
 	mcpjungleClient, mcpWorker := buildMcpjungleSubsystem(ctx, cfg, queries, pool, vaultClient, logger)
 	if mcpWorker != nil {
-		dispatcher = buildDispatcherWithExtras(spawnDeps, map[string]events.Handler{
-			mcpserverwork.Channel: mcpWorker.Handle,
-		})
+		dispatcherExtras[mcpserverwork.Channel] = mcpWorker.Handle
 	}
 	_ = mcpjungleClient
+	dispatcher := buildDispatcherWithExtras(spawnDeps, dispatcherExtras)
 
 	g, gctx := errgroup.WithContext(ctx)
 
@@ -614,6 +617,52 @@ func buildSharedPalaceClient(cfg *config.Config) *mempalace.Client {
 // keeps `todo` as a real operator triage column.
 func buildDispatcher(spawnDeps spawn.Deps) *events.Dispatcher {
 	return buildDispatcherWithExtras(spawnDeps, nil)
+}
+
+// buildRosterRoutes derives channel→handler routes from every active
+// agent's listens_for column. This is the additive-department wiring
+// the M2.1 plan promised ("introducing a second department is purely
+// additive") and internal/agents has carried listens_for for since
+// T014 — M7-hired departments dispatch through these routes with no
+// code change.
+//
+// The static M2.2 engineering channels stay authoritative: a
+// listens_for entry that duplicates one is skipped (same handler
+// either way). Two roles claiming the same channel is a roster bug;
+// first-registered wins with a Warn. The dispatcher's route table is
+// frozen at construction (FR-014), so agents hired after boot start
+// dispatching at the next supervisor restart.
+func buildRosterRoutes(cache *agents.Cache, spawnDeps spawn.Deps, logger *slog.Logger) map[string]events.Handler {
+	static := map[string]bool{
+		EngineeringInDevChannel:     true,
+		EngineeringTodoInDevChannel: true,
+		EngineeringQABounceChannel:  true,
+		EngineeringQAReviewChannel:  true,
+	}
+	routes := make(map[string]events.Handler)
+	owner := make(map[string]string)
+	for _, a := range cache.All() {
+		role := a.Role
+		for _, ch := range a.ListensFor {
+			if static[ch] {
+				continue
+			}
+			if prev, dup := owner[ch]; dup {
+				if prev != role {
+					logger.Warn("roster route conflict; first registration wins",
+						"channel", ch, "registered_role", prev, "skipped_role", role)
+				}
+				continue
+			}
+			owner[ch] = role
+			handlerRole := role
+			routes[ch] = func(ctx context.Context, eventID pgtype.UUID) error {
+				return spawn.Spawn(ctx, spawnDeps, eventID, handlerRole)
+			}
+			logger.Info("roster route registered", "channel", ch, "role", role)
+		}
+	}
+	return routes
 }
 
 // buildDispatcherWithExtras composes the dispatcher with the

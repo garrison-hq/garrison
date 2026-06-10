@@ -316,8 +316,17 @@ func skillsJSONFromProposal(prop store.HiringProposal) ([]byte, error) {
 // defaultListensForJSON gives a fresh hire a department-scoped
 // listens_for shape. Operator can edit via update_agent_md or future
 // M7 dashboard surfaces; this is the always-safe baseline.
+//
+// Channels follow the post-M5.4 column semantics the engineering
+// statics use: `todo` is an operator triage backlog with NO spawn
+// channel, so a new hire spawns on tickets created directly in
+// `in_dev` plus operator drags todo→in_dev. The original
+// `created.<dept>.todo` default pointed at a channel nothing
+// dispatches — a hire with it never received work.
 func defaultListensForJSON(deptSlug string) []byte {
-	return []byte(fmt.Sprintf(`["work.ticket.created.%s.todo"]`, deptSlug))
+	return []byte(fmt.Sprintf(
+		`["work.ticket.created.%s.in_dev","work.ticket.transitioned.%s.todo.in_dev"]`,
+		deptSlug, deptSlug))
 }
 
 // defaultAgentModel is the model new hires inherit by default. Override

@@ -146,3 +146,19 @@ func (c *Cache) Len() int {
 	defer c.mu.RUnlock()
 	return len(c.byDeptRole)
 }
+
+// All returns a snapshot slice of every cached agent. main.go uses it
+// at boot to derive per-department dispatch routes from listens_for —
+// the wiring this package's Agent doc has promised since T014. The
+// dispatcher's route table stays frozen after construction (FR-014),
+// so All reflects boot-time state; agents hired later dispatch after
+// the next supervisor restart.
+func (c *Cache) All() []Agent {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	out := make([]Agent, 0, len(c.byDeptRole))
+	for _, a := range c.byDeptRole {
+		out = append(out, a)
+	}
+	return out
+}
