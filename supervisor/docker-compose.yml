@@ -264,6 +264,13 @@ services:
       GARRISON_MCP_CONFIG_DIR: ${GARRISON_SHARED_DIR:+${GARRISON_SHARED_DIR}/mcp/}
       GARRISON_SUPERVISOR_BIN_OVERRIDE: ${GARRISON_SHARED_DIR:+${GARRISON_SHARED_DIR}/bin/supervisor}
       GARRISON_DOCKER_BIN: ${GARRISON_SHARED_DIR:+${GARRISON_SHARED_DIR}/bin/docker}
+      # claude 2.1.170 defers MCP tools behind its ToolSearch built-in
+      # when a server connects after the first model call; for ticket
+      # agents that can strand finalize/mempalace/pgmcp mid-run
+      # (observed as finalize_never_called). Direct-exec spawns inherit
+      # the supervisor's environment, so force upfront MCP tool loading
+      # here. The chat container gets the same via dockerRunArgs.
+      ENABLE_TOOL_SEARCH: "false"
       # M5.1 — chat containers join this Docker network to reach
       # postgres + mempalace by DNS. The config default (garrison-net)
       # predates the compose stack, whose network is supervisor_default.

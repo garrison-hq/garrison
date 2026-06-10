@@ -196,6 +196,13 @@ func dockerRunArgs(deps Deps, mcpHostPath string, tokenEnv string, supervisorBin
 	args := []string{
 		"run", "--rm", "-i",
 		"-e", tokenEnv,
+		// claude 2.1.170 defers MCP tools behind the ToolSearch built-in
+		// when a server connects after the first model call; `--tools ""`
+		// below strips ToolSearch, stranding deferred MCP tools and
+		// leaving the turn with no garrison verbs at all. Forcing all
+		// MCP tools to load upfront restores the 2.1.117 baseline the
+		// M5.1 design assumes (the chat config is 3 small servers).
+		"-e", "ENABLE_TOOL_SEARCH=false",
 		"-v", mcpHostPath + ":/etc/garrison/mcp.json:ro",
 	}
 	// M5.1 chat container needs the supervisor binary at the path the
