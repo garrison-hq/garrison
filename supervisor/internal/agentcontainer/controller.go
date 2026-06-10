@@ -67,6 +67,16 @@ type Controller interface {
 	// supervisor startup (FR-214) before normal lifecycle resumes.
 	Reconcile(ctx context.Context, expected []ExpectedContainer) (ReconcileReport, error)
 
+	// ReconcileShape converges every container addressed by
+	// ContainerName(spec.AgentID) to the desired create shape (FR-007,
+	// M7.1 boot reconcile): missing → create+start; shape-hash label
+	// absent or stale → stop+remove+create+start; hash match but
+	// stopped → start; hash match and running → no-op. Containers it
+	// doesn't address by name (chat, compose services) are never
+	// touched. Per-spec failures accumulate into the returned error
+	// while the walk continues; the report covers what succeeded.
+	ReconcileShape(ctx context.Context, specs []ContainerSpec) (ShapeReport, error)
+
 	// ImageDigest returns the pinned RepoDigest for the given image
 	// reference. Used by migrate7 + approve helpers (decision #22):
 	// agents.image_digest is set to this value at activation, and
@@ -193,6 +203,20 @@ type ReconcileMismatch struct {
 	Expected   ExpectedState
 	ActualKind string // from the Docker State.Status (e.g. "exited")
 	Reason     string
+}
+
+// ShapeReport summarises one boot shape reconcile pass (FR-007). Each
+// slice carries agent IDs. Event recording stays out of this package:
+// the caller in cmd/supervisor writes the agent_container_events rows
+// from the report — a `removed`+`created` pair per Recreated agent,
+// `created` per Created, `started` per Restarted; Unchanged writes
+// nothing (SC-005: a repeat boot with no shape change is all-Unchanged
+// and performs zero container mutations).
+type ShapeReport struct {
+	Created   []string // no container existed; created + started
+	Recreated []string // shape-hash label absent or stale; removed, recreated, started
+	Restarted []string // hash matched but container was stopped; started
+	Unchanged []string // hash matched, running; untouched
 }
 
 // Sentinel errors. Callers route on errors.Is.

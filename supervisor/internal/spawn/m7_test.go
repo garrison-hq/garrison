@@ -61,6 +61,9 @@ func (f *fakeController) ConnectNetwork(ctx context.Context, id, name string) er
 func (f *fakeController) Reconcile(ctx context.Context, expected []agentcontainer.ExpectedContainer) (agentcontainer.ReconcileReport, error) {
 	return agentcontainer.ReconcileReport{}, nil
 }
+func (f *fakeController) ReconcileShape(ctx context.Context, specs []agentcontainer.ContainerSpec) (agentcontainer.ShapeReport, error) {
+	return agentcontainer.ShapeReport{}, nil
+}
 func (f *fakeController) ImageDigest(ctx context.Context, ref string) (string, error) {
 	return "sha256:fake", nil
 }

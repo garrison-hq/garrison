@@ -1092,8 +1092,112 @@ func buildAgentContainerRuntime(
 		logger.Warn("migrate7: grandfathering failed; continuing on direct-exec (degrade-with-warning)", "err", err)
 	}
 
+	// M7.1 (T007): boot shape reconcile — converge every agent-owned
+	// container (grandfathered AND hired; host_uid IS NOT NULL) to the
+	// current create shape (FR-007). Runs right after migrate7 so
+	// freshly grandfathered containers reconcile as Unchanged. Same
+	// degrade posture as migrate7: failures warn and continue; a
+	// broken container surfaces per-spawn as spawn_failed retryable
+	// and the next boot repairs.
+	runBootShapeReconcile(ctx, cfg, queries, ctrl, supervisorBin, logger)
+
 	if !cfg.UseDirectExec {
 		logger.Error("config: GARRISON_USE_DIRECT_EXEC=false requested, but the container exec path is an outline pending the container-pipeline milestone; forcing direct-exec to avoid fabricated run results")
 	}
 	return ctrl, true
+}
+
+// runBootShapeReconcile lists every container-owning agent, ensures
+// each agent-ID-keyed workspace dir host-side (FR-006 — the
+// identical-path compose bind makes this MkdirAll land at the docker
+// daemon's bind source), builds the desired specs via the single
+// per-agent source, converges the fleet via ReconcileShape, and writes
+// agent_container_events rows from the report (plan §3/§9): a
+// removed+created pair per Recreated agent, created per Created,
+// started per Restarted. Every failure is warn-and-continue.
+func runBootShapeReconcile(
+	ctx context.Context,
+	cfg *config.Config,
+	queries *store.Queries,
+	ctrl agentcontainer.Controller,
+	supervisorBin string,
+	logger *slog.Logger,
+) {
+	rows, err := queries.ListAgentsForContainerReconcile(ctx)
+	if err != nil {
+		logger.Warn("shape-reconcile: list agents failed; skipping (next boot retries)", "err", err)
+		return
+	}
+	if len(rows) == 0 {
+		logger.Info("shape-reconcile: no container-owning agents; nothing to do")
+		return
+	}
+
+	specs := make([]agentcontainer.ContainerSpec, 0, len(rows))
+	agentRows := make(map[string]store.ListAgentsForContainerReconcileRow, len(rows))
+	for _, row := range rows {
+		agentID := uuidString(row.ID)
+		if agentID == "" || row.HostUid == nil || row.ImageDigest == nil || *row.ImageDigest == "" {
+			logger.Warn("shape-reconcile: agent missing host_uid/image_digest; skipping",
+				"agent_id", agentID, "role_slug", row.RoleSlug)
+			continue
+		}
+		spec := agentcontainer.SpecForAgent(agentcontainer.AgentSpecParams{
+			AgentID:       agentID,
+			RoleSlug:      row.RoleSlug,
+			ImageDigest:   *row.ImageDigest,
+			HostUID:       int(*row.HostUid),
+			WorkspaceFS:   cfg.AgentWorkspaceFS,
+			SkillsFS:      cfg.AgentSkillsFS,
+			NetworkName:   cfg.AgentsNetwork,
+			SupervisorBin: supervisorBin,
+			Memory:        cfg.DefaultContainerMemory,
+			CPUs:          cfg.DefaultContainerCPUs,
+			PIDsLimit:     cfg.DefaultContainerPIDsLim,
+		})
+		if err := os.MkdirAll(spec.Workspace, 0o755); err != nil {
+			logger.Warn("shape-reconcile: mkdir workspace failed; skipping agent",
+				"agent_id", agentID, "workspace", spec.Workspace, "err", err)
+			continue
+		}
+		specs = append(specs, spec)
+		agentRows[agentID] = row
+	}
+
+	report, err := ctrl.ReconcileShape(ctx, specs)
+	if err != nil {
+		logger.Warn("shape-reconcile: completed with errors (warn-and-continue; next boot repairs)", "err", err)
+	}
+
+	writeEvent := func(agentID, kind string) {
+		row, ok := agentRows[agentID]
+		if !ok {
+			return
+		}
+		if _, err := queries.InsertAgentContainerEvent(ctx, store.InsertAgentContainerEventParams{
+			AgentID:     row.ID,
+			Kind:        kind,
+			ImageDigest: row.ImageDigest,
+		}); err != nil {
+			logger.Warn("shape-reconcile: insert agent_container_events failed",
+				"agent_id", agentID, "kind", kind, "err", err)
+		}
+	}
+	for _, id := range report.Recreated {
+		writeEvent(id, "removed")
+		writeEvent(id, "created")
+	}
+	for _, id := range report.Created {
+		writeEvent(id, "created")
+	}
+	for _, id := range report.Restarted {
+		writeEvent(id, "started")
+	}
+
+	logger.Info("shape-reconcile: complete",
+		"created", len(report.Created),
+		"recreated", len(report.Recreated),
+		"restarted", len(report.Restarted),
+		"unchanged", len(report.Unchanged),
+	)
 }

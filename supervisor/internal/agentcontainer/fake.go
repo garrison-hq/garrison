@@ -67,6 +67,10 @@ type FakeContainerState struct {
 	Spec     ContainerSpec
 	State    string // "created", "running", "stopped", "removed"
 	Networks []string
+	// Labels mirrors the create body's label set (including the shape
+	// hash) so ReconcileShape can classify recreate-vs-noop. Tests
+	// seed old-shape containers by clearing or staling the map.
+	Labels map[string]string
 }
 
 // NewFakeController constructs an empty fake.
@@ -86,7 +90,14 @@ func (f *FakeController) Create(_ context.Context, spec ContainerSpec) (string, 
 	}
 	f.nextID++
 	id := fmt.Sprintf("fake-container-%d", f.nextID)
-	f.Containers[id] = &FakeContainerState{Spec: spec, State: "created"}
+	st := &FakeContainerState{Spec: spec, State: "created"}
+	// Best-effort label mirror: specs too sparse for buildCreateBody
+	// (older tests) simply get no labels, which ReconcileShape treats
+	// as old-shape — exactly like the real unlabeled fleet.
+	if body, err := buildCreateBody(spec); err == nil {
+		st.Labels = body.Labels
+	}
+	f.Containers[id] = st
 	f.Calls = append(f.Calls, FakeCall{Method: "Create", Spec: spec, ID: id})
 	return id, nil
 }
@@ -243,6 +254,72 @@ func (f *FakeController) Reconcile(_ context.Context, expected []ExpectedContain
 		}
 	}
 	return report, nil
+}
+
+// ReconcileShape mirrors the production algorithm against the
+// in-memory state: per spec it finds the container whose Spec.AgentID
+// matches, compares the stored label set's shape hash to the desired
+// one, and converges via the fake's own Create/Start/Stop/Remove so
+// the Calls log records the same sequence the real impl would issue.
+func (f *FakeController) ReconcileShape(ctx context.Context, specs []ContainerSpec) (ShapeReport, error) {
+	report := ShapeReport{}
+	for _, spec := range specs {
+		desired, err := buildCreateBody(spec)
+		if err != nil {
+			return report, err
+		}
+		desiredHash := desired.Labels[shapeHashLabel]
+
+		id, labels, state, found := f.findByAgentID(spec.AgentID)
+		switch {
+		case !found:
+			if err := f.fakeCreateAndStart(ctx, spec); err != nil {
+				return report, err
+			}
+			report.Created = append(report.Created, spec.AgentID)
+		case labels[shapeHashLabel] != desiredHash:
+			if err := f.Stop(ctx, id); err != nil {
+				return report, err
+			}
+			if err := f.Remove(ctx, id); err != nil {
+				return report, err
+			}
+			if err := f.fakeCreateAndStart(ctx, spec); err != nil {
+				return report, err
+			}
+			report.Recreated = append(report.Recreated, spec.AgentID)
+		case state != "running":
+			if err := f.Start(ctx, id); err != nil {
+				return report, err
+			}
+			report.Restarted = append(report.Restarted, spec.AgentID)
+		default:
+			report.Unchanged = append(report.Unchanged, spec.AgentID)
+		}
+	}
+	return report, nil
+}
+
+// findByAgentID snapshots the matching container's identity and state
+// under the lock; ReconcileShape's mutations go through the public
+// methods, which take the lock per call.
+func (f *FakeController) findByAgentID(agentID string) (id string, labels map[string]string, state string, found bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for cid, st := range f.Containers {
+		if st.Spec.AgentID == agentID {
+			return cid, st.Labels, st.State, true
+		}
+	}
+	return "", nil, "", false
+}
+
+func (f *FakeController) fakeCreateAndStart(ctx context.Context, spec ContainerSpec) error {
+	id, err := f.Create(ctx, spec)
+	if err != nil {
+		return err
+	}
+	return f.Start(ctx, id)
 }
 
 func (f *FakeController) ImageDigest(_ context.Context, _ string) (string, error) {

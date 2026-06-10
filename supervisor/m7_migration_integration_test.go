@@ -53,6 +53,9 @@ func (f *fakeMigrationController) ConnectNetwork(ctx context.Context, id, name s
 func (f *fakeMigrationController) Reconcile(ctx context.Context, expected []agentcontainer.ExpectedContainer) (agentcontainer.ReconcileReport, error) {
 	return agentcontainer.ReconcileReport{}, nil
 }
+func (f *fakeMigrationController) ReconcileShape(ctx context.Context, specs []agentcontainer.ContainerSpec) (agentcontainer.ShapeReport, error) {
+	return agentcontainer.ShapeReport{}, nil
+}
 func (f *fakeMigrationController) ImageDigest(ctx context.Context, ref string) (string, error) {
 	return "sha256:fakedigest", nil
 }
