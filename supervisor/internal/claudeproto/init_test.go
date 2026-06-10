@@ -79,3 +79,22 @@ func TestCheckMCPHealthEmptyServers(t *testing.T) {
 		t.Fatalf("expected ok=true for zero-length slice")
 	}
 }
+
+// TestCheckMCPHealthPendingIsHealthy pins the FR-108 amendment for
+// Claude Code >= 2.1.170: the init frame is emitted optimistically, so
+// "pending" servers are healthy-but-connecting, not fatal. A wedged
+// server still fails closed downstream (finalize-pending exit path).
+func TestCheckMCPHealthPendingIsHealthy(t *testing.T) {
+	servers := []MCPServer{
+		{Name: "postgres", Status: "connected"},
+		{Name: "finalize", Status: "pending"},
+	}
+	ok, name, status := CheckMCPHealth(servers)
+	if !ok || name != "" || status != "" {
+		t.Fatalf("CheckMCPHealth = (%v,%q,%q); want (true,\"\",\"\")", ok, name, status)
+	}
+	pending := PendingMCPServers(servers)
+	if len(pending) != 1 || pending[0] != "finalize" {
+		t.Fatalf("PendingMCPServers = %v; want [finalize]", pending)
+	}
+}

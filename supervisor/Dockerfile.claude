@@ -13,10 +13,16 @@
 
 FROM node:22-slim AS install
 
-ARG CLAUDE_CODE_VERSION=2.1.86
+ARG CLAUDE_CODE_VERSION=2.1.170
 
+# --ignore-scripts keeps arbitrary dependency postinstalls from
+# executing during npm install (supply-chain posture). Since ~2.1.9x
+# the package ships a thin npm wrapper whose postinstall downloads the
+# platform-native claude binary — so that ONE known script is invoked
+# explicitly afterwards (upstream-documented manual path: install.cjs).
 RUN npm install -g --no-fund --no-audit --no-progress --ignore-scripts \
         "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+ && node /usr/local/lib/node_modules/@anthropic-ai/claude-code/install.cjs \
  && claude --version | grep "${CLAUDE_CODE_VERSION}" >/dev/null \
  && echo "verified claude-code ${CLAUDE_CODE_VERSION}"
 
