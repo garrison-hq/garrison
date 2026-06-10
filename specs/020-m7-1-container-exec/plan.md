@@ -186,7 +186,7 @@ separate API (D5).
 | `NetworkMode` | `"none"` placeholder | `spec.NetworkName` = the agents network (FR-012 supersedes `none`) |
 | `Binds` | workspace + skills | + `<spec.SupervisorBin>:/usr/local/bin/garrison-supervisor:ro` (F6, FR-014) |
 | `Labels` | `garrison.agent_id`, `garrison.managed` | + `garrison.shape_hash` |
-| `Env` | (whatever the spec carried) | **always empty** — container-level Env is banned (FR-002) |
+| `Env` | (whatever the spec carried) | **always empty**; the unused `ContainerSpec.EnvVars` field is deleted outright (FR-002 structural — analyze C2) |
 
 Caps (`ReadonlyRootfs`, `CapDrop ALL`, memory/CPU/pids, unprivileged user) are
 unchanged — sealed M7 surface (Rules 2/5).
@@ -266,7 +266,8 @@ type transport struct {
 `sessionParams` carries what the block already closes over: instance/event/
 ticket IDs, role + origin column, agent, dept, wake-up stdout/status,
 finalize expectations + onCommit wiring, from/to columns, the acceptance-gate
-workspace path. The drain-before-Wait ordering (concurrency rule 8) lives
+workspace path (on the container transport this is the agent-ID-keyed dir
+`<WorkspaceFS>/<agent-uuid>` — analyze U1). The drain-before-Wait ordering (concurrency rule 8) lives
 inside the runner: `ExitDetail` is only called after `pipelineDone` and
 `stderrDone` close. Direct-exec behavior is byte-identical; the existing spawn
 and pipeline test suites must pass unchanged — that is the refactor's
@@ -397,9 +398,10 @@ main-DSN garrison-mutate in agent mode — trust model unchanged).
    unchanged.
 2. After `migrate7.Run` (which now builds specs via `SpecForAgent` — new shape,
    agent-ID workspace keying, agents network): list reconcile targets via the
-   new sqlc query `ListGrandfatheredAgentsForReconcile` (`SELECT id,
-   role_slug, host_uid, image_digest FROM agents WHERE last_grandfathered_at
-   IS NOT NULL`), MkdirAll each workspace dir, build specs, call
+   new sqlc query `ListAgentsForContainerReconcile` (`SELECT id,
+   role_slug, host_uid, image_digest FROM agents WHERE host_uid IS NOT
+   NULL` — covers grandfathered AND hired agents; hired agents never receive
+   `last_grandfathered_at`, analyze finding C1), MkdirAll each workspace dir, build specs, call
    `ReconcileShape`, and write `agent_container_events` rows from the report
    (§3). Boot order means agents migrate7 just created reconcile as
    `Unchanged`.
@@ -478,7 +480,7 @@ since M2.2.1).
 
 ### 12. sqlc additions
 
-One new query (`ListGrandfatheredAgentsForReconcile`, §9). Reuse the existing
+One new query (`ListAgentsForContainerReconcile`, §9). Reuse the existing
 `agent_container_events` insert and `UpdateInstanceM7Hashes` queries. No
 Drizzle/dashboard changes. No schema migration beyond §11's data-only one.
 
