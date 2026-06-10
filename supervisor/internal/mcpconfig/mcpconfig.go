@@ -286,6 +286,12 @@ type WriteParams struct {
 	Finalize         FinalizeParams
 	GarrisonMutate   GarrisonMutateParams
 	ExtraServersJSON []byte
+	// OmitMempalace suppresses the mempalace entry even when Mempalace
+	// is enabled. The M7.1 container path sets it (FR-014, Q1): the
+	// in-container config carries exactly postgres + finalize +
+	// garrison-mutate — mid-turn MemPalace access is not available
+	// inside agent containers. Direct-exec callers leave it false.
+	OmitMempalace bool
 }
 
 // Write creates the per-invocation MCP config file. Returns the absolute
@@ -319,15 +325,35 @@ func WriteWithOps(_ context.Context, ops fileOps, p WriteParams) (string, error)
 	if p.Dir == "" {
 		return "", errors.New("mcpconfig: dir is empty")
 	}
+	data, fileName, err := Render(p)
+	if err != nil {
+		return "", err
+	}
+	filePath := filepath.Join(p.Dir, fileName)
+	if err := ops.WriteFile(filePath, data, 0o600); err != nil {
+		return "", fmt.Errorf("mcpconfig: write %s: %w", filePath, err)
+	}
+	return filePath, nil
+}
+
+// Render composes and validates the per-invocation MCP config without
+// touching disk (M7.1 FR-014, plan D16). It returns the marshaled JSON
+// bytes and the basename mcp-config-<instance-uuid>.json. Write is
+// Render-then-write-file; the container path Renders and pipes the bytes
+// into an in-container write exec instead, so the host filesystem never
+// carries the config. Rule 3 (RejectVaultServers) runs here so the check
+// is mode-independent: no vault-proxying config is ever produced,
+// regardless of where the bytes end up.
+func Render(p WriteParams) ([]byte, string, error) {
 	if p.SupervisorBin == "" {
-		return "", errors.New("mcpconfig: supervisorBin is empty")
+		return nil, "", errors.New("mcpconfig: supervisorBin is empty")
 	}
 	// Canonicalize the UUID to its textual form for the filename.
 	idText, err := formatUUID(p.InstanceID)
 	if err != nil {
-		return "", fmt.Errorf("mcpconfig: format instanceID: %w", err)
+		return nil, "", fmt.Errorf("mcpconfig: format instanceID: %w", err)
 	}
-	filePath := filepath.Join(p.Dir, "mcp-config-"+idText+".json")
+	fileName := "mcp-config-" + idText + ".json"
 
 	servers := map[string]mcpServerSpec{
 		"postgres": {
@@ -336,7 +362,7 @@ func WriteWithOps(_ context.Context, ops fileOps, p WriteParams) (string, error)
 			Env:     map[string]string{"GARRISON_PGMCP_DSN": p.DSN},
 		},
 	}
-	if p.Mempalace.enabled() {
+	if p.Mempalace.enabled() && !p.OmitMempalace {
 		command, args, env := mempalace.MCPServerSpec(mempalace.SpecConfig{
 			DockerBin:          p.Mempalace.DockerBin,
 			MempalaceContainer: p.Mempalace.MempalaceContainer,
@@ -387,7 +413,7 @@ func WriteWithOps(_ context.Context, ops fileOps, p WriteParams) (string, error)
 	if len(p.ExtraServersJSON) > 0 && string(p.ExtraServersJSON) != "{}" {
 		var extra map[string]mcpServerSpec
 		if err := json.Unmarshal(p.ExtraServersJSON, &extra); err != nil {
-			return "", fmt.Errorf("mcpconfig: parse extraServersJSON: %w", err)
+			return nil, "", fmt.Errorf("mcpconfig: parse extraServersJSON: %w", err)
 		}
 		for name, spec := range extra {
 			servers[name] = spec
@@ -400,20 +426,16 @@ func WriteWithOps(_ context.Context, ops fileOps, p WriteParams) (string, error)
 	// ever reaches disk. The error is classified into ExitVaultMCPInConfig
 	// by the spawn path (T008).
 	if err := RejectVaultServers(cfg); err != nil {
-		return "", err
+		return nil, "", err
 	}
 
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		// encoding/json never errors for this shape, but surface it
 		// anyway so the caller isn't surprised on a future schema bump.
-		return "", fmt.Errorf("mcpconfig: marshal: %w", err)
+		return nil, "", fmt.Errorf("mcpconfig: marshal: %w", err)
 	}
-
-	if err := ops.WriteFile(filePath, data, 0o600); err != nil {
-		return "", fmt.Errorf("mcpconfig: write %s: %w", filePath, err)
-	}
-	return filePath, nil
+	return data, fileName, nil
 }
 
 // Remove deletes the per-invocation config file. Tolerant of

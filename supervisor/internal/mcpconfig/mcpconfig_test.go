@@ -584,6 +584,122 @@ func TestWriteWithOpsExtraServersBannedName(t *testing.T) {
 	}
 }
 
+// ------------------------------------------------------------------
+// M7.1 — T008 tests for the Render split + container server set.
+// ------------------------------------------------------------------
+
+// renderParams returns a representative full-fat WriteParams set: all
+// four server families enabled plus a clean extra entry, exercising
+// every composition branch Render and Write share.
+func renderParams(t *testing.T) WriteParams {
+	t.Helper()
+	return WriteParams{
+		InstanceID:    mustUUID(t, "dddddddd-dddd-4ddd-8ddd-dddddddddddd"),
+		SupervisorBin: "/usr/local/bin/supervisor",
+		DSN:           "postgres://garrison_agent_ro:pw@localhost/garrison",
+		Mempalace: MempalaceParams{
+			DockerBin:          "/usr/bin/docker",
+			MempalaceContainer: "garrison-mempalace",
+			PalacePath:         "/palace",
+			DockerHost:         "tcp://garrison-docker-proxy:2375",
+		},
+		Finalize: FinalizeParams{
+			SupervisorBin:   "/usr/local/bin/supervisor",
+			AgentInstanceID: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+			DatabaseURL:     "postgres://garrison_agent_ro:pw@localhost/garrison",
+		},
+		GarrisonMutate: GarrisonMutateParams{
+			SupervisorBin:   "/usr/local/bin/supervisor",
+			AgentInstanceID: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+			DatabaseURL:     "postgres://garrison:pw@localhost/garrison",
+		},
+		ExtraServersJSON: []byte(`{"github":{"command":"/usr/bin/gh"}}`),
+	}
+}
+
+// TestRenderMatchesWriteOutput pins the Render/Write split (M7.1 FR-014):
+// Render's bytes must be byte-identical to what Write puts on disk for
+// the same params, and the returned basename must match the filename
+// Write derives. The container path replaces only the I/O step, never
+// the composed content.
+func TestRenderMatchesWriteOutput(t *testing.T) {
+	p := renderParams(t)
+	p.Dir = t.TempDir()
+
+	data, fileName, err := Render(p)
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if want := "mcp-config-dddddddd-dddd-4ddd-8ddd-dddddddddddd.json"; fileName != want {
+		t.Errorf("fileName: got %q, want %q", fileName, want)
+	}
+
+	path, err := Write(context.Background(), p)
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if got := filepath.Base(path); got != fileName {
+		t.Errorf("Write basename %q != Render fileName %q", got, fileName)
+	}
+	written, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read written file: %v", err)
+	}
+	if string(written) != string(data) {
+		t.Errorf("Render bytes differ from Write file content:\nRender:\n%s\nWrite:\n%s", data, written)
+	}
+}
+
+// TestRenderOmitMempalaceForContainerPath pins the container server set
+// (FR-014, Q1): with OmitMempalace set, the config carries exactly
+// postgres + finalize + garrison-mutate even though MempalaceParams are
+// enabled — mid-turn MemPalace access is not available inside agent
+// containers.
+func TestRenderOmitMempalaceForContainerPath(t *testing.T) {
+	p := renderParams(t)
+	p.ExtraServersJSON = nil
+	p.OmitMempalace = true
+
+	data, _, err := Render(p)
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	var cfg chatConfigCfg
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	want := map[string]struct{}{"postgres": {}, "finalize": {}, "garrison-mutate": {}}
+	if got := len(cfg.MCPServers); got != 3 {
+		t.Errorf("len(mcpServers) = %d; want 3 (postgres + finalize + garrison-mutate)", got)
+	}
+	for name := range cfg.MCPServers {
+		if _, ok := want[name]; !ok {
+			t.Errorf("unexpected server %q in container MCP config", name)
+		}
+		delete(want, name)
+	}
+	for missing := range want {
+		t.Errorf("missing expected server %q", missing)
+	}
+}
+
+// TestRenderStillRejectsVaultPatternServers pins Rule 3's mode
+// independence: the banned-pattern check runs inside Render, so a
+// vault-pattern server is rejected whether the bytes are headed for the
+// host filesystem (direct-exec) or an in-container write exec
+// (OmitMempalace container path).
+func TestRenderStillRejectsVaultPatternServers(t *testing.T) {
+	for _, omit := range []bool{false, true} {
+		p := renderParams(t)
+		p.OmitMempalace = omit
+		p.ExtraServersJSON = []byte(`{"vault":{"command":"/bad/bin"}}`)
+		_, _, err := Render(p)
+		if !errors.Is(err, ErrVaultMCPBanned) {
+			t.Errorf("OmitMempalace=%v: expected ErrVaultMCPBanned, got %v", omit, err)
+		}
+	}
+}
+
 // chatConfigCfg is the minimal struct for decoding BuildChatConfig output.
 // Lives at file scope so the M5.1 BuildChatConfig tests below can share it.
 type chatConfigCfg struct {
