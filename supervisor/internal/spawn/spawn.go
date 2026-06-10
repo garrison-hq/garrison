@@ -741,6 +741,18 @@ func runRealClaude(
 
 	cmd := exec.CommandContext(execCtx, deps.ClaudeBin, argv...)
 	if dept.WorkspacePath != nil && *dept.WorkspacePath != "" {
+		// The per-department workspace only exists if something created
+		// it: the Dockerfile bakes the base dir, not per-dept subdirs,
+		// and container recreation wipes runtime-created ones. A missing
+		// cmd.Dir makes cmd.Start fail with a misleading
+		// "fork/exec <claude>: no such file or directory" (the ENOENT is
+		// for the dir, not the binary). Ensure it exists per spawn;
+		// hired departments (M7) get their workspace on first dispatch.
+		if err := os.MkdirAll(*dept.WorkspacePath, 0o755); err != nil {
+			logger.Error("workspace MkdirAll failed; recording spawn_failed",
+				"workspace_path", *dept.WorkspacePath, "err", err)
+			return writeFail(ExitSpawnFailed)
+		}
 		cmd.Dir = *dept.WorkspacePath
 	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
