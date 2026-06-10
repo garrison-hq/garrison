@@ -287,8 +287,31 @@ func composeApproveHireAgentMD(prop store.HiringProposal) string {
 	if prop.SkillsSummaryMd != nil && *prop.SkillsSummaryMd != "" {
 		skills = "\n\n## Skills\n\n" + *prop.SkillsSummaryMd
 	}
-	return fmt.Sprintf("# %s\n\n%s%s\n", prop.RoleTitle, prop.JustificationMd, skills)
+	return fmt.Sprintf("# %s\n\n%s%s\n%s", prop.RoleTitle, prop.JustificationMd, skills, hiredAgentWorkingProtocol)
 }
+
+// hiredAgentWorkingProtocol is the finalize discipline every synthesized
+// agent.md carries. Without it the first live copy-editor run answered
+// the ticket as plain text and never called finalize_ticket — the
+// supervisor fail-closed with finalize_never_called and the ticket
+// stalled in in_dev (2026-06-10 acceptance run). Mirrors the calibrated
+// M2.2.2 engineer baseline in compressed form; operators refine via
+// update_agent_md.
+const hiredAgentWorkingProtocol = `
+## Working protocol (non-negotiable)
+
+You work ONE ticket per invocation. Your run only counts if you finish
+by calling the ` + "`finalize_ticket`" + ` tool (mcp__finalize__finalize_ticket)
+exactly once with your structured reflection: outcome, artifacts,
+blockers, diary entry, and KG triples. Producing the deliverable as
+plain text WITHOUT calling finalize_ticket is a failed run — the
+supervisor marks it finalize_never_called and the ticket stalls.
+
+1. Read the ticket objective; consult MemPalace for context.
+2. Produce the deliverable.
+3. Call finalize_ticket. If it returns a schema error, fix the named
+   field and call it again — do not give up after one attempt.
+`
 
 // skillsJSONFromProposal extracts the `add` array from a skill_change
 // proposal's snapshot, falling back to an empty array. New-agent
