@@ -54,6 +54,10 @@ var allEnvVars = []string{
 	// M8 additions
 	"GARRISON_MCPJUNGLE_URL",
 	"GARRISON_MCPJUNGLE_ADMIN_TOKEN_PATH",
+	// M7.1 additions
+	"GARRISON_AGENTS_NETWORK",
+	"GARRISON_EGRESS_PROXY_URL",
+	"GARRISON_USE_DIRECT_EXEC",
 }
 
 // clearAll unsets every GARRISON_* env var the config package reads, so a test
@@ -939,6 +943,50 @@ func TestM8MCPJungleEnvVarsDefault(t *testing.T) {
 	}
 	if cfg.MCPJungleAdminTokenPath != "mcpjungle/admin" {
 		t.Errorf("MCPJungleAdminTokenPath = %q; want mcpjungle/admin", cfg.MCPJungleAdminTokenPath)
+	}
+}
+
+// TestAgentsNetworkAndEgressProxyDefaults — M7.1 knobs (plan §8): with
+// no env set, the agents network defaults to the compose network name
+// and the egress proxy URL to the squid sidecar's service DNS.
+// UseDirectExec keeps its true default in this task — the flip is
+// T012's single behavior-change commit.
+func TestAgentsNetworkAndEgressProxyDefaults(t *testing.T) {
+	clearAll(t)
+	t.Setenv("GARRISON_DATABASE_URL", validDBURL)
+	t.Setenv("GARRISON_FAKE_AGENT_CMD", validFakeCmd)
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.AgentsNetwork != "garrison-agents" {
+		t.Errorf("AgentsNetwork default = %q; want garrison-agents", cfg.AgentsNetwork)
+	}
+	if cfg.EgressProxyURL != "http://garrison-egress-proxy:3128" {
+		t.Errorf("EgressProxyURL default = %q; want http://garrison-egress-proxy:3128", cfg.EgressProxyURL)
+	}
+	if !cfg.UseDirectExec {
+		t.Error("UseDirectExec default = false; must stay true until T012 flips it")
+	}
+}
+
+// TestAgentsNetworkAndEgressProxyOverrides — env overrides land in the
+// config struct verbatim.
+func TestAgentsNetworkAndEgressProxyOverrides(t *testing.T) {
+	clearAll(t)
+	t.Setenv("GARRISON_DATABASE_URL", validDBURL)
+	t.Setenv("GARRISON_FAKE_AGENT_CMD", validFakeCmd)
+	t.Setenv("GARRISON_AGENTS_NETWORK", "garrison-agents-staging")
+	t.Setenv("GARRISON_EGRESS_PROXY_URL", "http://egress-staging:3128")
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.AgentsNetwork != "garrison-agents-staging" {
+		t.Errorf("AgentsNetwork = %q; want override", cfg.AgentsNetwork)
+	}
+	if cfg.EgressProxyURL != "http://egress-staging:3128" {
+		t.Errorf("EgressProxyURL = %q; want override", cfg.EgressProxyURL)
 	}
 }
 

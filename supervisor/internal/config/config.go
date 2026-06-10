@@ -179,6 +179,14 @@ type Config struct {
 	// URLForCustomer seam in internal/mcpjungle.
 	MCPJungleURL            string // GARRISON_MCPJUNGLE_URL, required in non-fake-agent mode
 	MCPJungleAdminTokenPath string // GARRISON_MCPJUNGLE_ADMIN_TOKEN_PATH, default "mcpjungle/admin"
+
+	// M7.1 fields. The agents network is the internal compose network
+	// agent containers join at create time (FR-012); the egress proxy
+	// is the only route out of it (FR-009) and lands in claude execs as
+	// HTTPS_PROXY (T011). UseDirectExec above keeps its true default
+	// until T012 flips it.
+	AgentsNetwork  string // GARRISON_AGENTS_NETWORK, default "garrison-agents"
+	EgressProxyURL string // GARRISON_EGRESS_PROXY_URL, default "http://garrison-egress-proxy:3128"
 }
 
 // DefaultMinIOBucket per M5.4 spec FR-620.
@@ -291,6 +299,10 @@ func Load() (*Config, error) {
 		// M8 defaults.
 		MCPJungleURL:            "",
 		MCPJungleAdminTokenPath: "mcpjungle/admin",
+
+		// M7.1 defaults.
+		AgentsNetwork:  "garrison-agents",
+		EgressProxyURL: "http://garrison-egress-proxy:3128",
 	}
 
 	// M5.1 env overrides — all optional; defaults above are used
@@ -441,6 +453,14 @@ func Load() (*Config, error) {
 	}
 	if v := os.Getenv("GARRISON_MCPJUNGLE_ADMIN_TOKEN_PATH"); v != "" {
 		cfg.MCPJungleAdminTokenPath = v
+	}
+
+	// M7.1 env overrides.
+	if v := os.Getenv("GARRISON_AGENTS_NETWORK"); v != "" {
+		cfg.AgentsNetwork = v
+	}
+	if v := os.Getenv("GARRISON_EGRESS_PROXY_URL"); v != "" {
+		cfg.EgressProxyURL = v
 	}
 
 	dbURL := os.Getenv("GARRISON_DATABASE_URL")

@@ -235,7 +235,7 @@ func runDaemon() int {
 	// → mcpjungle reconcile). Degrades with a warning on failure (same
 	// posture as MCPJungle per FR-308): the supervisor continues on the
 	// direct-exec path rather than refusing to boot.
-	agentCtrl, useDirectExec := buildAgentContainerRuntime(ctx, cfg, pool, queries, logger)
+	agentCtrl, useDirectExec := buildAgentContainerRuntime(ctx, cfg, pool, queries, supervisorBin, logger)
 
 	// M6 T014: throttle deps shared between spawn-prep gate (T007) and
 	// pipeline OnRateLimit actuator (T008). Pool=nil short-circuits the
@@ -1052,6 +1052,7 @@ func buildAgentContainerRuntime(
 	cfg *config.Config,
 	pool *pgxpool.Pool,
 	queries *store.Queries,
+	supervisorBin string,
 	logger *slog.Logger,
 ) (agentcontainer.Controller, bool) {
 	if cfg.UseFakeAgent || cfg.DockerSocketProxyURL == "" {
@@ -1074,6 +1075,13 @@ func buildAgentContainerRuntime(
 		Memory:      cfg.DefaultContainerMemory,
 		CPUs:        cfg.DefaultContainerCPUs,
 		PIDsLimit:   cfg.DefaultContainerPIDsLim,
+		// M7.1 (T006): agents network + the supervisor-binary host
+		// path. supervisorBin is resolveSupervisorBin's value — under
+		// the identical-path shared-dir bind (compose §supervisor) the
+		// same absolute path resolves on the docker host, so it works
+		// as a create-time bind source.
+		NetworkName:   cfg.AgentsNetwork,
+		SupervisorBin: supervisorBin,
 		OnComplete: func(flipUseDirectExec bool) {
 			if flipUseDirectExec {
 				logger.Info("migrate7: grandfathering complete; UseDirectExec flip remains operator-deferred until the container exec pipeline ships (retro M7 §open questions)")

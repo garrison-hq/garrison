@@ -15,6 +15,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"os"
 	"testing"
 
 	"github.com/garrison-hq/garrison/supervisor/internal/agentcontainer"
@@ -25,13 +26,15 @@ import (
 )
 
 type fakeMigrationController struct {
-	createdIDs []string
-	startedIDs []string
+	createdIDs   []string
+	createdSpecs []agentcontainer.ContainerSpec
+	startedIDs   []string
 }
 
 func (f *fakeMigrationController) Create(ctx context.Context, spec agentcontainer.ContainerSpec) (string, error) {
 	id := "fake-" + spec.AgentID
 	f.createdIDs = append(f.createdIDs, id)
+	f.createdSpecs = append(f.createdSpecs, spec)
 	return id, nil
 }
 func (f *fakeMigrationController) Start(ctx context.Context, id string) error {
@@ -90,19 +93,25 @@ func TestM7MigrationGrandfathersM2xAgentsAndIsIdempotent(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	ctrl := &fakeMigrationController{}
+	// M7.1 T006: writable bases — migrate7 now MkdirAll's the per-agent
+	// workspace dir before create so the docker bind source exists.
+	workspaceFS := t.TempDir()
+	skillsFS := t.TempDir()
 	deps := migrate7.Deps{
-		Pool:        pool,
-		Queries:     store.New(pool),
-		Controller:  ctrl,
-		Logger:      logger,
-		ImageRef:    "garrison-claude:m5",
-		UIDStart:    1000,
-		UIDEnd:      1999,
-		WorkspaceFS: "/var/lib/garrison/workspaces",
-		SkillsFS:    "/var/lib/garrison/skills",
-		Memory:      "512m",
-		CPUs:        "1.0",
-		PIDsLimit:   200,
+		Pool:          pool,
+		Queries:       store.New(pool),
+		Controller:    ctrl,
+		Logger:        logger,
+		ImageRef:      "garrison-claude:m5",
+		UIDStart:      1000,
+		UIDEnd:        1999,
+		WorkspaceFS:   workspaceFS,
+		SkillsFS:      skillsFS,
+		Memory:        "512m",
+		CPUs:          "1.0",
+		PIDsLimit:     200,
+		NetworkName:   "garrison-agents",
+		SupervisorBin: "/var/lib/garrison/shared/garrison-supervisor",
 	}
 
 	if err := migrate7.Run(ctx, deps); err != nil {
@@ -113,6 +122,26 @@ func TestM7MigrationGrandfathersM2xAgentsAndIsIdempotent(t *testing.T) {
 	}
 	if len(ctrl.startedIDs) != 2 {
 		t.Errorf("Start call count = %d; want 2", len(ctrl.startedIDs))
+	}
+
+	// M7.1 T006: every created spec goes through SpecForAgent — the
+	// agents network, the agent-UUID-keyed workspace (MkdirAll'd before
+	// create), and the ro supervisor-binary mount path all thread
+	// through. The shape-hash label follows from buildCreateBody for
+	// any spec (pinned in agentcontainer's T004 tests).
+	for _, spec := range ctrl.createdSpecs {
+		if spec.NetworkName != "garrison-agents" {
+			t.Errorf("spec %s: NetworkName = %q; want garrison-agents", spec.AgentID, spec.NetworkName)
+		}
+		if want := workspaceFS + "/" + spec.AgentID; spec.Workspace != want {
+			t.Errorf("spec %s: Workspace = %q; want %q (agent-UUID keying)", spec.AgentID, spec.Workspace, want)
+		}
+		if spec.SupervisorBin != "/var/lib/garrison/shared/garrison-supervisor" {
+			t.Errorf("spec %s: SupervisorBin = %q; want the host binary path", spec.AgentID, spec.SupervisorBin)
+		}
+		if st, err := os.Stat(spec.Workspace); err != nil || !st.IsDir() {
+			t.Errorf("spec %s: workspace dir %q not created (err=%v)", spec.AgentID, spec.Workspace, err)
+		}
 	}
 
 	// Both agents now have last_grandfathered_at set + image_digest set.

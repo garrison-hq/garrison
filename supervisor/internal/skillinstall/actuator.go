@@ -28,20 +28,29 @@ type SkillRef struct {
 // per supervisor process; safe for concurrent Install calls
 // targeting different proposal IDs (each call is independent).
 type Actuator struct {
-	Registries  map[string]skillregistry.Registry
-	Container   agentcontainer.Controller
-	Journaler   *Journaler
-	SkillsDir   string // /var/lib/garrison/skills
-	Logger      *slog.Logger
-	BuildSpec   ContainerSpecBuilder
-	OnInstalled func(ctx context.Context, proposalID pgtype.UUID, agentID pgtype.UUID, containerID string) error
+	Registries map[string]skillregistry.Registry
+	Container  agentcontainer.Controller
+	Journaler  *Journaler
+	SkillsDir  string // /var/lib/garrison/skills
+	Logger     *slog.Logger
+	BuildSpec  AgentSpecParamsBuilder
+	// M7.1 (T006): the same new deps migrate7 gains — the agents
+	// network (cfg.AgentsNetwork, FR-012) and the host path of the
+	// supervisor binary mounted ro into agent containers (FR-014).
+	// stepContainerCreate stamps both over the builder's params so
+	// every spec goes through agentcontainer.SpecForAgent uniformly.
+	NetworkName   string
+	SupervisorBin string
+	OnInstalled   func(ctx context.Context, proposalID pgtype.UUID, agentID pgtype.UUID, containerID string) error
 }
 
-// ContainerSpecBuilder lets the caller customise the per-agent
-// container spec at install time. The actuator passes proposalID +
-// targetAgentID + the post-mount skills dir; the builder returns
-// the final spec.
-type ContainerSpecBuilder func(ctx context.Context, proposalID, agentID pgtype.UUID, skillsDir string) (agentcontainer.ContainerSpec, error)
+// AgentSpecParamsBuilder lets the caller supply the per-agent spec
+// inputs at install time (image digest, host UID, role slug, fs
+// bases). The actuator passes proposalID + targetAgentID + the
+// post-mount skills dir; the final ContainerSpec is always built via
+// agentcontainer.SpecForAgent — the single per-agent spec source
+// (M7.1 plan §2).
+type AgentSpecParamsBuilder func(ctx context.Context, proposalID, agentID pgtype.UUID, skillsDir string) (agentcontainer.AgentSpecParams, error)
 
 // Install runs the 6-step pipeline end-to-end. Each step writes a
 // success/failed/interrupted row to agent_install_journal; on any
@@ -160,10 +169,13 @@ func (a *Actuator) stepContainerCreate(ctx context.Context, proposalID, agentID 
 		return "", a.recordFailed(ctx, proposalID, StepContainerCreate, "no_spec_builder",
 			errors.New("Actuator.BuildSpec not configured"))
 	}
-	spec, err := a.BuildSpec(ctx, proposalID, agentID, skillsDir)
+	params, err := a.BuildSpec(ctx, proposalID, agentID, skillsDir)
 	if err != nil {
 		return "", a.recordFailed(ctx, proposalID, StepContainerCreate, "build_spec_failed", err)
 	}
+	params.NetworkName = a.NetworkName
+	params.SupervisorBin = a.SupervisorBin
+	spec := agentcontainer.SpecForAgent(params)
 	containerID, err := a.Container.Create(ctx, spec)
 	if err != nil {
 		return "", a.recordFailed(ctx, proposalID, StepContainerCreate, "create_failed", err)
