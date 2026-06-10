@@ -3,6 +3,8 @@ package agentcontainer
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -54,13 +56,29 @@ func NewSocketProxyController(baseURL string, httpClient *http.Client, logger *s
 // containerCreateBody is the subset of the Docker Engine API's
 // /containers/create body that Garrison populates. Field names match
 // the Docker JSON schema; unset fields are omitted via omitempty.
+// Deliberately no Env field: per-exec ExecSpec.Env is the only
+// secret/runtime-env transit (FR-002 structural).
 type containerCreateBody struct {
 	Image      string            `json:"Image"`
 	User       string            `json:"User,omitempty"`
-	Env        []string          `json:"Env,omitempty"`
+	Entrypoint []string          `json:"Entrypoint,omitempty"`
+	Cmd        []string          `json:"Cmd,omitempty"`
 	Labels     map[string]string `json:"Labels,omitempty"`
 	HostConfig hostConfigBody    `json:"HostConfig"`
 }
+
+// shapeHashLabel carries the hex SHA-256 of the marshaled create body
+// (every per-agent field), computed after all fields are set and
+// before the label itself is added. The boot reconcile (FR-007)
+// compares it to decide recreate-vs-noop; any future shape edit or a
+// per-agent workspace/image/uid change flips the hash for exactly the
+// affected containers.
+const shapeHashLabel = "garrison.shape_hash"
+
+// supervisorBinContainerPath is where the host supervisor binary is
+// bind-mounted read-only inside every agent container (spike F6,
+// FR-014) so the in-container stdio MCP servers run from it.
+const supervisorBinContainerPath = "/usr/local/bin/garrison-supervisor"
 
 type hostConfigBody struct {
 	Binds          []string          `json:"Binds,omitempty"`
@@ -94,7 +112,12 @@ func buildCreateBody(spec ContainerSpec) (containerCreateBody, error) {
 
 	body := containerCreateBody{
 		Image: spec.Image,
-		Env:   append([]string(nil), spec.EnvVars...),
+		// The image's entrypoint is claude, which exits(1) without a
+		// prompt (spike F1 — the Exited(1) fleet). Idle `sleep
+		// infinity` PID 1 keeps the container standing between execs
+		// (FR-005).
+		Entrypoint: []string{"/bin/sleep"},
+		Cmd:        []string{"infinity"},
 		Labels: map[string]string{
 			"garrison.agent_id": spec.AgentID,
 			"garrison.managed":  "true",
@@ -106,8 +129,11 @@ func buildCreateBody(spec ContainerSpec) (containerCreateBody, error) {
 			},
 			ReadonlyRootfs: true,
 			Tmpfs: map[string]string{
-				"/tmp":     "rw,size=64m",
-				"/var/run": "",
+				"/tmp": "rw,size=64m",
+				// claude writes session state under ~/.claude; HOME
+				// on the read-only rootfs needs a tmpfs (spike F5).
+				"/home/node": "rw,size=64m",
+				"/var/run":   "",
 			},
 			NetworkMode: "none",
 			CapDrop:     []string{"ALL"},
@@ -117,12 +143,24 @@ func buildCreateBody(spec ContainerSpec) (containerCreateBody, error) {
 			Privileged:  false,
 		},
 	}
+	if spec.SupervisorBin != "" {
+		body.HostConfig.Binds = append(body.HostConfig.Binds,
+			spec.SupervisorBin+":"+supervisorBinContainerPath+":ro")
+	}
 	if spec.HostUID > 0 {
 		body.User = fmt.Sprintf("%d:%d", spec.HostUID, spec.HostUID)
 	}
 	if spec.NetworkName != "" {
 		body.HostConfig.NetworkMode = spec.NetworkName
 	}
+	// Shape hash last: it covers every field above (FR-007). Marshal
+	// is deterministic — fixed struct field order, sorted map keys.
+	hashable, err := json.Marshal(body)
+	if err != nil {
+		return containerCreateBody{}, fmt.Errorf("%w: marshal for shape hash: %v", ErrInvalidSpec, err)
+	}
+	sum := sha256.Sum256(hashable)
+	body.Labels[shapeHashLabel] = hex.EncodeToString(sum[:])
 	return body, nil
 }
 
@@ -132,7 +170,7 @@ func (c *socketProxyController) Create(ctx context.Context, spec ContainerSpec) 
 		return "", err
 	}
 	buf, _ := json.Marshal(body)
-	name := "garrison-agent-" + shortID(spec.AgentID)
+	name := ContainerName(spec.AgentID)
 
 	resp, err := c.do(ctx, http.MethodPost,
 		"/containers/create?name="+name, bytes.NewReader(buf))

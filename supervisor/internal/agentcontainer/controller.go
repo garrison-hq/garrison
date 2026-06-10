@@ -149,10 +149,16 @@ type ContainerSpec struct {
 	Workspace   string // host path bind-mounted at /workspace:rw
 	Skills      string // host path bind-mounted at /workspace/.claude/skills:ro
 	NetworkName string // optional initial network attach (default: "none" for sandbox Rule 3)
-	Memory      string // "512m" — parsed by Docker
-	CPUs        string // "1.0" — converted to NanoCpus
-	PIDsLimit   int    // 200 by default
-	EnvVars     []string
+	// SupervisorBin is the host path of the CGO_ENABLED=0 supervisor
+	// binary, bind-mounted read-only at /usr/local/bin/garrison-supervisor
+	// so in-container stdio MCP servers run from the same binary
+	// (spike F6, FR-014). Empty = no mount (pre-M7.1 callers).
+	SupervisorBin string
+	Memory        string // "512m" — parsed by Docker
+	CPUs          string // "1.0" — converted to NanoCpus
+	PIDsLimit     int    // 200 by default
+	// Container-level env is deliberately absent: per-exec ExecSpec.Env
+	// is the ONLY transit for secrets/runtime env (FR-002 structural).
 	// Networks are applied via ConnectNetwork after Create — listed
 	// here for completeness; Create itself uses NetworkName=none.
 	Networks []string

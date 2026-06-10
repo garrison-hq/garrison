@@ -115,7 +115,6 @@ func validSpec() ContainerSpec {
 		Memory:    "512m",
 		CPUs:      "1.0",
 		PIDsLimit: 200,
-		EnvVars:   []string{"CLAUDE_CODE_OAUTH_TOKEN=dummy"},
 	}
 }
 
