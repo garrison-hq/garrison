@@ -317,9 +317,10 @@ func TestVaultOrchestrateFetchError_PermissionDenied(t *testing.T) {
 	}
 }
 
-// TestAcceptanceGateSatisfied — M2.2 engineer@in_dev skips the M1
-// hello.txt check; M2.1 engineer@todo still runs it; qa-engineer always
-// skips; unknown roles fall through to the check (M1 safety-net).
+// TestAcceptanceGateSatisfied — the in_dev column implies the M2.2
+// finalize workflow for ANY role (engineer or M7 hire); M2.1
+// engineer@todo still runs the hello.txt check; qa-engineer always
+// skips; non-in_dev unknown-role combinations keep the M1 safety-net.
 func TestAcceptanceGateSatisfied(t *testing.T) {
 	cases := []struct {
 		role, col string
@@ -331,7 +332,8 @@ func TestAcceptanceGateSatisfied(t *testing.T) {
 		{"qa-engineer", "qa_review", true}, // M2.2
 		{"qa-engineer", "", true},          // qa-engineer never writes hello.txt by design
 		{"", "todo", false},                // empty role → default false
-		{"cto", "in_dev", false},           // future role → default false
+		{"cto", "in_dev", true},            // M7 hire on the in_dev workflow → finalize semantics
+		{"cto", "todo", false},             // hired role off-workflow → M1 safety-net
 	}
 	for _, c := range cases {
 		if got := acceptanceGateSatisfied(c.role, c.col); got != c.want {

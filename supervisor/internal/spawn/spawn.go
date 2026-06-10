@@ -1097,15 +1097,16 @@ func runRealClaude(
 // default to false so the M1 safety net stays in place.
 func acceptanceGateSatisfied(roleSlug, fromColumn string) bool {
 	switch roleSlug {
-	case "engineer":
-		// M2.2 only skips the check when the engineer is running the
-		// in_dev workflow. M2.1 engineer@todo and any call without
-		// column info fall through to the M1 hello.txt check.
-		return fromColumn == "in_dev"
 	case roleQAEngineer:
 		return true
 	default:
-		return false
+		// The in_dev column implies the M2.2 finalize workflow for ANY
+		// role — engineer or M7 hire alike (a seo-writer run was
+		// misclassified acceptance_failed by the M1 hello.txt gate in
+		// the 2026-06-10 acceptance run). M2.1 engineer@todo and any
+		// call without column info fall through to the M1 hello.txt
+		// check, preserving the TestM21AcceptanceFailed* contract.
+		return fromColumn == "in_dev"
 	}
 }
 
@@ -1119,12 +1120,14 @@ func acceptanceGateSatisfied(roleSlug, fromColumn string) bool {
 // all short-circuit per plan §"Decisions baked into this plan" item 7.
 func finalizeExpectedForRole(roleSlug, fromColumn string) bool {
 	switch roleSlug {
-	case "engineer":
-		return fromColumn == "in_dev"
 	case roleQAEngineer:
 		return true
 	default:
-		return false
+		// Same generalization as acceptanceGateSatisfied: in_dev means
+		// the M2.2 finalize workflow regardless of role, so M7 hires
+		// get the finalize observer + Adjudicate branches. todo stays
+		// M2.1/fake-agent territory (finalize unexpected).
+		return fromColumn == "in_dev"
 	}
 }
 
@@ -1140,14 +1143,17 @@ func finalizeExpectedForRole(roleSlug, fromColumn string) bool {
 // write-safe.
 func transitionColumns(roleSlug, fromColumn string) (from, to string) {
 	switch roleSlug {
-	case "engineer":
-		if fromColumn == "todo" {
-			return "todo", "done"
-		}
-		return "in_dev", "qa_review"
 	case roleQAEngineer:
 		return "qa_review", "done"
 	default:
+		// Any role working the in_dev column lands at qa_review — for
+		// M7-hired single-role departments that column is the
+		// operator's HITL review parking spot (drag to done). todo
+		// keeps the M2.1 single-transition fallback for the fake-agent
+		// path and legacy tests.
+		if fromColumn == "in_dev" {
+			return "in_dev", "qa_review"
+		}
 		return "todo", "done"
 	}
 }
