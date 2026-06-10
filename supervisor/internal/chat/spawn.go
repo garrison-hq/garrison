@@ -170,7 +170,15 @@ func writeChatMCPConfig(deps Deps, sessionID, messageID pgtype.UUID, supervisorB
 		return "", fmt.Errorf("mkdir mcp dir: %w", err)
 	}
 	path := filepath.Join(deps.MCPConfigDir, "chat-"+idText+".json")
-	if err := os.WriteFile(path, body, 0o600); err != nil {
+	// 0644, not 0600: the file is read across a uid boundary — the
+	// chat container's `node` user (uid 1000) bind-mounts it, while
+	// the supervisor may run as a different uid (the compose image's
+	// `garrison` user). 0600 only worked in the host-process topology
+	// where both happened to be uid 1000. The config carries the
+	// agent-ro DSN, so the exposure trade-off is bounded by (a) the
+	// MCP config dir's own permissions and (b) deletion right after
+	// the turn (see the cleanup defer at the call site).
+	if err := os.WriteFile(path, body, 0o644); err != nil {
 		return "", fmt.Errorf("write mcp file: %w", err)
 	}
 	return path, nil

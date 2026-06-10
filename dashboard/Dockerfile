@@ -36,13 +36,16 @@ RUN addgroup -S dashboard && adduser -S dashboard -G dashboard
 # bundle, the generated static assets, and the public folder.
 # Standalone bundles its own minimal node_modules.
 #
-# --chmod=550 / 444: dashboard owns the files for read+exec but
+# --chmod=550 / 555: dashboard owns the files for read+exec but
 # can't write them — the runtime never modifies code or assets.
 # Combined with the non-root USER below, this satisfies docker:S6504
-# (no write permissions on copied resources).
+# (no write permissions on copied resources). Directories need the
+# execute bit to be traversable, and COPY --chmod applies one mode to
+# files AND directories — 444 made public/ unreadable (EACCES scandir)
+# under current BuildKit, so assets ship 555 rather than 444.
 COPY --from=build --chown=dashboard:dashboard --chmod=550 /app/.next/standalone ./
-COPY --from=build --chown=dashboard:dashboard --chmod=444 /app/.next/static ./.next/static
-COPY --from=build --chown=dashboard:dashboard --chmod=444 /app/public ./public
+COPY --from=build --chown=dashboard:dashboard --chmod=555 /app/.next/static ./.next/static
+COPY --from=build --chown=dashboard:dashboard --chmod=555 /app/public ./public
 
 USER dashboard
 EXPOSE 3000
