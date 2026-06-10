@@ -1,3 +1,4 @@
+.env
 
 # MemPalace per-project files (issue #185)
 mempalace.yaml
@@ -10,3 +11,4 @@ experiment-results/
 
 # Dev-time built mockclaude binary (not source)
 supervisor/mockclaude
+.garrison-shared/

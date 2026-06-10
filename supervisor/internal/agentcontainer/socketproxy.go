@@ -294,15 +294,26 @@ func (c *socketProxyController) ImageDigest(ctx context.Context, imageRef string
 		return "", c.statusErr(resp, "image-inspect")
 	}
 	var out struct {
+		ID          string   `json:"Id"`
 		RepoDigests []string `json:"RepoDigests"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return "", fmt.Errorf("agentcontainer: parse image inspect: %w", err)
 	}
-	if len(out.RepoDigests) == 0 {
-		return "", fmt.Errorf("%w: image has no RepoDigests (was it pulled?)", ErrImageNotFound)
+	if len(out.RepoDigests) > 0 {
+		return out.RepoDigests[0], nil
 	}
-	return out.RepoDigests[0], nil
+	// Locally-built images (docker build / compose build) carry no
+	// RepoDigests — only registry-pulled images do. The image ID is
+	// the content-addressed config digest, which serves the same
+	// pin-for-audit purpose in dev; production deploys that pull a
+	// pinned ref still get the registry digest above.
+	if out.ID != "" {
+		c.logger.Info("agentcontainer: image has no RepoDigests (locally built); using image ID as digest",
+			"image_ref", imageRef, "image_id", out.ID)
+		return out.ID, nil
+	}
+	return "", fmt.Errorf("%w: image has neither RepoDigests nor Id", ErrImageNotFound)
 }
 
 // do issues an HTTP request to the socket-proxy. Maps connection

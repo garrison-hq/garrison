@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/garrison-hq/garrison/supervisor/internal/agentcontainer"
 	"github.com/garrison-hq/garrison/supervisor/internal/agents"
 	"github.com/garrison-hq/garrison/supervisor/internal/chat"
 	"github.com/garrison-hq/garrison/supervisor/internal/config"
@@ -21,6 +22,7 @@ import (
 	"github.com/garrison-hq/garrison/supervisor/internal/mcpjungle"
 	"github.com/garrison-hq/garrison/supervisor/internal/mcpserverwork"
 	"github.com/garrison-hq/garrison/supervisor/internal/mempalace"
+	"github.com/garrison-hq/garrison/supervisor/internal/migrate7"
 	"github.com/garrison-hq/garrison/supervisor/internal/objstore"
 	"github.com/garrison-hq/garrison/supervisor/internal/pgdb"
 	"github.com/garrison-hq/garrison/supervisor/internal/spawn"
@@ -227,6 +229,14 @@ func runDaemon() int {
 		return exitCode
 	}
 
+	// M7 — per-agent container runtime. Constructs the socket-proxy
+	// controller and runs the idempotent grandfathering migration at
+	// boot, in the runbook-00 §0.9 contract position (vault → migrate7
+	// → mcpjungle reconcile). Degrades with a warning on failure (same
+	// posture as MCPJungle per FR-308): the supervisor continues on the
+	// direct-exec path rather than refusing to boot.
+	agentCtrl, useDirectExec := buildAgentContainerRuntime(ctx, cfg, pool, queries, logger)
+
 	// M6 T014: throttle deps shared between spawn-prep gate (T007) and
 	// pipeline OnRateLimit actuator (T008). Pool=nil short-circuits the
 	// gate to "allow" so M2.x integration tests + chaos suites that
@@ -268,6 +278,13 @@ func runDaemon() int {
 		// M6 T014 — result-grace + throttle gate.
 		FinalizeResultGrace: cfg.FinalizeResultGrace,
 		Throttle:            throttleDeps,
+		// M7 — container runtime threading. UseDirectExec stays true
+		// until the container exec pipeline ships (see retro M7 open
+		// questions + buildAgentContainerRuntime's guard); the
+		// controller is wired so hiring/migrate7-created containers
+		// are addressable the moment the flag flips for real.
+		UseDirectExec:  useDirectExec,
+		AgentContainer: agentCtrl,
 	}
 
 	dispatcher := buildDispatcher(spawnDeps)
@@ -692,7 +709,12 @@ func buildMcpjungleSubsystem(
 // configured path (default mcpjungle/admin). Returns "" on any error
 // — the client surfaces ErrAdminTokenInvalid on the first request,
 // which is the right shape for an operator-fixable misconfiguration.
-func fetchMcpjungleAdminToken(ctx context.Context, cfg *config.Config, vaultClient vault.Fetcher, logger *slog.Logger) string {
+// vaultClient is the CONCRETE pointer (not vault.Fetcher): the caller
+// type-asserts the interface, and a typed-nil *vault.Client inside a
+// non-nil interface would defeat the nil guard below and panic on the
+// nil receiver (observed in fake-agent mode, where buildVaultClient
+// returns nil but GARRISON_MCPJUNGLE_URL is still set by compose).
+func fetchMcpjungleAdminToken(ctx context.Context, cfg *config.Config, vaultClient *vault.Client, logger *slog.Logger) string {
 	if vaultClient == nil {
 		logger.Warn("mcpjungle: vault not wired; admin token unavailable",
 			"path", cfg.MCPJungleAdminTokenPath)
@@ -944,4 +966,66 @@ func buildVaultClient(ctx context.Context, cfg *config.Config, logger *slog.Logg
 		return nil, ExitFailure
 	}
 	return vc, ExitOK
+}
+
+// buildAgentContainerRuntime wires the M7 per-agent container runtime
+// at boot: constructs the socket-proxy Controller and runs migrate7's
+// idempotent grandfathering pass (T014). Returns the controller for
+// spawn.Deps threading plus the effective UseDirectExec value.
+//
+// Posture decisions, recorded here because they're load-bearing:
+//   - Fake-agent mode and an unset proxy URL skip the subsystem
+//     entirely (M2.x chaos/integration suites; no Docker available).
+//   - migrate7 failure degrades with a warning (same posture as the
+//     MCPJungle subsystem): boot continues on direct-exec rather than
+//     crash-looping the supervisor over a missing agent image.
+//   - cfg.UseDirectExec=false is NOT honoured yet: the container exec
+//     branch (spawn/m7.go runRealClaudeViaContainer) is an outline that
+//     does not run the claudeproto pipeline, inject secrets, or call
+//     finalize — activating it would fabricate 'completed' run rows.
+//     Until the container pipeline milestone lands, the supervisor
+//     forces direct-exec and logs loudly so the misconfiguration is
+//     visible. migrate7's OnComplete readiness signal is logged for the
+//     operator's soak-window decision (retro M7 §open questions).
+func buildAgentContainerRuntime(
+	ctx context.Context,
+	cfg *config.Config,
+	pool *pgxpool.Pool,
+	queries *store.Queries,
+	logger *slog.Logger,
+) (agentcontainer.Controller, bool) {
+	if cfg.UseFakeAgent || cfg.DockerSocketProxyURL == "" {
+		logger.Info("migrate7: skipped (fake-agent mode or no socket-proxy URL)")
+		return nil, true
+	}
+
+	ctrl := agentcontainer.NewSocketProxyController(cfg.DockerSocketProxyURL, nil, logger)
+
+	deps := migrate7.Deps{
+		Pool:        pool,
+		Queries:     queries,
+		Controller:  ctrl,
+		Logger:      logger,
+		ImageRef:    cfg.AgentContainerImage,
+		UIDStart:    cfg.AgentUIDRangeStart,
+		UIDEnd:      cfg.AgentUIDRangeEnd,
+		WorkspaceFS: cfg.AgentWorkspaceFS,
+		SkillsFS:    cfg.AgentSkillsFS,
+		Memory:      cfg.DefaultContainerMemory,
+		CPUs:        cfg.DefaultContainerCPUs,
+		PIDsLimit:   cfg.DefaultContainerPIDsLim,
+		OnComplete: func(flipUseDirectExec bool) {
+			if flipUseDirectExec {
+				logger.Info("migrate7: grandfathering complete; UseDirectExec flip remains operator-deferred until the container exec pipeline ships (retro M7 §open questions)")
+			}
+		},
+	}
+	if err := migrate7.Run(ctx, deps); err != nil {
+		logger.Warn("migrate7: grandfathering failed; continuing on direct-exec (degrade-with-warning)", "err", err)
+	}
+
+	if !cfg.UseDirectExec {
+		logger.Error("config: GARRISON_USE_DIRECT_EXEC=false requested, but the container exec path is an outline pending the container-pipeline milestone; forcing direct-exec to avoid fabricated run results")
+	}
+	return ctrl, true
 }

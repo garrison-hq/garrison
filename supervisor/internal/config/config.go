@@ -170,6 +170,9 @@ type Config struct {
 	SkillHubToken           string // GARRISON_SKILLHUB_TOKEN, no default — empty disables SkillHub
 	UseDirectExec           bool   // GARRISON_USE_DIRECT_EXEC, default true; flipped to false by migrate7.Run after grandfathering completes
 	DockerSocketProxyURL    string // GARRISON_DOCKER_SOCKET_PROXY_URL, default "http://garrison-docker-proxy:2375"
+	AgentContainerImage     string // GARRISON_AGENT_CONTAINER_IMAGE, default "garrison-claude:m5"; migrate7 resolves this ref to a digest at boot
+	AgentWorkspaceFS        string // GARRISON_AGENT_WORKSPACE_FS, default "/var/lib/garrison/workspaces"; per-agent workspace bind-mount base
+	AgentSkillsFS           string // GARRISON_AGENT_SKILLS_FS, default "/var/lib/garrison/skills"; per-agent skills bind-mount base
 
 	// M8 fields. MCPJungle integration — single-instance for alpha;
 	// per-customer-instance is the beta path (Option A) via the
@@ -281,6 +284,9 @@ func Load() (*Config, error) {
 		SkillHubToken:           "",
 		UseDirectExec:           true,
 		DockerSocketProxyURL:    "http://garrison-docker-proxy:2375",
+		AgentContainerImage:     "garrison-claude:m5",
+		AgentWorkspaceFS:        "/var/lib/garrison/workspaces",
+		AgentSkillsFS:           "/var/lib/garrison/skills",
 
 		// M8 defaults.
 		MCPJungleURL:            "",
@@ -383,6 +389,15 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("config: GARRISON_AGENT_UID_RANGE_END must be int >start (%d); got %q", cfg.AgentUIDRangeStart, v)
 		}
 		cfg.AgentUIDRangeEnd = n
+	}
+	if v := os.Getenv("GARRISON_AGENT_CONTAINER_IMAGE"); v != "" {
+		cfg.AgentContainerImage = v
+	}
+	if v := os.Getenv("GARRISON_AGENT_WORKSPACE_FS"); v != "" {
+		cfg.AgentWorkspaceFS = v
+	}
+	if v := os.Getenv("GARRISON_AGENT_SKILLS_FS"); v != "" {
+		cfg.AgentSkillsFS = v
 	}
 	if v := os.Getenv("GARRISON_DEFAULT_CONTAINER_MEMORY"); v != "" {
 		cfg.DefaultContainerMemory = v
