@@ -1002,15 +1002,26 @@ func oneshotOnCommit(execCtx context.Context, deps Deps, in oneshotRunInputs, re
 // (M9 T008, plan §2 step 5)
 // -----------------------------------------------------------------------
 
-// oneshotThinDiaryThreshold is the diary-length bound the verification
-// sub-object applies inline (FR-403: oneshot completions never touch
-// the hygiene tables — the M2.x predicates run at commit time and the
-// result lands on the run record for operator review). The value
-// mirrors config.ThinDiaryThreshold's default (GARRISON_HYGIENE_THIN_
-// DIARY_THRESHOLD, 200); it is a constant here because spawn.Deps
-// carries no hygiene knobs and plan §2's WriteFinalizeOneshot surface
-// is sealed.
-const oneshotThinDiaryThreshold = 200
+// defaultOneshotThinDiaryThreshold is the fallback diary-length bound
+// the verification sub-object applies inline (FR-403: oneshot
+// completions never touch the hygiene tables — the M2.x predicates run
+// at commit time and the result lands on the run record for operator
+// review). The value mirrors config.ThinDiaryThreshold's default
+// (GARRISON_HYGIENE_THIN_DIARY_THRESHOLD, 200). M9 review #5:
+// Deps.ThinDiaryThreshold carries the operator-tuned value; the zero
+// value falls back here so existing call sites and tests keep the
+// documented default.
+const defaultOneshotThinDiaryThreshold = 200
+
+// thinDiaryThreshold resolves the effective bound: the configured
+// Deps.ThinDiaryThreshold when positive, the documented 200 default
+// otherwise.
+func thinDiaryThreshold(deps Deps) int {
+	if deps.ThinDiaryThreshold > 0 {
+		return deps.ThinDiaryThreshold
+	}
+	return defaultOneshotThinDiaryThreshold
+}
 
 // markOneshotEventProcessedSQL marks the run's work.scheduled.
 // oneshot_due outbox row processed inside the atomic tx — the oneshot
@@ -1181,10 +1192,11 @@ func WriteFinalizeOneshot(parentCtx context.Context, deps Deps, runID pgtype.UUI
 	// the serialized drawer body — the same surface the M2.x thin-diary
 	// predicate evaluates (hygiene evaluator: len(drawer.Body)).
 	body := serializeOneshotDiary(row.Name, row.ObjectiveTemplate, runID, &scanned, time.Now().UTC())
+	threshold := thinDiaryThreshold(deps)
 	verification := oneshotVerification{
 		DiaryLength:        len(body),
-		ThinDiaryThreshold: oneshotThinDiaryThreshold,
-		ThinDiary:          len(body) < oneshotThinDiaryThreshold,
+		ThinDiaryThreshold: threshold,
+		ThinDiary:          len(body) < threshold,
 		KGTripleCount:      len(scanned.KGTriples),
 		MissingKGFacts:     len(scanned.KGTriples) < 1,
 	}

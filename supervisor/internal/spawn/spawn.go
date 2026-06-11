@@ -172,6 +172,15 @@ type Deps struct {
 	// integration tests + chaos suites that don't seed company rows.
 	Throttle throttle.Deps
 
+	// M9 review #5: the diary-length bound the oneshot finalize
+	// verification sub-object applies inline (FR-403). Wired from
+	// cfg.ThinDiaryThreshold (GARRISON_HYGIENE_THIN_DIARY_THRESHOLD)
+	// in cmd/supervisor/main.go so the oneshot predicate tracks the
+	// same operator tuning as the M2.x hygiene checker. Zero falls
+	// back to the documented default of 200 (preserves every existing
+	// test's expectations).
+	ThinDiaryThreshold int
+
 	// M2.3: vault client (Fetcher interface so tests can inject a mock).
 	// CustomerID scopes grant queries and audit rows to this deployment's
 	// company row (D6.3 / OQ-2). Both are wired from config in cmd/supervisor.

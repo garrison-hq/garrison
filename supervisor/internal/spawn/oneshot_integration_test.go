@@ -632,6 +632,33 @@ func TestWriteFinalizeOneshotPersistsCostAndWakeup(t *testing.T) {
 	}
 }
 
+// TestWriteFinalizeOneshotThinDiaryThresholdOverride (M9 review #5):
+// a configured Deps.ThinDiaryThreshold lands on the committed
+// verification sub-object and drives the thin_diary evaluation — the
+// end-to-end proof the bound is no longer the hardcoded 200.
+func TestWriteFinalizeOneshotThinDiaryThresholdOverride(t *testing.T) {
+	pool := testdb.Start(t)
+	ctx := context.Background()
+	fx := seedOneshot(t, ctx, pool, nil, "fired")
+	instanceID := seedOneshotRunningInstance(t, ctx, pool, fx)
+	deps := oneshotFinalizeDeps(pool, &m71FakePalaceExec{})
+	deps.ThinDiaryThreshold = 10000 // far above any test diary body
+
+	if err := WriteFinalizeOneshot(ctx, deps, fx.runID, instanceID, oneshotFinalizePayload(), OneshotTerminal{}); err != nil {
+		t.Fatalf("WriteFinalizeOneshot err = %v; want nil", err)
+	}
+	var doc oneshotStructuredOutcomeDoc
+	if err := json.Unmarshal(readStructuredOutcome(t, ctx, pool, fx.runID), &doc); err != nil {
+		t.Fatalf("decode structured_outcome: %v", err)
+	}
+	if doc.Verification.ThinDiaryThreshold != 10000 {
+		t.Errorf("verification.thin_diary_threshold = %d; want the configured 10000", doc.Verification.ThinDiaryThreshold)
+	}
+	if !doc.Verification.ThinDiary {
+		t.Errorf("verification.thin_diary = false; want true (diary_length %d < 10000)", doc.Verification.DiaryLength)
+	}
+}
+
 // TestWriteFinalizeOneshotRejectsDoubleCommit — the FR-260-analog
 // guard: a second commit for an already-finalized run errors without
 // touching the committed state (no extra palace writes, structured

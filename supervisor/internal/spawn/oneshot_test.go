@@ -126,3 +126,52 @@ func TestInjectOneshotFinalizeEnvRequiresFinalizeEntry(t *testing.T) {
 		t.Fatal("injectOneshotFinalizeEnv accepted a config without a finalize entry; want error")
 	}
 }
+
+// TestThinDiaryThresholdFallbackAndOverride (M9 review #5): the
+// oneshot verification's diary-length bound resolves from
+// Deps.ThinDiaryThreshold (cfg.ThinDiaryThreshold /
+// GARRISON_HYGIENE_THIN_DIARY_THRESHOLD); the zero value falls back to
+// the documented 200 default, preserving every pre-review expectation.
+func TestThinDiaryThresholdFallbackAndOverride(t *testing.T) {
+	if got := thinDiaryThreshold(Deps{}); got != 200 {
+		t.Errorf("thinDiaryThreshold(zero) = %d; want the 200 default", got)
+	}
+	if got := thinDiaryThreshold(Deps{ThinDiaryThreshold: 350}); got != 350 {
+		t.Errorf("thinDiaryThreshold(350) = %d; want the override", got)
+	}
+	if got := thinDiaryThreshold(Deps{ThinDiaryThreshold: -1}); got != 200 {
+		t.Errorf("thinDiaryThreshold(-1) = %d; want the 200 default (non-positive falls back)", got)
+	}
+}
+
+// TestOneshotVerificationUsesConfiguredThreshold (M9 review #5): the
+// verification sub-object carries the resolved bound and evaluates
+// thin_diary against it — the WriteFinalizeOneshot construction shape.
+func TestOneshotVerificationUsesConfiguredThreshold(t *testing.T) {
+	body := strings.Repeat("x", 300)
+
+	for _, tc := range []struct {
+		name          string
+		deps          Deps
+		wantThreshold int
+		wantThin      bool
+	}{
+		{"fallback_200_not_thin", Deps{}, 200, false},
+		{"override_500_thin", Deps{ThinDiaryThreshold: 500}, 500, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			threshold := thinDiaryThreshold(tc.deps)
+			v := oneshotVerification{
+				DiaryLength:        len(body),
+				ThinDiaryThreshold: threshold,
+				ThinDiary:          len(body) < threshold,
+			}
+			if v.ThinDiaryThreshold != tc.wantThreshold {
+				t.Errorf("thin_diary_threshold = %d; want %d", v.ThinDiaryThreshold, tc.wantThreshold)
+			}
+			if v.ThinDiary != tc.wantThin {
+				t.Errorf("thin_diary = %v; want %v", v.ThinDiary, tc.wantThin)
+			}
+		})
+	}
+}

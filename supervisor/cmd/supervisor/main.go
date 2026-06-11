@@ -282,6 +282,9 @@ func runDaemon() int {
 		// M6 T014 — result-grace + throttle gate.
 		FinalizeResultGrace: cfg.FinalizeResultGrace,
 		Throttle:            throttleDeps,
+		// M9 review #5 — oneshot inline thin-diary bound tracks the
+		// hygiene checker's operator tuning (zero falls back to 200).
+		ThinDiaryThreshold: cfg.ThinDiaryThreshold,
 		// M7/M7.1 — container runtime threading. As of T012 the
 		// config default routes spawns through the container exec
 		// pipeline; buildAgentContainerRuntime forces direct-exec
