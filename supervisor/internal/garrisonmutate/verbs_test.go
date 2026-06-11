@@ -1,9 +1,14 @@
 package garrisonmutate
 
 import (
+	"context"
+	"encoding/json"
+	"io"
+	"log/slog"
 	"sort"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestVerbsRegistryMatchesEnumeration is the sealed-allow-list test
@@ -164,5 +169,120 @@ func TestServerActionVerbsTierTable(t *testing.T) {
 		if v.Handler == nil {
 			t.Errorf("%s has nil Handler", v.Name)
 		}
+	}
+}
+
+// ----------------------------------------------------------------------------
+// create_scheduled_task DB-free paths (M9 T020 top-up): arg parsing
+// and the subprocess-side min-interval resolution. The DB-backed
+// happy/reject paths live in verbs_scheduled_test.go (integration).
+// ----------------------------------------------------------------------------
+
+// TestCreateScheduledTaskHandlerRejectsUnparsableArgs — malformed JSON
+// maps to validation_failed before any transaction is opened (the
+// zero-value Deps would panic on Pool use; reaching the parse
+// rejection proves the ordering).
+func TestCreateScheduledTaskHandlerRejectsUnparsableArgs(t *testing.T) {
+	r, err := realCreateScheduledTaskHandler(context.Background(), Deps{}, json.RawMessage(`{"name":`))
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if r.Success {
+		t.Fatal("unparsable args should be rejected")
+	}
+	if r.ErrorKind != string(ErrValidationFailed) {
+		t.Errorf("ErrorKind = %q; want %q", r.ErrorKind, ErrValidationFailed)
+	}
+	if !strings.Contains(r.Message, "parse args") {
+		t.Errorf("Message = %q; want the parse detail", r.Message)
+	}
+}
+
+// TestParseCreateScheduledTaskArgsRequiresIdentityFields — each
+// identity field is required after trimming; the rejection names the
+// missing field.
+func TestParseCreateScheduledTaskArgsRequiresIdentityFields(t *testing.T) {
+	base := map[string]string{
+		"name":                         "standup",
+		"department_slug":              "engineering",
+		"role_slug":                    "engineering.engineer",
+		"mode":                         "ticket",
+		"schedule_expr":                "daily@09:00",
+		"objective_template":           "Run the standup",
+		"acceptance_criteria_template": "Summary posted",
+	}
+	for _, field := range []string{"name", "department_slug", "role_slug", "schedule_expr"} {
+		t.Run(field, func(t *testing.T) {
+			m := map[string]string{}
+			for k, v := range base {
+				m[k] = v
+			}
+			m[field] = "   " // whitespace-only trims to empty
+			raw, err := json.Marshal(m)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			args, res := parseCreateScheduledTaskArgs(raw)
+			if res == nil {
+				t.Fatalf("parse accepted empty %s: %+v", field, args)
+			}
+			if res.Success {
+				t.Error("Success = true on missing identity field")
+			}
+			if !strings.Contains(res.Message, field+" is required") {
+				t.Errorf("Message = %q; want %q named", res.Message, field)
+			}
+		})
+	}
+}
+
+// TestParseCreateScheduledTaskArgsTrimsFields — surrounding whitespace
+// on identity fields is trimmed, not rejected.
+func TestParseCreateScheduledTaskArgsTrimsFields(t *testing.T) {
+	raw := json.RawMessage(`{"name":"  standup  ","department_slug":" engineering ","role_slug":" engineering.engineer ","mode":" ticket ","schedule_expr":" daily@09:00 ","objective_template":"o","acceptance_criteria_template":"a"}`)
+	args, res := parseCreateScheduledTaskArgs(raw)
+	if res != nil {
+		t.Fatalf("parse rejected: %+v", res)
+	}
+	if args.Name != "standup" || args.DepartmentSlug != "engineering" ||
+		args.RoleSlug != "engineering.engineer" || args.Mode != "ticket" ||
+		args.ScheduleExpr != "daily@09:00" {
+		t.Errorf("fields not trimmed: %+v", args)
+	}
+}
+
+// TestSchedVerbMinIntervalResolution — the subprocess-side FR-404
+// bound: env value when parseable and positive, config default
+// otherwise (malformed values degrade with a warning, never fail the
+// verb).
+func TestSchedVerbMinIntervalResolution(t *testing.T) {
+	cases := []struct {
+		name string
+		env  string
+		want time.Duration
+	}{
+		{name: "unset uses default", env: "", want: defaultSchedMinInterval},
+		{name: "valid value wins", env: "30m", want: 30 * time.Minute},
+		{name: "malformed degrades to default", env: "soon", want: defaultSchedMinInterval},
+		{name: "non-positive degrades to default", env: "-5m", want: defaultSchedMinInterval},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GARRISON_SCHED_MIN_INTERVAL", tc.env)
+			if tc.env == "" {
+				// t.Setenv("", "") keeps the var present-but-empty,
+				// which schedVerbMinInterval treats as unset.
+				t.Setenv("GARRISON_SCHED_MIN_INTERVAL", "")
+			}
+			deps := Deps{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+			if got := schedVerbMinInterval(deps); got != tc.want {
+				t.Errorf("schedVerbMinInterval(%q) = %s; want %s", tc.env, got, tc.want)
+			}
+		})
+	}
+	// nil Logger must not panic on the warning path.
+	t.Setenv("GARRISON_SCHED_MIN_INTERVAL", "bogus")
+	if got := schedVerbMinInterval(Deps{}); got != defaultSchedMinInterval {
+		t.Errorf("schedVerbMinInterval with nil logger = %s; want %s", got, defaultSchedMinInterval)
 	}
 }

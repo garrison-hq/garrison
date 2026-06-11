@@ -160,3 +160,109 @@ func TestValidateTaskRejectsPureInputProblems(t *testing.T) {
 		})
 	}
 }
+
+// TestValidationErrorFormatsFieldAndMsg pins the typed rejection's
+// error string shape — the chat verb and dashboardapi endpoint both
+// surface it verbatim as the validation_failed detail.
+func TestValidationErrorFormatsFieldAndMsg(t *testing.T) {
+	e := &ValidationError{Field: "schedule_expr", Msg: "boom"}
+	if got, want := e.Error(), "invalid schedule_expr: boom"; got != want {
+		t.Fatalf("Error() = %q; want %q", got, want)
+	}
+}
+
+// scriptedDBTX scripts each existence probe independently so the
+// database-failure (non-ErrNoRows) wrapper branches are reachable
+// without fault-injecting a real Postgres: ValidateTask must surface
+// those as plain errors, NOT *ValidationError (they are operator-
+// uncorrectable transport failures, FR-105's boundary).
+type scriptedDBTX struct {
+	nameErr error // SELECT ... FROM scheduled_tasks
+	deptErr error // SELECT ... FROM departments
+	roleErr error // SELECT ... FROM agents
+}
+
+func (scriptedDBTX) Exec(context.Context, string, ...interface{}) (pgconn.CommandTag, error) {
+	return pgconn.CommandTag{}, nil
+}
+
+func (scriptedDBTX) Query(context.Context, string, ...interface{}) (pgx.Rows, error) {
+	return nil, pgx.ErrNoRows
+}
+
+func (s scriptedDBTX) QueryRow(_ context.Context, sql string, _ ...interface{}) pgx.Row {
+	switch {
+	case strings.Contains(sql, "FROM scheduled_tasks"):
+		return stubRow{err: s.nameErr}
+	case strings.Contains(sql, "FROM departments"):
+		return stubRow{err: s.deptErr}
+	default:
+		return stubRow{err: s.roleErr}
+	}
+}
+
+// TestValidateTaskSurfacesDBFailuresAsPlainErrors — each DB-backed
+// probe's transport-failure branch wraps and returns the error without
+// converting it to a ValidationError.
+func TestValidateTaskSurfacesDBFailuresAsPlainErrors(t *testing.T) {
+	now := time.Date(2026, 6, 10, 12, 0, 0, 0, time.UTC)
+	boom := errors.New("connection reset")
+	cases := []struct {
+		name     string
+		db       scriptedDBTX
+		wantWrap string
+	}{
+		{
+			name:     "name probe failure",
+			db:       scriptedDBTX{nameErr: boom, deptErr: nil, roleErr: nil},
+			wantWrap: "check name uniqueness",
+		},
+		{
+			name:     "department probe failure",
+			db:       scriptedDBTX{nameErr: pgx.ErrNoRows, deptErr: boom, roleErr: nil},
+			wantWrap: "check department existence",
+		},
+		{
+			name:     "role probe failure",
+			db:       scriptedDBTX{nameErr: pgx.ErrNoRows, deptErr: nil, roleErr: boom},
+			wantWrap: "check role existence",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ValidateTask(context.Background(), store.New(tc.db), 15*time.Minute, now, validInput())
+			if err == nil {
+				t.Fatal("ValidateTask = nil error; want a wrapped DB failure")
+			}
+			var ve *ValidationError
+			if errors.As(err, &ve) {
+				t.Fatalf("err = %v is a ValidationError; DB failures must stay plain errors", err)
+			}
+			if !errors.Is(err, boom) {
+				t.Errorf("err = %v; want it to wrap the probe failure", err)
+			}
+			if !strings.Contains(err.Error(), tc.wantWrap) {
+				t.Errorf("err = %v; want the %q wrap", err, tc.wantWrap)
+			}
+		})
+	}
+}
+
+// TestValidateTaskRejectsUnknownRole — an ErrNoRows from the agent
+// probe is the operator-correctable "no active agent with that role"
+// rejection (FR-105), typed on role_slug.
+func TestValidateTaskRejectsUnknownRole(t *testing.T) {
+	now := time.Date(2026, 6, 10, 12, 0, 0, 0, time.UTC)
+	db := scriptedDBTX{nameErr: pgx.ErrNoRows, deptErr: nil, roleErr: pgx.ErrNoRows}
+	_, err := ValidateTask(context.Background(), store.New(db), 15*time.Minute, now, validInput())
+	var ve *ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("err = %v; want *ValidationError", err)
+	}
+	if ve.Field != "role_slug" {
+		t.Errorf("Field = %q; want role_slug", ve.Field)
+	}
+	if !strings.Contains(ve.Msg, "no active agent") {
+		t.Errorf("Msg = %q; want the no-active-agent detail", ve.Msg)
+	}
+}

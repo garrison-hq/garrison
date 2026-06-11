@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -664,4 +665,118 @@ func TestZeroIdleCost(t *testing.T) {
 // test"). Test-only surface — integration-tagged, no production caller.
 func TickOnce(ctx context.Context, deps Deps) (fired, skipped, deferred int, err error) {
 	return tickOnce(ctx, deps)
+}
+
+// TestRunLoopFiresDueTaskAndStopsOnCancel — the ticker path end to
+// end: RunLoop's tick claims and fires a due ticket-mode task, logs
+// the fired summary, and a context cancel exits nil (the errgroup
+// contract main.go relies on). Complements the unit-scope
+// TestRunLoopReturnsNilOnContextCancel, which never reaches a tick.
+func TestRunLoopFiresDueTaskAndStopsOnCancel(t *testing.T) {
+	pool := testdb.Start(t)
+	deptID := testdb.SeedM21(t, t.TempDir())
+	q := store.New(pool)
+	now := fixedNow()
+
+	task := seedScheduledTask(t, q, deptID, "loop-digest", ModeTicket, "daily@09:00", now.Add(-time.Minute))
+
+	deps := tickDeps(pool, discardLogger(), now)
+	deps.TickInterval = 20 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- RunLoop(ctx, deps) }()
+
+	deadline := time.After(10 * time.Second)
+	for len(listRuns(t, pool, task.ID)) == 0 {
+		select {
+		case <-deadline:
+			cancel()
+			t.Fatal("RunLoop did not fire the due task within 10s")
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("RunLoop = %v on cancel, want nil", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("RunLoop did not return within 5s of cancellation")
+	}
+
+	runs := listRuns(t, pool, task.ID)
+	if len(runs) != 1 {
+		t.Fatalf("run rows = %d, want exactly 1 (no double fire across ticks)", len(runs))
+	}
+	if runs[0].Outcome != OutcomeFired {
+		t.Fatalf("outcome = %q, want %q", runs[0].Outcome, OutcomeFired)
+	}
+	if got := countRows(t, pool, `SELECT COUNT(*) FROM tickets`); got != 1 {
+		t.Fatalf("tickets rows = %d, want 1", got)
+	}
+}
+
+// syncLogBuffer is a mutex-guarded bytes.Buffer: RunLoop's goroutine
+// writes log lines while the test goroutine polls String().
+type syncLogBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncLogBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// TestRunLoopLogsTickErrorAndContinues — a failing tick (pool closed
+// underneath the loop) is logged and the ticker keeps running; the
+// loop still exits nil on cancel. A single failed tick must never
+// bring the supervisor down (M1 poll-ticker precedent).
+func TestRunLoopLogsTickErrorAndContinues(t *testing.T) {
+	pool := testdb.Start(t)
+	// Dedicated pool so closing it doesn't poison testdb's shared pool.
+	failingPool, err := pgxpool.New(context.Background(), pool.Config().ConnString())
+	if err != nil {
+		t.Fatalf("pgxpool.New: %v", err)
+	}
+	failingPool.Close()
+
+	logBuf := &syncLogBuffer{}
+	logger := slog.New(slog.NewTextHandler(logBuf, nil))
+	deps := tickDeps(failingPool, logger, fixedNow())
+	deps.TickInterval = 20 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- RunLoop(ctx, deps) }()
+
+	deadline := time.After(10 * time.Second)
+	for !strings.Contains(logBuf.String(), "tick failed") {
+		select {
+		case <-deadline:
+			cancel()
+			t.Fatal("no 'tick failed' log line within 10s")
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("RunLoop = %v after tick errors + cancel, want nil", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("RunLoop did not return within 5s of cancellation")
+	}
 }

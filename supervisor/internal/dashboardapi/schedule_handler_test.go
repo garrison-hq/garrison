@@ -143,3 +143,50 @@ func TestScheduleValidateRequiresAuth(t *testing.T) {
 		}
 	})
 }
+
+// TestScheduleValidateMethodNotAllowed — non-POST methods are refused
+// with 405 + an Allow header (same posture as objstore_handler.go).
+func TestScheduleValidateMethodNotAllowed(t *testing.T) {
+	h := newScheduleValidateHandler(15*time.Minute, func() time.Time { return fixedNow }, nil)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/schedule/validate", nil)
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d; want 405", rec.Code)
+	}
+	if allow := rec.Header().Get("Allow"); allow != "POST" {
+		t.Errorf("Allow = %q; want POST", allow)
+	}
+}
+
+// TestScheduleValidateRejectsMalformedJSON — a non-JSON body returns
+// 400 BadRequest, not a 422 validation rejection (the body never
+// reached the grammar).
+func TestScheduleValidateRejectsMalformedJSON(t *testing.T) {
+	h := newScheduleValidateHandler(15*time.Minute, func() time.Time { return fixedNow }, nil)
+	rec := scheduleValidatePOST(t, h, `{"schedule_expr": "daily@09:00"`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d; want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "not valid JSON") {
+		t.Errorf("body = %s; want the JSON-decode detail", rec.Body.String())
+	}
+}
+
+// TestScheduleValidateDefaultsNowFunc — a nil `now` falls back to
+// time.Now; the computed next_fire_at is strictly future.
+func TestScheduleValidateDefaultsNowFunc(t *testing.T) {
+	h := newScheduleValidateHandler(15*time.Minute, nil, nil)
+	before := time.Now().UTC()
+	rec := scheduleValidatePOST(t, h, `{"schedule_expr":"every@30m"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var body scheduleValidateResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !body.NextFireAt.After(before) {
+		t.Errorf("next_fire_at = %s; want strictly after %s", body.NextFireAt, before)
+	}
+}

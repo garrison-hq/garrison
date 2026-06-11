@@ -6,12 +6,19 @@ package finalize
 // one-tool-per-mode guarantee (FR-304).
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/garrison-hq/garrison/supervisor/internal/store"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 // newOneshotTestServer mirrors newTestServerLoop with the server (and
@@ -287,5 +294,179 @@ func TestOneshotModeRejectsFinalizeTicketCall(t *testing.T) {
 	code, _ := errObj["code"].(float64)
 	if int(code) != errCodeMethodNotFound {
 		t.Errorf("error code = %d; want %d", int(code), errCodeMethodNotFound)
+	}
+}
+
+// ----------------------------------------------------------------------------
+// handleOneshot coverage (M9 T020 top-up): the oneshot Handle path's
+// double-commit guard and validation routing, exercised through a
+// scripted store.DBTX so the unit suite reaches the same branches the
+// live guard takes against Postgres (the DB-backed end-to-end pass is
+// TestWriteFinalizeOneshotRejectsDoubleCommit, T008).
+// ----------------------------------------------------------------------------
+
+// oneshotStubRow scripts SelectScheduledTaskRunFinalizedState's Scan:
+// dest[0] is &row.Finalized (interface{}), which receives the scripted
+// value; a non-nil err short-circuits like a transport failure.
+type oneshotStubRow struct {
+	finalized any
+	err       error
+}
+
+func (r oneshotStubRow) Scan(dest ...any) error {
+	if r.err != nil {
+		return r.err
+	}
+	if len(dest) > 0 {
+		if p, ok := dest[0].(*interface{}); ok {
+			*p = r.finalized
+		}
+	}
+	return nil
+}
+
+// oneshotStubDBTX satisfies store.DBTX, serving the scripted row for
+// every QueryRow (the guard issues exactly one).
+type oneshotStubDBTX struct{ row oneshotStubRow }
+
+func (oneshotStubDBTX) Exec(context.Context, string, ...interface{}) (pgconn.CommandTag, error) {
+	return pgconn.CommandTag{}, nil
+}
+
+func (oneshotStubDBTX) Query(context.Context, string, ...interface{}) (pgx.Rows, error) {
+	return nil, pgx.ErrNoRows
+}
+
+func (s oneshotStubDBTX) QueryRow(context.Context, string, ...interface{}) pgx.Row {
+	return s.row
+}
+
+// newOneshotHandler builds an oneshot-mode Handler over a scripted
+// guard row.
+func newOneshotHandler(row oneshotStubRow) *Handler {
+	return &Handler{
+		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Mode:           ModeOneshot,
+		Queries:        store.New(oneshotStubDBTX{row: row}),
+		ScheduledRunID: pgtype.UUID{Bytes: [16]byte{9}, Valid: true},
+	}
+}
+
+// oneshotHandleResult runs Handle and decodes the ToolResult body.
+func oneshotHandleResult(t *testing.T, h *Handler, args json.RawMessage) ToolResult {
+	t.Helper()
+	raw, err := h.Handle(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Handle returned Go error: %v", err)
+	}
+	body := decodeEnvelopeBody(t, raw)
+	var result ToolResult
+	if err := json.Unmarshal(body, &result); err != nil {
+		t.Fatalf("body not valid ToolResult: %v", err)
+	}
+	return result
+}
+
+// TestOneshotHandleNilQueriesStateFailure — an oneshot-mode Handler
+// with no Queries binding reports the internal state-check failure as
+// a state-shaped rejection (mirrors ticket mode's
+// TestHandle_NilQueriesReturnsStateFailure) rather than crashing.
+func TestOneshotHandleNilQueriesStateFailure(t *testing.T) {
+	h := &Handler{
+		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Mode:           ModeOneshot,
+		ScheduledRunID: pgtype.UUID{Bytes: [16]byte{9}, Valid: true},
+	}
+	result := oneshotHandleResult(t, h, validOneshotArgs(t))
+	if result.Ok {
+		t.Error("ok=true on guard failure")
+	}
+	if result.Failure != FailureState {
+		t.Errorf("Failure = %q; want %q", result.Failure, FailureState)
+	}
+	if !strings.Contains(result.Hint, "please retry") {
+		t.Errorf("hint = %q; want a retry hint", result.Hint)
+	}
+}
+
+// TestOneshotHandleGuardErrorStateFailure — a transport error from the
+// guard query maps to the same internal state-check rejection.
+func TestOneshotHandleGuardErrorStateFailure(t *testing.T) {
+	h := newOneshotHandler(oneshotStubRow{err: errors.New("connection reset")})
+	result := oneshotHandleResult(t, h, validOneshotArgs(t))
+	if result.Ok {
+		t.Error("ok=true on guard transport failure")
+	}
+	if result.Failure != FailureState {
+		t.Errorf("Failure = %q; want %q", result.Failure, FailureState)
+	}
+}
+
+// TestOneshotHandleUnexpectedFinalizedType — a finalized column that
+// is not a bool (defensive: the query computes IS NOT NULL, so bool is
+// guaranteed today) maps to the internal state-check rejection, not a
+// crash or a silent pass.
+func TestOneshotHandleUnexpectedFinalizedType(t *testing.T) {
+	h := newOneshotHandler(oneshotStubRow{finalized: "yes"})
+	result := oneshotHandleResult(t, h, validOneshotArgs(t))
+	if result.Ok {
+		t.Error("ok=true on unexpected finalized column type")
+	}
+	if result.Failure != FailureState {
+		t.Errorf("Failure = %q; want %q", result.Failure, FailureState)
+	}
+}
+
+// TestOneshotHandleAlreadyCommittedRejects — finalized=true (the run
+// row already carries structured_outcome) rejects with the oneshot
+// lifecycle objection BEFORE validating the repeated payload, even a
+// schema-valid one (FR-260 analog).
+func TestOneshotHandleAlreadyCommittedRejects(t *testing.T) {
+	h := newOneshotHandler(oneshotStubRow{finalized: true})
+	result := oneshotHandleResult(t, h, validOneshotArgs(t))
+	if result.Ok {
+		t.Error("ok=true on already-committed run")
+	}
+	if result.Failure != FailureState {
+		t.Errorf("Failure = %q; want %q", result.Failure, FailureState)
+	}
+	const wantMsg = "finalize_oneshot already committed for this scheduled task run"
+	if result.Message != wantMsg {
+		t.Errorf("Message = %q; want %q", result.Message, wantMsg)
+	}
+	if result.Hint != wantMsg {
+		t.Errorf("Hint = %q; want %q (Q9 message/hint parity)", result.Hint, wantMsg)
+	}
+}
+
+// TestOneshotHandleSchemaRejection — with the guard reporting not yet
+// finalized, an invalid payload flows to ValidateOneshot and returns
+// the schema rejection envelope.
+func TestOneshotHandleSchemaRejection(t *testing.T) {
+	h := newOneshotHandler(oneshotStubRow{finalized: false})
+	args := mutateOneshotArgs(t, func(m map[string]any) { delete(m, "outcome") })
+	result := oneshotHandleResult(t, h, args)
+	if result.Ok {
+		t.Error("ok=true on schema-invalid payload")
+	}
+	if result.Field != "outcome" {
+		t.Errorf("Field = %q; want outcome", result.Field)
+	}
+	if result.Attempt != 1 {
+		t.Errorf("Attempt = %d; want 1", result.Attempt)
+	}
+}
+
+// TestOneshotHandleAcceptsValidPayload — guard clear + schema-valid
+// payload returns ok=true; the supervisor-side observer (not the
+// handler) owns the WriteFinalizeOneshot commit.
+func TestOneshotHandleAcceptsValidPayload(t *testing.T) {
+	h := newOneshotHandler(oneshotStubRow{finalized: false})
+	result := oneshotHandleResult(t, h, validOneshotArgs(t))
+	if !result.Ok {
+		t.Errorf("ok=false on valid payload: %+v", result)
+	}
+	if result.Attempt != 1 {
+		t.Errorf("Attempt = %d; want 1", result.Attempt)
 	}
 }

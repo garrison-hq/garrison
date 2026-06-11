@@ -245,3 +245,33 @@ func TestCreateScheduledTaskRejectsDuplicateName(t *testing.T) {
 		t.Errorf("validation_failed audit rows = %d; want 1", n)
 	}
 }
+
+// TestCreateScheduledTaskRejectsUnknownDepartment: a department slug
+// with no row maps to validation_failed with the slug named, writes
+// the failure audit, and inserts nothing (FR-105 via the verb's own
+// slug-resolution step — ValidateTask is never reached).
+func TestCreateScheduledTaskRejectsUnknownDepartment(t *testing.T) {
+	fx := setupIntegration(t)
+	t.Setenv("GARRISON_SCHED_MIN_INTERVAL", "15m")
+
+	args := json.RawMessage(`{"name":"ghost-task","department_slug":"astrology","role_slug":"engineering.engineer","mode":"ticket","schedule_expr":"daily@09:00","objective_template":"o","acceptance_criteria_template":"a"}`)
+	r, err := realCreateScheduledTaskHandler(context.Background(), fx.deps, args)
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if r.Success {
+		t.Fatal("unknown department should be rejected")
+	}
+	if r.ErrorKind != string(ErrValidationFailed) {
+		t.Errorf("ErrorKind = %q; want %q", r.ErrorKind, ErrValidationFailed)
+	}
+	if !strings.Contains(r.Message, `department "astrology" not found`) {
+		t.Errorf("Message = %q; want the unknown-department detail", r.Message)
+	}
+	if n := scheduledTaskCount(t, fx); n != 0 {
+		t.Errorf("scheduled_tasks rows = %d; want 0", n)
+	}
+	if n := auditOutcomeCount(t, fx, "validation_failed"); n != 1 {
+		t.Errorf("validation_failed audit rows = %d; want 1", n)
+	}
+}
