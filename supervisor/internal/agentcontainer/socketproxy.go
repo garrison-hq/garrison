@@ -35,7 +35,14 @@ const containersPathPrefix = "/containers/"
 type socketProxyController struct {
 	baseURL string // e.g. "http://garrison-docker-proxy:2375"
 	http    *http.Client
-	logger  *slog.Logger
+	// stream is the http client minus the wall-clock Timeout, used for
+	// the exec-start raw stream only: http.Client.Timeout caps the
+	// ENTIRE response body read, which would tear down a claude exec
+	// stream 30s into the run (M7 latent bug surfaced by the T011 live
+	// smoke). Stream lifetime is bounded by the caller's request ctx
+	// instead — spawn passes execCtx = budget + slack (rule 4 analog).
+	stream *http.Client
+	logger *slog.Logger
 }
 
 // NewSocketProxyController constructs a production Controller.
@@ -49,7 +56,12 @@ func NewSocketProxyController(baseURL string, httpClient *http.Client, logger *s
 	return &socketProxyController{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		http:    httpClient,
-		logger:  logger,
+		stream: &http.Client{
+			Transport:     httpClient.Transport,
+			CheckRedirect: httpClient.CheckRedirect,
+			Jar:           httpClient.Jar,
+		},
+		logger: logger,
 	}
 }
 
@@ -279,7 +291,10 @@ func (c *socketProxyController) Exec(ctx context.Context, id string, spec ExecSp
 	}
 
 	startBody, _ := json.Marshal(map[string]any{"Detach": false, "Tty": false})
-	startResp, err := c.do(ctx, http.MethodPost, "/exec/"+out.ID+"/start", bytes.NewReader(startBody))
+	// The exec-start response body IS the session's byte stream; it
+	// must ride the timeout-free stream client so it lives exactly as
+	// long as ctx allows, not the control-plane client's 30s wall cap.
+	startResp, err := c.doWith(ctx, c.stream, http.MethodPost, "/exec/"+out.ID+"/start", bytes.NewReader(startBody))
 	if err != nil {
 		return nil, err
 	}
@@ -400,6 +415,12 @@ func (c *socketProxyController) ImageDigest(ctx context.Context, imageRef string
 // errors to ErrSocketProxyDown so callers can route distinctly from
 // per-endpoint errors.
 func (c *socketProxyController) do(ctx context.Context, method, path string, body io.Reader) (*http.Response, error) {
+	return c.doWith(ctx, c.http, method, path, body)
+}
+
+// doWith is do with an explicit client: control-plane calls use c.http
+// (30s wall cap); the exec-start stream uses c.stream (ctx-bounded).
+func (c *socketProxyController) doWith(ctx context.Context, client *http.Client, method, path string, body io.Reader) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, body)
 	if err != nil {
 		return nil, fmt.Errorf("agentcontainer: build %s %s: %w", method, path, err)
@@ -407,7 +428,7 @@ func (c *socketProxyController) do(ctx context.Context, method, path string, bod
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := c.http.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		// Distinguish ctx cancel from connection failure for callers.
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {

@@ -91,6 +91,13 @@ type terminalWriteParams struct {
 	InsertTransition bool
 	FromCol          string
 	ToCol            string
+
+	// SkipMarkProcessed leaves the event_outbox row unprocessed so the
+	// M1 poll fallback retries the event. Container-path exec-create
+	// failures set it (FR-019: container missing/stopped at spawn is
+	// retryable; the boot reconciler is the repair path). Every other
+	// terminal write marks the event processed as before.
+	SkipMarkProcessed bool
 }
 
 // Deps bundles Spawn's runtime collaborators. Constructed once in
@@ -202,6 +209,28 @@ type Deps struct {
 	// disables it (direct-exec/test back-compat). Production wires one
 	// shared instance from cmd/supervisor.
 	Inflight *AgentInflight
+
+	// M7.1 T011: container-path collaborators. EgressProxyURL lands in
+	// claude execs as HTTPS_PROXY (FR-009/FR-011 — the only route out
+	// of the agents network); AgentWorkspaceFS is the host base dir of
+	// the agent-ID-keyed workspace binds, used for the acceptance-gate
+	// path <WorkspaceFS>/<agent-uuid> (FR-006). Both wired from config
+	// in cmd/supervisor (T012); unused on the direct-exec path.
+	EgressProxyURL   string
+	AgentWorkspaceFS string
+
+	// terminalReasonOverride, when non-nil, remaps the adjudicated
+	// (status, exit_reason) pair just before the terminal write. Set
+	// per-spawn on a Deps COPY by the container path only (plan D21):
+	// a coreutils-timeout wrapper failure (exit 125–127, no result
+	// frame → adjudicated no_result) lands in the spawn_failed class.
+	// nil everywhere else — zero behavior change for direct-exec.
+	terminalReasonOverride func(status, exitReason string) (status2, exitReason2 string)
+
+	// terminalWriteFn replaces the terminal-write transaction in unit
+	// tests (m7_test.go) so container-path terminal contracts are
+	// assertable without a database. nil in production.
+	terminalWriteFn func(ctx context.Context, p terminalWriteParams) error
 }
 
 // UseFake decides which branch Spawn runs. UseFakeAgent wins if set;
@@ -718,6 +747,29 @@ func runRealClaude(
 		)
 	}
 
+	// M7.1 T011: the transport dispatch happens here — after the shared
+	// steps 1–3 (prepare, hashes, wake-up, vault fetch, Rule-3
+	// pre-check) and before the host-side MCP config write: the
+	// container path renders the config itself, writes it inside the
+	// container, and builds argv with the in-container path. The legacy
+	// direct-exec path below stays load-bearing through the soak window
+	// (GARRISON_USE_DIRECT_EXEC=true is the rollback lever, FR-018).
+	if !deps.UseDirectExec && deps.AgentContainer != nil {
+		return runRealClaudeViaContainer(ctx, deps, containerRunInputs{
+			InstanceID:   instanceID,
+			EventID:      eventID,
+			TicketUUID:   ticketUUID,
+			Dept:         dept,
+			Payload:      payload,
+			RoleSlug:     roleSlug,
+			Agent:        agent,
+			Fetched:      fetched,
+			WakeUpStdout: wakeUpStdout,
+			WakeUpStatus: wakeUpStatus,
+			Logger:       logger,
+		})
+	}
+
 	// Step 4: write per-invocation MCP config. Disk errors here land in
 	// the spawn_failed terminal (clarify-session Q2) — dispatcher continues
 	// onto the next event.
@@ -772,49 +824,9 @@ func runRealClaude(
 	execCtx, execCancel := context.WithTimeout(context.WithoutCancel(ctx), deps.SubprocessTimeout)
 	defer execCancel()
 
-	model := agent.Model
-	if model == "" {
-		model = deps.ClaudeModel
-	}
-	// M2.2: task description names both ticket_id and instance_id so the
-	// agent has them accessible without having to query either. The full
-	// instance_id also appears in the system-prompt "This turn" block
-	// (M2.2 Session 2026-04-23 Q2) via mempalace.ComposeSystemPrompt.
-	taskDescription := fmt.Sprintf(
-		"You are the %s on ticket %s (agent_instance %s). Read it, then execute your completion protocol from the system prompt.",
-		roleSlug, ticketIDText, instanceIDText,
-	)
-	budget := deps.ClaudeBudgetUSD
-	if budget <= 0 {
-		budget = 0.10 // M2.2 default per NFR-201
-	}
-	systemPrompt := mempalace.ComposeSystemPrompt(agent.AgentMD, wakeUpStdout, ticketIDText, instanceIDText)
-	argv := buildClaudeArgv(argvParams{
-		TaskDescription: taskDescription,
-		Model:           model,
-		BudgetUSD:       budget,
-		MCPConfigPath:   mcpPath,
-		SystemPrompt:    systemPrompt,
-	})
-
-	// M7 T011 / decision #5: when the operator has migrated agents into
-	// per-agent containers (UseDirectExec=false post-migrate7), the
-	// supervisor no longer fork+execs claude directly. Instead, the
-	// already-running per-agent container hosts a long-lived claude
-	// process that the supervisor reaches via the socket-proxy's
-	// /containers/<id>/exec surface. The full pipe-drain + adjudicator
-	// integration lives behind this branch — the legacy direct-exec
-	// path below stays load-bearing through the soak window.
-	if !deps.UseDirectExec && deps.AgentContainer != nil {
-		return runRealClaudeViaContainer(execCtx, deps, runViaContainerInputs{
-			InstanceID: instanceID,
-			EventID:    eventID,
-			TicketID:   ticketUUID,
-			RoleSlug:   roleSlug,
-			Argv:       argv,
-			Logger:     logger,
-		})
-	}
+	argvIn := claudeArgvInputs(deps, agent, roleSlug, ticketIDText, instanceIDText, wakeUpStdout)
+	argvIn.MCPConfigPath = mcpPath
+	argv := buildClaudeArgv(argvIn)
 
 	cmd := exec.CommandContext(execCtx, deps.ClaudeBin, argv...)
 	if dept.WorkspacePath != nil && *dept.WorkspacePath != "" {
@@ -869,7 +881,7 @@ func runRealClaude(
 		return writeFail(ExitSpawnFailed)
 	}
 
-	logger = logger.With("pid", cmd.Process.Pid, "session_prep_model", model)
+	logger = logger.With("pid", cmd.Process.Pid, "session_prep_model", argvIn.Model)
 	logger.Info("claude subprocess started")
 
 	// Step 8: backfill pid (M1 retro §4 fix).
@@ -962,6 +974,35 @@ type argvParams struct {
 	BudgetUSD       float64
 	MCPConfigPath   string
 	SystemPrompt    string
+}
+
+// claudeArgvInputs derives the transport-independent argv inputs: the
+// model fallback, the M2.2 task description (names both ticket_id and
+// instance_id so the agent has them without querying; the full
+// instance_id also appears in the system-prompt "This turn" block via
+// mempalace.ComposeSystemPrompt — M2.2 Session 2026-04-23 Q2), the
+// NFR-201 budget default, and the composed system prompt. Both
+// transports call it so the container path provably runs the same
+// invocation contract (FR-013); MCPConfigPath is left empty for the
+// caller to fill (host path vs in-container /tmp path).
+func claudeArgvInputs(deps Deps, agent agents.Agent, roleSlug, ticketIDText, instanceIDText, wakeUpStdout string) argvParams {
+	model := agent.Model
+	if model == "" {
+		model = deps.ClaudeModel
+	}
+	budget := deps.ClaudeBudgetUSD
+	if budget <= 0 {
+		budget = 0.10 // M2.2 default per NFR-201
+	}
+	return argvParams{
+		TaskDescription: fmt.Sprintf(
+			"You are the %s on ticket %s (agent_instance %s). Read it, then execute your completion protocol from the system prompt.",
+			roleSlug, ticketIDText, instanceIDText,
+		),
+		Model:        model,
+		BudgetUSD:    budget,
+		SystemPrompt: mempalace.ComposeSystemPrompt(agent.AgentMD, wakeUpStdout, ticketIDText, instanceIDText),
+	}
 }
 
 // buildClaudeArgv renders the legacy direct-exec claude argv (M2.1 → M7
@@ -1199,6 +1240,14 @@ func writeTerminal(ctx context.Context, deps Deps, instanceID, eventID pgtype.UU
 // Non-empty on the succeeded path insert a ticket_transitions row and
 // update tickets.column_slug to p.ToCol.
 func writeTerminalCostAndWakeup(ctx context.Context, deps Deps, p terminalWriteParams) error {
+	// M7.1 T011: container-transport remap hook (plan D21). Runs before
+	// the test seam so both observe the final (status, exit_reason).
+	if deps.terminalReasonOverride != nil {
+		p.Status, p.ExitReason = deps.terminalReasonOverride(p.Status, p.ExitReason)
+	}
+	if deps.terminalWriteFn != nil {
+		return deps.terminalWriteFn(ctx, p)
+	}
 	tx, err := deps.Pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf(errBeginTerminalTx, err)
@@ -1238,9 +1287,11 @@ func writeTerminalCostAndWakeup(ctx context.Context, deps Deps, p terminalWriteP
 			return fmt.Errorf("spawn: UpdateTicketColumnSlug: %w", err)
 		}
 	}
-	if err := q.MarkEventProcessed(ctx, p.EventID); err != nil {
-		_ = tx.Rollback(ctx)
-		return fmt.Errorf(errMarkEventProcd, err)
+	if !p.SkipMarkProcessed {
+		if err := q.MarkEventProcessed(ctx, p.EventID); err != nil {
+			_ = tx.Rollback(ctx)
+			return fmt.Errorf(errMarkEventProcd, err)
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf(errCommitTerminal, err)
