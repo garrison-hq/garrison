@@ -68,10 +68,21 @@ func mutateOneshotArgs(t *testing.T, mutate func(map[string]any)) json.RawMessag
 	return raw
 }
 
+// goldenTicketDescriptorJSON is the frozen marshaled finalize_ticket
+// descriptor (M9 review #6): generated once from the shipped code,
+// which the post-M9 adversarial review verified matches the pre-M9
+// bytes. The pin test compares BOTH the served tools/list entry AND
+// ToolDescriptor() against this constant — a self-referential
+// served-vs-ToolDescriptor comparison would silently track any future
+// descriptor drift instead of catching it (FR-302).
+const goldenTicketDescriptorJSON = `{"description":"Commit the ticket's structured completion. Schema: garrison.finalize_ticket.v1. The supervisor atomically writes the diary + KG triples to MemPalace and transitions the ticket when this call succeeds. This is the only way to complete a ticket in M2.2.1 onwards.","inputSchema":{"additionalProperties":false,"properties":{"diary_entry":{"additionalProperties":false,"properties":{"artifacts":{"items":{"maxLength":500,"type":"string"},"maxItems":50,"type":"array"},"blockers":{"items":{"maxLength":500,"type":"string"},"maxItems":50,"type":"array"},"discoveries":{"items":{"maxLength":500,"type":"string"},"maxItems":50,"type":"array"},"rationale":{"maxLength":4000,"minLength":50,"type":"string"}},"required":["rationale","artifacts","blockers","discoveries"],"type":"object"},"kg_triples":{"items":{"additionalProperties":false,"properties":{"object":{"minLength":3,"type":"string"},"predicate":{"minLength":3,"type":"string"},"subject":{"minLength":3,"type":"string"},"valid_from":{"description":"ISO-8601 timestamp or literal \"now\".","type":"string"}},"required":["subject","predicate","object","valid_from"],"type":"object"},"maxItems":100,"minItems":1,"type":"array"},"outcome":{"maxLength":500,"minLength":10,"type":"string"},"ticket_id":{"description":"UUID of the ticket being finalized.","type":"string"}},"required":["ticket_id","outcome","diary_entry","kg_triples"],"type":"object"},"name":"finalize_ticket"}`
+
 // TestToolsListTicketModeUnchanged — a server with the zero-value mode
 // (every M2.2.1-era construction path) returns exactly one tool whose
-// JSON is identical to ToolDescriptor()'s — the finalize_ticket
-// descriptor is byte-for-byte unaffected by the mode switch (FR-302).
+// JSON is byte-identical to the frozen pre-M9 golden, and
+// ToolDescriptor() itself still marshals to the same golden — the
+// finalize_ticket descriptor is byte-for-byte unaffected by the mode
+// switch (FR-302, review #6).
 func TestToolsListTicketModeUnchanged(t *testing.T) {
 	srv := newTestServerLoop() // mode zero value → ticket
 	req := `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`
@@ -89,12 +100,15 @@ func TestToolsListTicketModeUnchanged(t *testing.T) {
 	if err != nil {
 		t.Fatalf("re-marshal listed tool: %v", err)
 	}
-	want, err := json.Marshal(ToolDescriptor())
+	if string(got) != goldenTicketDescriptorJSON {
+		t.Errorf("ticket-mode tools/list descriptor drifted from the pre-M9 golden:\n   got: %s\ngolden: %s", got, goldenTicketDescriptorJSON)
+	}
+	descriptor, err := json.Marshal(ToolDescriptor())
 	if err != nil {
 		t.Fatalf("marshal ToolDescriptor: %v", err)
 	}
-	if string(got) != string(want) {
-		t.Errorf("ticket-mode tools/list descriptor changed:\n got: %s\nwant: %s", got, want)
+	if string(descriptor) != goldenTicketDescriptorJSON {
+		t.Errorf("ToolDescriptor() drifted from the pre-M9 golden:\n   got: %s\ngolden: %s", descriptor, goldenTicketDescriptorJSON)
 	}
 
 	// Explicit ModeTicket must behave identically to the zero value.
