@@ -35,6 +35,10 @@ type Server struct {
 	shutdownGrace time.Duration
 	logger        *slog.Logger
 	mux           *http.ServeMux
+	// schedMinInterval is the FR-404 minimum firing interval
+	// (cfg.SchedMinInterval), captured at construction for the M9
+	// POST /schedule/validate handler.
+	schedMinInterval time.Duration
 }
 
 // NewServer wires the auth middleware, but leaves route registration
@@ -54,9 +58,10 @@ func NewServer(cfg *config.Config, deps Deps) *Server {
 			Handler:           mux,
 			ReadHeaderTimeout: 5 * time.Second,
 		},
-		shutdownGrace: cfg.ShutdownGrace,
-		logger:        logger,
-		mux:           mux,
+		shutdownGrace:    cfg.ShutdownGrace,
+		logger:           logger,
+		mux:              mux,
+		schedMinInterval: cfg.SchedMinInterval,
 	}
 }
 
@@ -96,6 +101,12 @@ func (s *Server) RegisterDefaultRoutes(deps Deps) error {
 
 	s.mux.Handle("/api/objstore/company-md",
 		auth(newObjstoreHandler(deps.Objstore, s.logger)))
+
+	// M9 T013: expression validation single-sources in Go (plan
+	// decision 10) — the dashboard's Server Actions call this endpoint
+	// for grammar + next-fire computation; no TS date-math mirror.
+	s.mux.Handle("/schedule/validate",
+		auth(newScheduleValidateHandler(s.schedMinInterval, nil, s.logger)))
 
 	if deps.Mempalace != nil {
 		s.mux.Handle("/api/mempalace/recent-writes",
