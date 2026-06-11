@@ -141,3 +141,37 @@ describe('ARCHITECTURE.md M7 amendment', () => {
     expect(source).toContain('docs/security/hiring-threat-model.md');
   });
 });
+
+describe('ARCHITECTURE.md M9 amendment', () => {
+  // Pins the M9 substrings per T019 (M6 T019 pattern). The M9 entry is
+  // annotated with shipped status + retro link, keeps the committed
+  // design language (fire-on-recovery-with-collapse, two firing modes,
+  // finalize_oneshot), and carries per-thread implementation pointers.
+  it('M9 paragraph annotated with shipped status', () => {
+    const path = resolve(import.meta.dirname, '..', '..', 'ARCHITECTURE.md');
+    const source = readFileSync(path, 'utf-8');
+    expect(source).toContain('**M9 — Scheduled / triggered wake-ups (heartbeat).**');
+    expect(source).toContain('Shipped 2026-06-11');
+    expect(source).toContain('docs/retros/m9.md');
+  });
+
+  it('M9 entry keeps the committed design language', () => {
+    const path = resolve(import.meta.dirname, '..', '..', 'ARCHITECTURE.md');
+    const source = readFileSync(path, 'utf-8');
+    expect(source).toContain('fire-on-recovery semantics with collapse');
+    expect(source).toContain('**`ticket` mode**');
+    expect(source).toContain('**`oneshot` mode**');
+    expect(source).toContain('finalize_oneshot');
+  });
+
+  it('M9 entry carries per-thread implementation pointers', () => {
+    const path = resolve(import.meta.dirname, '..', '..', 'ARCHITECTURE.md');
+    const source = readFileSync(path, 'utf-8');
+    expect(source).toContain('Shipped implementation pointers, per thread:');
+    expect(source).toContain('supervisor/internal/schedule/');
+    expect(source).toContain('supervisor/internal/spawn/oneshot.go');
+    expect(source).toContain("pg_notify('work.scheduled.oneshot_due')");
+    expect(source).toContain('/admin/recurring-jobs');
+    expect(source).toContain('20260610000002_m9_scheduled_wakeups.sql');
+  });
+});

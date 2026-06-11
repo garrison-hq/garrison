@@ -900,10 +900,75 @@ API calls); the container substrate keeps reconciling but sits
 unused. The flag survives the soak window per the M7 retro — do not
 remove it.
 
+## M9 — scheduled wake-ups (recurring jobs)
+
+M9 adds a supervisor-internal tick loop that fires concrete named jobs
+on a cadence (ticket mode → normal Kanban flow; oneshot mode → direct
+bounded spawn, no ticket). **No compose or Dockerfile changes.** One
+schema migration (`migrations/20260610000002_m9_scheduled_wakeups.sql`)
+applies through the normal goose flow at supervisor boot — it adds
+`scheduled_tasks` + `scheduled_task_runs` and relaxes
+`agent_instances.ticket_id` to nullable under an exactly-one-origin
+CHECK.
+
+**1. New supervisor env vars** (all optional; defaults shown):
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `GARRISON_SCHED_TICK_INTERVAL` | `30s` | cadence of the scheduler tick loop. Rejected below `1s`. Worst-case firing latency after a slot is one tick. |
+| `GARRISON_SCHED_MIN_INTERVAL` | `15m` | minimum allowed cadence for any scheduled task; create/edit rejects anything tighter (e.g. `every@5m` under the default). |
+| `GARRISON_CHAT_MAX_SCHEDULED_TASKS_PER_TURN` | `3` | per-chat-turn ceiling on `create_scheduled_task` calls; exceeding it bails the turn with `scheduled_task_creation_ceiling_reached`. |
+
+**2. First-task walkthrough — create a daily standup and watch it fire**
+
+1. Dashboard → admin group → **Recurring jobs** (`/admin/recurring-jobs`).
+2. Fill the create form:
+   - name: `daily-standup`
+   - schedule: `daily@HH:MM` — **UTC**, pick a slot a few minutes
+     ahead. The grammar is exactly `daily@HH:MM`,
+     `weekly@{mon..sun}@HH:MM`, `every@<N>{m|h}`; full cron syntax is
+     rejected with a validation error.
+   - department + role: any existing pair (e.g. engineering /
+     `engineer`).
+   - mode: `oneshot` (the standup is a read-state-write-findings job;
+     it needs no Kanban ticket).
+   - objective template: `Run the daily standup sweep for {{fire_at}}.`
+   - acceptance criteria: `Summary covers everything since
+     {{last_fired_at}}.` (`{{last_fired_at}}` renders the literal
+     `never` on the first fire.)
+3. Bad grammar or a sub-`GARRISON_SCHED_MIN_INTERVAL` cadence renders
+   inline as a validation error (the form round-trips
+   `POST /schedule/validate` on the dashboardapi before writing).
+4. Watch the fire: within one tick interval after the slot, the list
+   row's **next fire** advances to tomorrow's slot and **last outcome**
+   shows `fired`. The detail page's run history gains a row carrying
+   the spawned agent instance and its status; on a clean exit the run
+   shows the structured outcome the agent committed via
+   `finalize_oneshot`.
+5. Outcome vocabulary in run history: `fired` / `skipped overlap`
+   (previous run of the same task still live) / `gate deferred`
+   (M6 cost-throttle, or the M8 dept-weekly budget in ticket mode —
+   oneshot deferrals re-dispatch automatically once the gate clears) /
+   `failed` (detail column says why).
+6. Recovery check (optional but recommended once): stop the supervisor
+   across a slot, restart — the task fires **exactly once** on
+   recovery and `next_fire_at` lands strictly in the future. Missed
+   intermediate slots are collapsed, never backfilled.
+
+Pause/resume and delete live on the detail page. Delete is soft — run
+history and audit rows survive; the name becomes reusable. Resume
+never backfills: `next_fire_at` recomputes forward from now.
+
 ---
 
 ## Changelog
 
+- **2026-06-11**: M9 scheduled wake-ups section added (no compose
+  changes, one migration, GARRISON_SCHED_TICK_INTERVAL /
+  GARRISON_SCHED_MIN_INTERVAL /
+  GARRISON_CHAT_MAX_SCHEDULED_TASKS_PER_TURN env vars,
+  /admin/recurring-jobs first-task walkthrough + recovery-collapse
+  check).
 - **2026-06-11**: M7.1 container execution pipeline section added
   (host workspace/skills dir creation, garrison-agents network +
   digest-pinned squid egress proxy compose deltas, ALLOW_RESTARTS,
