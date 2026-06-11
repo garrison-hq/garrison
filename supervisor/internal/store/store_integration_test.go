@@ -119,10 +119,14 @@ func TestMarkEventProcessedIdempotent(t *testing.T) {
 	}
 }
 
-// TestRecoverStaleRunning verifies NFR-006: a running agent_instance whose
-// started_at is older than 5 minutes is flipped to failed +
-// supervisor_restarted by RecoverStaleRunning. A row inside the window is
-// left untouched.
+// TestRecoverStaleRunning verifies startup recovery under the amended
+// NFR-006 semantics: RunOnce executes after the advisory lock is
+// acquired and before this process spawns anything, so EVERY
+// status='running' row belongs to a dead predecessor and is flipped to
+// failed + supervisor_restarted regardless of age. The original
+// 5-minute window left young rows stranded across fast crash+restart
+// cycles, wedging their department on the concurrency cap (observed
+// live, 2026-06-10 acceptance run).
 func TestRecoverStaleRunning(t *testing.T) {
 	pool := testdb.Start(t)
 	q := store.New(pool)
@@ -138,7 +142,8 @@ func TestRecoverStaleRunning(t *testing.T) {
 		t.Fatalf("InsertTicket: %v", err)
 	}
 
-	// Fresh running row (should NOT be reconciled).
+	// Young running row: reconciled too under the amended semantics
+	// (it cannot belong to a live supervisor at startup).
 	freshID, err := q.InsertRunningInstance(ctx, store.InsertRunningInstanceParams{
 		DepartmentID: dept.ID,
 		TicketID:     ticket.ID,
@@ -147,7 +152,7 @@ func TestRecoverStaleRunning(t *testing.T) {
 		t.Fatalf("InsertRunningInstance fresh: %v", err)
 	}
 
-	// Stale running row: insert then rewrite started_at to 10 minutes ago.
+	// Old running row: reconciled before and after the amendment.
 	staleID, err := q.InsertRunningInstance(ctx, store.InsertRunningInstanceParams{
 		DepartmentID: dept.ID,
 		TicketID:     ticket.ID,
@@ -166,30 +171,19 @@ func TestRecoverStaleRunning(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RecoverStaleRunning: %v", err)
 	}
-	if n != 1 {
-		t.Fatalf("expected 1 reconciled row, got %d", n)
+	if n != 2 {
+		t.Fatalf("expected 2 reconciled rows, got %d", n)
 	}
 
-	// Verify the stale row is now failed/supervisor_restarted and the fresh
-	// row is still running. We go through the pool directly because the
-	// generated queries don't expose a generic "get instance" by id.
-	var staleStatus, staleReason string
-	if err := pool.QueryRow(ctx,
-		"SELECT status, exit_reason FROM agent_instances WHERE id = $1", staleID,
-	).Scan(&staleStatus, &staleReason); err != nil {
-		t.Fatalf("fetch stale: %v", err)
-	}
-	if staleStatus != "failed" || staleReason != "supervisor_restarted" {
-		t.Fatalf("stale row: got status=%q reason=%q", staleStatus, staleReason)
-	}
-
-	var freshStatus string
-	if err := pool.QueryRow(ctx,
-		"SELECT status FROM agent_instances WHERE id = $1", freshID,
-	).Scan(&freshStatus); err != nil {
-		t.Fatalf("fetch fresh: %v", err)
-	}
-	if freshStatus != "running" {
-		t.Fatalf("fresh row status got=%q want=running", freshStatus)
+	for name, id := range map[string]interface{}{"fresh": freshID, "stale": staleID} {
+		var status, reason string
+		if err := pool.QueryRow(ctx,
+			"SELECT status, exit_reason FROM agent_instances WHERE id = $1", id,
+		).Scan(&status, &reason); err != nil {
+			t.Fatalf("fetch %s: %v", name, err)
+		}
+		if status != "failed" || reason != "supervisor_restarted" {
+			t.Fatalf("%s row: got status=%q reason=%q", name, status, reason)
+		}
 	}
 }

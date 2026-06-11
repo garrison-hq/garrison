@@ -98,6 +98,13 @@ func ReconcileMcpClients(ctx context.Context, deps ReconcileDeps) (ReconcileRepo
 		"existing", len(report.Existing),
 		"failed", len(report.Failed),
 	)
+	// Failure reasons would otherwise be silently dropped — the report
+	// is returned but main only logs the counts. One Warn per failed
+	// agent keeps the operator's log actionable.
+	for _, f := range report.Failed {
+		logger.Warn("mcpjungle: reconcile failed for agent",
+			"agent_id", uuidString(f.AgentID), "reason", f.Reason)
+	}
 	return report, nil
 }
 

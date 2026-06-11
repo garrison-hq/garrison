@@ -117,6 +117,12 @@ func (p *ChatPolicy) OnInit(ctx context.Context, e claudeproto.InitEvent) claude
 			"offender", offender, "status", status)
 		return claudeproto.RouterActionBail
 	}
+	if pending := claudeproto.PendingMCPServers(e.MCPServers); len(pending) > 0 {
+		p.Logger.Warn("chat: mcp servers still pending at init; continuing",
+			"session_id", uuidString(p.SessionID),
+			"message_id", uuidString(p.MessageID),
+			"pending", pending)
+	}
 	p.Logger.Info("chat: claude init",
 		"session_id", uuidString(p.SessionID),
 		"message_id", uuidString(p.MessageID),

@@ -54,6 +54,10 @@ var allEnvVars = []string{
 	// M8 additions
 	"GARRISON_MCPJUNGLE_URL",
 	"GARRISON_MCPJUNGLE_ADMIN_TOKEN_PATH",
+	// M7.1 additions
+	"GARRISON_AGENTS_NETWORK",
+	"GARRISON_EGRESS_PROXY_URL",
+	"GARRISON_USE_DIRECT_EXEC",
 }
 
 // clearAll unsets every GARRISON_* env var the config package reads, so a test
@@ -939,6 +943,71 @@ func TestM8MCPJungleEnvVarsDefault(t *testing.T) {
 	}
 	if cfg.MCPJungleAdminTokenPath != "mcpjungle/admin" {
 		t.Errorf("MCPJungleAdminTokenPath = %q; want mcpjungle/admin", cfg.MCPJungleAdminTokenPath)
+	}
+}
+
+// TestAgentsNetworkAndEgressProxyDefaults — M7.1 knobs (plan §8): with
+// no env set, the agents network defaults to the compose network name
+// and the egress proxy URL to the squid sidecar's service DNS.
+func TestAgentsNetworkAndEgressProxyDefaults(t *testing.T) {
+	clearAll(t)
+	t.Setenv("GARRISON_DATABASE_URL", validDBURL)
+	t.Setenv("GARRISON_FAKE_AGENT_CMD", validFakeCmd)
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.AgentsNetwork != "garrison-agents" {
+		t.Errorf("AgentsNetwork default = %q; want garrison-agents", cfg.AgentsNetwork)
+	}
+	if cfg.EgressProxyURL != "http://garrison-egress-proxy:3128" {
+		t.Errorf("EgressProxyURL default = %q; want http://garrison-egress-proxy:3128", cfg.EgressProxyURL)
+	}
+}
+
+// TestUseDirectExecDefaultsFalse — M7.1 T012, the milestone's single
+// behavior flip (FR-018): container exec is the default; setting
+// GARRISON_USE_DIRECT_EXEC=true is the rollback lever and must still
+// parse (the flag is NOT removed — post-soak polish per the M7 retro).
+func TestUseDirectExecDefaultsFalse(t *testing.T) {
+	clearAll(t)
+	t.Setenv("GARRISON_DATABASE_URL", validDBURL)
+	t.Setenv("GARRISON_FAKE_AGENT_CMD", validFakeCmd)
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.UseDirectExec {
+		t.Error("UseDirectExec default = true; want false (T012 flip)")
+	}
+
+	t.Setenv("GARRISON_USE_DIRECT_EXEC", "true")
+	cfg, err = config.Load()
+	if err != nil {
+		t.Fatalf("Load with GARRISON_USE_DIRECT_EXEC=true: %v", err)
+	}
+	if !cfg.UseDirectExec {
+		t.Error("GARRISON_USE_DIRECT_EXEC=true did not override; rollback lever broken")
+	}
+}
+
+// TestAgentsNetworkAndEgressProxyOverrides — env overrides land in the
+// config struct verbatim.
+func TestAgentsNetworkAndEgressProxyOverrides(t *testing.T) {
+	clearAll(t)
+	t.Setenv("GARRISON_DATABASE_URL", validDBURL)
+	t.Setenv("GARRISON_FAKE_AGENT_CMD", validFakeCmd)
+	t.Setenv("GARRISON_AGENTS_NETWORK", "garrison-agents-staging")
+	t.Setenv("GARRISON_EGRESS_PROXY_URL", "http://egress-staging:3128")
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.AgentsNetwork != "garrison-agents-staging" {
+		t.Errorf("AgentsNetwork = %q; want override", cfg.AgentsNetwork)
+	}
+	if cfg.EgressProxyURL != "http://egress-staging:3128" {
+		t.Errorf("EgressProxyURL = %q; want override", cfg.EgressProxyURL)
 	}
 }
 

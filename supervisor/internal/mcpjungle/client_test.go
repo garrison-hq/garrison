@@ -33,7 +33,7 @@ func newStubServer(t *testing.T, handler http.HandlerFunc) *stubServer {
 
 func TestCreateMcpClientHappyPath(t *testing.T) {
 	s := newStubServer(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/clients" {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v0/clients" {
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 		}
 		var body map[string]any
@@ -42,7 +42,8 @@ func TestCreateMcpClientHappyPath(t *testing.T) {
 			t.Errorf("name = %v; want garrison.engineer.deadbeef", body["name"])
 		}
 		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(map[string]string{"id": "client-1", "name": "garrison.engineer.deadbeef"})
+		// Mirrors the live API's GORM-shaped body: numeric "ID".
+		_ = json.NewEncoder(w).Encode(map[string]any{"ID": 4, "name": "garrison.engineer.deadbeef"})
 	})
 	c := NewClient(s.URL, "admin-tok", nil)
 	res, err := c.CreateMcpClient(context.Background(), CreateMcpClientParams{
@@ -53,8 +54,8 @@ func TestCreateMcpClientHappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateMcpClient: %v", err)
 	}
-	if res.ID != "client-1" {
-		t.Errorf("ID = %q; want client-1", res.ID)
+	if res.ID != "4" {
+		t.Errorf("ID = %q; want 4", res.ID)
 	}
 	if s.gotAuth != "Bearer admin-tok" {
 		t.Errorf("Authorization header = %q; want Bearer admin-tok", s.gotAuth)
@@ -89,8 +90,8 @@ func TestCreateMcpClientUnauthorized(t *testing.T) {
 
 func TestRegisterServerHappyPath(t *testing.T) {
 	s := newStubServer(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/servers" {
-			t.Errorf("path = %s; want /servers", r.URL.Path)
+		if r.URL.Path != "/api/v0/servers" {
+			t.Errorf("path = %s; want /api/v0/servers", r.URL.Path)
 		}
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(map[string]string{"id": "server-42"})
@@ -175,8 +176,8 @@ func TestURLForCustomerAlphaReturnsBaseURL(t *testing.T) {
 
 func TestUpdateAllowListNotFound(t *testing.T) {
 	s := newStubServer(t, func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasPrefix(r.URL.Path, "/clients/") {
-			t.Errorf("path = %s; want /clients/...", r.URL.Path)
+		if !strings.HasPrefix(r.URL.Path, "/api/v0/clients/") {
+			t.Errorf("path = %s; want /api/v0/clients/...", r.URL.Path)
 		}
 		w.WriteHeader(http.StatusNotFound)
 	})

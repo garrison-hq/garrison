@@ -19,9 +19,7 @@ import (
 
 	"github.com/garrison-hq/garrison/supervisor/internal/agentcontainer"
 	"github.com/garrison-hq/garrison/supervisor/internal/agents"
-	"github.com/garrison-hq/garrison/supervisor/internal/claudeproto"
 	"github.com/garrison-hq/garrison/supervisor/internal/concurrency"
-	"github.com/garrison-hq/garrison/supervisor/internal/finalize"
 	"github.com/garrison-hq/garrison/supervisor/internal/mcpconfig"
 	"github.com/garrison-hq/garrison/supervisor/internal/mempalace"
 	"github.com/garrison-hq/garrison/supervisor/internal/store"
@@ -93,6 +91,13 @@ type terminalWriteParams struct {
 	InsertTransition bool
 	FromCol          string
 	ToCol            string
+
+	// SkipMarkProcessed leaves the event_outbox row unprocessed so the
+	// M1 poll fallback retries the event. Container-path exec-create
+	// failures set it (FR-019: container missing/stopped at spawn is
+	// retryable; the boot reconciler is the repair path). Every other
+	// terminal write marks the event processed as before.
+	SkipMarkProcessed bool
 }
 
 // Deps bundles Spawn's runtime collaborators. Constructed once in
@@ -128,6 +133,12 @@ type Deps struct {
 	MCPConfigDir    string
 	SupervisorBin   string
 	AgentRODSN      string
+
+	// DatabaseURL is the supervisor's main (write-capable) DSN, used
+	// only for the M8 agent-caller garrison-mutate MCP entry — its
+	// verbs INSERT tickets + audit rows, which agent_ro cannot. Empty
+	// disables the entry (M2.x test harnesses keep the 3-entry shape).
+	DatabaseURL string
 
 	// M2.2 additions — mempalace entry in the per-invocation MCP config,
 	// plus wake-up/hygiene collaborators that land in spawn.go via T013.
@@ -190,6 +201,36 @@ type Deps struct {
 	// nil tolerated only when UseDirectExec=true; otherwise spawn fails
 	// fast with ExitSpawnFailed.
 	AgentContainer agentcontainer.Controller
+
+	// M7.1 T010 / FR-017: per-agent in-flight slot. The container path
+	// serializes spawns per agent — one claude exec per per-agent
+	// container at a time. Enforcement is active only when the container
+	// path is selected (!UseDirectExec && AgentContainer != nil); nil
+	// disables it (direct-exec/test back-compat). Production wires one
+	// shared instance from cmd/supervisor.
+	Inflight *AgentInflight
+
+	// M7.1 T011: container-path collaborators. EgressProxyURL lands in
+	// claude execs as HTTPS_PROXY (FR-009/FR-011 — the only route out
+	// of the agents network); AgentWorkspaceFS is the host base dir of
+	// the agent-ID-keyed workspace binds, used for the acceptance-gate
+	// path <WorkspaceFS>/<agent-uuid> (FR-006). Both wired from config
+	// in cmd/supervisor (T012); unused on the direct-exec path.
+	EgressProxyURL   string
+	AgentWorkspaceFS string
+
+	// terminalReasonOverride, when non-nil, remaps the adjudicated
+	// (status, exit_reason) pair just before the terminal write. Set
+	// per-spawn on a Deps COPY by the container path only (plan D21):
+	// a coreutils-timeout wrapper failure (exit 125–127, no result
+	// frame → adjudicated no_result) lands in the spawn_failed class.
+	// nil everywhere else — zero behavior change for direct-exec.
+	terminalReasonOverride func(status, exitReason string) (status2, exitReason2 string)
+
+	// terminalWriteFn replaces the terminal-write transaction in unit
+	// tests (m7_test.go) so container-path terminal contracts are
+	// assertable without a database. nil in production.
+	terminalWriteFn func(ctx context.Context, p terminalWriteParams) error
 }
 
 // UseFake decides which branch Spawn runs. UseFakeAgent wins if set;
@@ -211,6 +252,11 @@ type spawnPrep struct {
 	ticketUUID pgtype.UUID
 	dept       store.Department
 	payload    spawnPayload
+
+	// release frees the per-agent in-flight slot (M7.1 T010 / FR-017).
+	// nil when enforcement was inert. Spawn defers it so the slot is
+	// held until after the run branch returns — past the terminal write.
+	release func()
 }
 
 // Spawn handles one work.ticket.created event end-to-end. Idempotent: a
@@ -236,6 +282,13 @@ func Spawn(ctx context.Context, deps Deps, eventID pgtype.UUID, roleSlug string)
 	}
 	if err != nil || prep.done {
 		return err
+	}
+	// M7.1 T010: the per-agent slot (when held) is released only after
+	// the run branch returns — i.e. past the terminal write — so a
+	// retried event for the same agent cannot interleave with the tail
+	// of this spawn.
+	if prep.release != nil {
+		defer prep.release()
 	}
 	if deps.UseFake() {
 		return runFakeAgent(ctx, deps, prep.instanceID, eventID, prep.ticketUUID, prep.payload)
@@ -301,6 +354,32 @@ func prepareSpawn(ctx context.Context, deps Deps, eventID pgtype.UUID, roleSlug 
 			"running", running,
 		)
 		return spawnPrep{done: true}, nil
+	}
+
+	// M7.1 T010 / FR-017: per-agent in-flight slot. A second event for
+	// the same agent defers exactly like cap-full: rollback, event left
+	// unprocessed, retried on the next poll sweep. Acquired before
+	// InsertRunningInstance so a deferred event never carries an
+	// instance row.
+	releaseSlot, slotFree := acquireAgentSlot(ctx, deps, dept, roleSlug)
+	if !slotFree {
+		_ = tx.Rollback(ctx)
+		deps.Logger.Info("defer: agent spawn already in flight",
+			"event_id", formatUUID(eventID),
+			"department_id", payload.DepartmentID,
+			"role_slug", roleSlug,
+		)
+		return spawnPrep{done: true}, nil
+	}
+	slotHandedOff := false
+	if releaseSlot != nil {
+		// Every later failure/defer path in this function releases the
+		// slot; the success return hands it to Spawn via spawnPrep.
+		defer func() {
+			if !slotHandedOff {
+				releaseSlot()
+			}
+		}()
 	}
 
 	// M6 T007: throttle gate. Companies opt-in via daily_budget_usd
@@ -373,12 +452,35 @@ func prepareSpawn(ctx context.Context, deps Deps, eventID pgtype.UUID, roleSlug 
 	if err := tx.Commit(ctx); err != nil {
 		return spawnPrep{}, fmt.Errorf("spawn: commit dedupe+running: %w", err)
 	}
+	slotHandedOff = true
 	return spawnPrep{
 		instanceID: instanceID,
 		ticketUUID: ticketUUID,
 		dept:       dept,
 		payload:    payload,
+		release:    releaseSlot,
 	}, nil
+}
+
+// acquireAgentSlot claims the per-agent in-flight slot for the agent
+// resolved by (department, role) via the in-memory AgentsCache. ok=false
+// means a spawn for the same agent is already in flight — the caller
+// defers exactly like cap-full. A nil release with ok=true means
+// enforcement was inert: the gate is active only when the container
+// path is selected (!UseDirectExec && AgentContainer != nil) and its
+// collaborators are wired (Inflight, AgentsCache). Agent-resolution
+// failure also passes through open — runRealClaude resolves again and
+// writes the agent_missing terminal, so gating here would only change
+// which surface reports it.
+func acquireAgentSlot(ctx context.Context, deps Deps, dept store.Department, roleSlug string) (release func(), ok bool) {
+	if deps.UseDirectExec || deps.AgentContainer == nil || deps.Inflight == nil || deps.AgentsCache == nil {
+		return nil, true
+	}
+	agent, err := deps.AgentsCache.GetForDepartmentAndRole(ctx, dept.ID, roleSlug)
+	if err != nil {
+		return nil, true
+	}
+	return deps.Inflight.TryAcquire(formatUUID(agent.ID))
 }
 
 // decodeSpawnPayload unmarshals the event payload and parses both
@@ -645,6 +747,29 @@ func runRealClaude(
 		)
 	}
 
+	// M7.1 T011: the transport dispatch happens here — after the shared
+	// steps 1–3 (prepare, hashes, wake-up, vault fetch, Rule-3
+	// pre-check) and before the host-side MCP config write: the
+	// container path renders the config itself, writes it inside the
+	// container, and builds argv with the in-container path. The legacy
+	// direct-exec path below stays load-bearing through the soak window
+	// (GARRISON_USE_DIRECT_EXEC=true is the rollback lever, FR-018).
+	if !deps.UseDirectExec && deps.AgentContainer != nil {
+		return runRealClaudeViaContainer(ctx, deps, containerRunInputs{
+			InstanceID:   instanceID,
+			EventID:      eventID,
+			TicketUUID:   ticketUUID,
+			Dept:         dept,
+			Payload:      payload,
+			RoleSlug:     roleSlug,
+			Agent:        agent,
+			Fetched:      fetched,
+			WakeUpStdout: wakeUpStdout,
+			WakeUpStatus: wakeUpStatus,
+			Logger:       logger,
+		})
+	}
+
 	// Step 4: write per-invocation MCP config. Disk errors here land in
 	// the spawn_failed terminal (clarify-session Q2) — dispatcher continues
 	// onto the next event.
@@ -669,6 +794,15 @@ func runRealClaude(
 			AgentInstanceID: formatUUID(instanceID),
 			DatabaseURL:     deps.AgentRODSN,
 		},
+		// M8 FR-005: agent-callable create_ticket via the in-tree
+		// garrison-mutate server in agent mode (audit anchors on
+		// agent_instance_id per FR-401; verb surface restricted in
+		// garrisonmutate.listToolsFor/dispatch).
+		GarrisonMutate: mcpconfig.GarrisonMutateParams{
+			SupervisorBin:   deps.SupervisorBin,
+			AgentInstanceID: formatUUID(instanceID),
+			DatabaseURL:     deps.DatabaseURL,
+		},
 		ExtraServersJSON: agent.McpConfig, // M2.3 T013: agent-specific servers; Rule 3 checks these
 	})
 	if err != nil {
@@ -690,57 +824,24 @@ func runRealClaude(
 	execCtx, execCancel := context.WithTimeout(context.WithoutCancel(ctx), deps.SubprocessTimeout)
 	defer execCancel()
 
-	model := agent.Model
-	if model == "" {
-		model = deps.ClaudeModel
-	}
-	// M2.2: task description names both ticket_id and instance_id so the
-	// agent has them accessible without having to query either. The full
-	// instance_id also appears in the system-prompt "This turn" block
-	// (M2.2 Session 2026-04-23 Q2) via mempalace.ComposeSystemPrompt.
-	taskDescription := fmt.Sprintf(
-		"You are the %s on ticket %s (agent_instance %s). Read it, then execute your completion protocol from the system prompt.",
-		roleSlug, ticketIDText, instanceIDText,
-	)
-	budget := deps.ClaudeBudgetUSD
-	if budget <= 0 {
-		budget = 0.10 // M2.2 default per NFR-201
-	}
-	systemPrompt := mempalace.ComposeSystemPrompt(agent.AgentMD, wakeUpStdout, ticketIDText, instanceIDText)
-	argv := []string{
-		"-p", taskDescription,
-		"--output-format", "stream-json",
-		"--verbose",
-		"--no-session-persistence",
-		"--model", model,
-		"--max-budget-usd", strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.6f", budget), "0"), "."),
-		"--mcp-config", mcpPath,
-		"--strict-mcp-config",
-		"--system-prompt", systemPrompt,
-		"--permission-mode", "bypassPermissions",
-	}
-
-	// M7 T011 / decision #5: when the operator has migrated agents into
-	// per-agent containers (UseDirectExec=false post-migrate7), the
-	// supervisor no longer fork+execs claude directly. Instead, the
-	// already-running per-agent container hosts a long-lived claude
-	// process that the supervisor reaches via the socket-proxy's
-	// /containers/<id>/exec surface. The full pipe-drain + adjudicator
-	// integration lives behind this branch — the legacy direct-exec
-	// path below stays load-bearing through the soak window.
-	if !deps.UseDirectExec && deps.AgentContainer != nil {
-		return runRealClaudeViaContainer(execCtx, deps, runViaContainerInputs{
-			InstanceID: instanceID,
-			EventID:    eventID,
-			TicketID:   ticketUUID,
-			RoleSlug:   roleSlug,
-			Argv:       argv,
-			Logger:     logger,
-		})
-	}
+	argvIn := claudeArgvInputs(deps, agent, roleSlug, ticketIDText, instanceIDText, wakeUpStdout)
+	argvIn.MCPConfigPath = mcpPath
+	argv := buildClaudeArgv(argvIn)
 
 	cmd := exec.CommandContext(execCtx, deps.ClaudeBin, argv...)
 	if dept.WorkspacePath != nil && *dept.WorkspacePath != "" {
+		// The per-department workspace only exists if something created
+		// it: the Dockerfile bakes the base dir, not per-dept subdirs,
+		// and container recreation wipes runtime-created ones. A missing
+		// cmd.Dir makes cmd.Start fail with a misleading
+		// "fork/exec <claude>: no such file or directory" (the ENOENT is
+		// for the dir, not the binary). Ensure it exists per spawn;
+		// hired departments (M7) get their workspace on first dispatch.
+		if err := os.MkdirAll(*dept.WorkspacePath, 0o755); err != nil {
+			logger.Error("workspace MkdirAll failed; recording spawn_failed",
+				"workspace_path", *dept.WorkspacePath, "err", err)
+			return writeFail(ExitSpawnFailed)
+		}
 		cmd.Dir = *dept.WorkspacePath
 	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -771,12 +872,7 @@ func runRealClaude(
 	// Zero() is called in the deferred cleanup above (after cmd.Start copies
 	// the values into the OS process).
 	if len(fetched) > 0 {
-		env := os.Environ()
-		for envVar, sv := range fetched {
-			//nolint:vaultlog // UnsafeBytes is the only safe path for env-var injection
-			env = append(env, envVar+"="+string(sv.UnsafeBytes()))
-		}
-		cmd.Env = env
+		cmd.Env = appendSecretEnv(os.Environ(), fetched)
 	}
 
 	// Step 7: cmd.Start.
@@ -785,7 +881,7 @@ func runRealClaude(
 		return writeFail(ExitSpawnFailed)
 	}
 
-	logger = logger.With("pid", cmd.Process.Pid, "session_prep_model", model)
+	logger = logger.With("pid", cmd.Process.Pid, "session_prep_model", argvIn.Model)
 	logger.Info("claude subprocess started")
 
 	// Step 8: backfill pid (M1 retro §4 fix).
@@ -809,255 +905,137 @@ func runRealClaude(
 		}
 	}
 
-	// Step 9 + stderr goroutine: the NDJSON pipeline reads stdout to
-	// EOF; a sibling goroutine mirrors stderr into slog. Both must drain
-	// their pipes BEFORE cmd.Wait runs — os/exec's StdoutPipe docs are
-	// explicit that calling Wait before all reads complete is incorrect
-	// (a concurrent Wait closes the pipe while the scanner is still
-	// reading, losing the last events).
-	var (
-		result      Result
-		pipelineErr error
-	)
-	pipelineDone := make(chan struct{})
-	stderrDone := make(chan struct{})
-
-	// M2.2.1 T011: wire the finalize observer. Expected iff the role +
-	// column match the M2.2.1 finalize flow (engineer@in_dev or
-	// qa-engineer@qa_review). For all other (role, column) pairs
-	// FinalizeDeps is zero-valued and Run's finalize branches short-
-	// circuit, preserving M2.2 behaviour.
-	finalizeExpected := finalizeExpectedForRole(roleSlug, payload.ColumnSlug)
-	finalizeState := &FinalizeState{Expected: finalizeExpected}
+	// Steps 9–12 live in runClaudeSession (runner.go) since M7.1 T009:
+	// the NDJSON pipeline + stderr mirror + shutdown sequencing +
+	// adjudication + terminal write are transport-independent. The
+	// direct-exec transport below wraps the process-group kill ladder
+	// and the drain-then-cmd.Wait + extractExit reap exactly as the
+	// pre-T009 inline block did.
+	directTransport := transport{
+		Stdout: stdout,
+		Stderr: stderr,
+		Terminate: func(escalate bool) error {
+			if escalate {
+				return killProcessGroup(cmd, syscall.SIGKILL)
+			}
+			return killProcessGroup(cmd, syscall.SIGTERM)
+		},
+		ExitDetail: func(context.Context) WaitDetail {
+			// cmd.Wait closes stdout/stderr pipes, but the runner only
+			// calls ExitDetail after both are drained (concurrency rule
+			// 8), so no data is lost; it just returns the ProcessState.
+			_ = cmd.Wait()
+			exitCode, sigName := extractExit(cmd.ProcessState)
+			wait := WaitDetail{ExitCode: exitCode}
+			if errors.Is(execCtx.Err(), context.DeadlineExceeded) {
+				wait.ContextErr = context.DeadlineExceeded
+			}
+			if sigName != "" {
+				wait.Signaled = true
+				wait.Signal = signalFromName(sigName)
+			}
+			return wait
+		},
+	}
+	workspacePath := ""
+	if dept.WorkspacePath != nil {
+		workspacePath = *dept.WorkspacePath
+	}
 	fromCol, toCol := transitionColumns(roleSlug, payload.ColumnSlug)
-	onCommit := func(rawPayload json.RawMessage) error {
-		if deps.Palace == nil {
-			logger.Error("finalize onCommit: deps.Palace is nil; skipping atomic write")
-			return fmt.Errorf("finalize: no palace client wired")
-		}
-		parsed, verr := finalize.Validate(rawPayload)
-		if verr != nil {
-			// The finalize MCP server already validated this payload
-			// before it sent ok=true, so a re-validation failure here
-			// indicates a schema drift between server and spawn — a bug.
-			logger.Error("finalize onCommit: re-validation failed",
-				"err", verr.Error(),
-				"field", verr.Field)
-			return fmt.Errorf("finalize re-validate: %w", verr)
-		}
-		// Cost at this moment may be NULL — the supervisor's stream
-		// parser fires OnCommit on the finalize tool_result, which
-		// typically arrives before the result event. Writing NULL here
-		// is correct; any later cost signal is log-observed only.
-		cost, _ := parseCostToNumeric(result.TotalCostUSD)
-		if !result.ResultSeen {
-			cost = pgtype.Numeric{}
-		}
-		wing := ""
-		if agent.PalaceWing != nil {
-			wing = *agent.PalaceWing
-		}
-		return WriteFinalize(execCtx, FinalizeWriteDeps{
-			Pool:         deps.Pool,
-			Queries:      deps.Queries,
-			Palace:       deps.Palace,
-			Logger:       logger,
-			WriteTimeout: deps.FinalizeWriteTimeout,
-		}, parsed, FinalizeMeta{
-			AgentInstanceID: instanceID,
-			TicketID:        ticketUUID,
-			EventID:         eventID,
-			Wing:            wing,
-			FromColumn:      fromCol,
-			ToColumn:        toCol,
-			Cost:            cost,
-			WakeUpStatus:    string(wakeUpStatus),
-		})
-	}
-
-	go func() {
-		defer close(pipelineDone)
-		result = Result{}
-		// M6 T008: rate-limit pause actuator. Wires the FirePause call
-		// into a short independent tx so the in-flight stream read isn't
-		// blocked. CompanyID is captured here at policy construction
-		// (resolved via dept earlier in this function); on FirePause
-		// failure the closure logs at warn level and the spawn keeps
-		// running per FR-043.
-		var onRateLimitRejected func(context.Context, claudeproto.RateLimitEvent)
-		if dept.CompanyID.Valid && deps.Throttle.Pool != nil {
-			companyID := dept.CompanyID
-			throttleDeps := deps.Throttle
-			onRateLimitRejected = func(rlCtx context.Context, e claudeproto.RateLimitEvent) {
-				detail := throttle.RateLimitDetail{
-					Status:        e.Info.Status,
-					RateLimitType: e.Info.RateLimitType,
-					TotalCostUSD:  result.TotalCostUSD,
-				}
-				if err := pgx.BeginFunc(rlCtx, throttleDeps.Pool, func(tx pgx.Tx) error {
-					return throttle.FirePause(rlCtx, throttleDeps, store.New(tx), companyID, detail)
-				}); err != nil {
-					logger.Warn("throttle: FirePause failed; in-flight spawn continues",
-						"company_id", formatUUID(companyID),
-						"err", err)
-				}
-			}
-		}
-		policy := NewFinalizePolicy(logger, instanceID, ticketUUID, &result, FinalizeDeps{
-			Expected:            finalizeExpected,
-			State:               finalizeState,
-			OnCommit:            onCommit,
-			ResultGrace:         deps.FinalizeResultGrace,
-			OnRateLimitRejected: onRateLimitRejected,
-		}, onBail)
-		result, pipelineErr = Run(execCtx, stdout, policy, logger)
-	}()
-	go func() {
-		defer close(stderrDone)
-		scanner := bufio.NewScanner(stderr)
-		scanner.Buffer(make([]byte, 0, 64<<10), 1<<20)
-		for scanner.Scan() {
-			logger.Info(scanner.Text(), "stream", "stderr")
-		}
-	}()
-
-	// Step 10: wait for the pipeline to drain (stdout EOF, which
-	// happens when the subprocess exits) with supervisor-shutdown
-	// sequencing. Pipeline completion is the signal that all events
-	// have been observed; cmd.Wait below reaps the subprocess.
-	var (
-		shutdownCtxErr    error
-		shutdownSigkilled bool
-	)
-	select {
-	case <-pipelineDone:
-		// Subprocess wrote its final line and closed stdout — natural
-		// exit (including the exec.CommandContext timeout path, which
-		// routes through cmd.Cancel → killProcessGroup(SIGTERM) →
-		// WaitDelay escalation, eventually closing stdout).
-	case <-ctx.Done():
-		shutdownCtxErr = ctx.Err()
-		if err := killProcessGroup(cmd, syscall.SIGTERM); err != nil {
-			logger.Warn("killProcessGroup(SIGTERM) on shutdown returned error", "err", err)
-		}
-		select {
-		case <-pipelineDone:
-		case <-time.After(ShutdownSignalGrace):
-			if err := killProcessGroup(cmd, syscall.SIGKILL); err != nil {
-				logger.Warn("killProcessGroup(SIGKILL) on shutdown returned error", "err", err)
-			}
-			shutdownSigkilled = true
-			<-pipelineDone
-		}
-	}
-	<-stderrDone
-
-	// Now safe to reap. cmd.Wait closes stdout/stderr pipes but those
-	// are already drained, so no data is lost; it just returns the
-	// ProcessState.
-	_ = cmd.Wait()
-
-	if shutdownSigkilled && deps.SigkillEscalations != nil {
-		deps.SigkillEscalations.Add(1)
-	}
-
-	if pipelineErr != nil && !result.ParseError {
-		logger.Warn("pipeline.Run returned a non-parse error", "err", pipelineErr)
-	}
-
-	// Collect the wait-side detail Adjudicate needs.
-	exitCode, sigName := extractExit(cmd.ProcessState)
-	var execCtxErr error
-	switch {
-	case shutdownCtxErr != nil:
-		execCtxErr = context.Canceled
-	case errors.Is(execCtx.Err(), context.DeadlineExceeded):
-		execCtxErr = context.DeadlineExceeded
-	}
-	wait := WaitDetail{
-		ContextErr:        execCtxErr,
-		ShutdownInitiated: shutdownCtxErr != nil,
-		ExitCode:          exitCode,
-	}
-	if sigName != "" && !wait.ShutdownInitiated && !errors.Is(execCtxErr, context.DeadlineExceeded) && !bailed.Load() {
-		wait.Signaled = true
-		wait.Signal = signalFromName(sigName)
-	}
-
-	// Step 11: post-run acceptance gate.
-	//
-	// M2.1 used hello.txt + contents==ticket_id as the fake-agent and
-	// real-claude engineer acceptance check. M2.2's engineer writes
-	// changes/hello-<ticket>.md per the seed agent.md, and qa-engineer
-	// writes no artefact file at all — so the M1 check returns false
-	// and Adjudicate would misclassify a successful run as
-	// acceptance_failed. For M2.2 roles the supervisor trusts the
-	// terminal `result` event + the mempalace writes (hygiene checker's
-	// concern); no supervisor-side file check runs. acceptanceGateSatisfied
-	// treats M2.2 roles as pre-passing so the M1 fallback doesn't trip.
-	// M2.1 compat: when the engineer is being spawned against the old
-	// `todo` column the hello.txt check still applies.
-	helloTxtOK := acceptanceGateSatisfied(roleSlug, payload.ColumnSlug)
-	if !helloTxtOK && dept.WorkspacePath != nil && *dept.WorkspacePath != "" {
-		helloTxtOK = checkHelloTxt(*dept.WorkspacePath, payload.TicketID)
-	}
-
-	// M2.2.1 T011: if the pipeline's OnCommit already committed the
-	// atomic write, WriteFinalize wrote the terminal agent_instances
-	// row inside its own transaction — we MUST NOT call
-	// writeTerminalCostAndWakeup again (double-write the terminal row
-	// + attempt a second InsertTicketTransition). The subprocess's
-	// post-commit events were already observed + logged by the
-	// pipeline; nothing more to do for this spawn.
-	if finalizeState.Committed {
-		logger.Info("finalize already committed atomic tx; skipping M2.1 terminal write",
-			"ticket_id", payload.TicketID,
-			"instance_id", formatUUID(instanceID),
-		)
-		return nil
-	}
-
-	// Adjudicate receives a snapshot of the finalize state so the new
-	// precedence rows (budget > finalize_invalid, timeout > finalize_
-	// never_called, etc.) fire correctly per T002.
-	status, exitReason := Adjudicate(result, wait, helloTxtOK, *finalizeState)
-
-	// Cost stays NULL unless a result event landed; that keeps the
-	// aggregate cost query honest about what Claude actually billed.
-	cost, _ := parseCostToNumeric(result.TotalCostUSD)
-	if !result.ResultSeen {
-		cost = pgtype.Numeric{}
-	}
-
-	logger.Info("claude subprocess terminal",
-		"status", status,
-		"exit_reason", exitReason,
-		"total_cost_usd", result.TotalCostUSD,
-		"result_seen", result.ResultSeen,
-		"assistant_seen", result.AssistantSeen,
-	)
-
-	termCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), TerminalWriteGrace)
-	defer cancel()
-	insertTransition := status == "succeeded"
-
-	// M2.2: role-slug-based from/to column mapping. Engineer transitions
-	// in_dev → qa_review; qa-engineer transitions qa_review → done. Any
-	// other role (fake-agent M2.1 tests that default to "engineer" via
-	// Spawn's backward-compat branch) lands on the M2.1 todo → done path.
-	// fromCol, toCol were computed earlier for the finalize onCommit; reuse.
-	return writeTerminalCostAndWakeup(termCtx, deps, terminalWriteParams{
+	return runClaudeSession(ctx, execCtx, deps, directTransport, sessionParams{
 		InstanceID:       instanceID,
 		EventID:          eventID,
-		TicketID:         ticketUUID,
-		Status:           status,
-		ExitReason:       exitReason,
-		Cost:             cost,
-		WakeUpStatus:     string(wakeUpStatus),
-		InsertTransition: insertTransition,
+		TicketUUID:       ticketUUID,
+		TicketIDText:     payload.TicketID,
+		RoleSlug:         roleSlug,
+		OriginColumn:     payload.ColumnSlug,
+		Agent:            agent,
+		Dept:             dept,
+		WakeUpStatus:     wakeUpStatus,
+		FinalizeExpected: finalizeExpectedForRole(roleSlug, payload.ColumnSlug),
 		FromCol:          fromCol,
 		ToCol:            toCol,
+		WorkspacePath:    workspacePath,
+		Bailed:           &bailed,
+		OnBail:           onBail,
+		Logger:           logger,
 	})
+}
+
+// argvParams carries the per-invocation inputs buildClaudeArgv renders
+// into the claude CLI flag sequence. Both transports use it; only
+// MCPConfigPath differs between direct-exec (host path under
+// deps.MCPConfigDir) and the container path (in-container /tmp path,
+// T011).
+type argvParams struct {
+	TaskDescription string
+	Model           string
+	BudgetUSD       float64
+	MCPConfigPath   string
+	SystemPrompt    string
+}
+
+// claudeArgvInputs derives the transport-independent argv inputs: the
+// model fallback, the M2.2 task description (names both ticket_id and
+// instance_id so the agent has them without querying; the full
+// instance_id also appears in the system-prompt "This turn" block via
+// mempalace.ComposeSystemPrompt — M2.2 Session 2026-04-23 Q2), the
+// NFR-201 budget default, and the composed system prompt. Both
+// transports call it so the container path provably runs the same
+// invocation contract (FR-013); MCPConfigPath is left empty for the
+// caller to fill (host path vs in-container /tmp path).
+func claudeArgvInputs(deps Deps, agent agents.Agent, roleSlug, ticketIDText, instanceIDText, wakeUpStdout string) argvParams {
+	model := agent.Model
+	if model == "" {
+		model = deps.ClaudeModel
+	}
+	budget := deps.ClaudeBudgetUSD
+	if budget <= 0 {
+		budget = 0.10 // M2.2 default per NFR-201
+	}
+	return argvParams{
+		TaskDescription: fmt.Sprintf(
+			"You are the %s on ticket %s (agent_instance %s). Read it, then execute your completion protocol from the system prompt.",
+			roleSlug, ticketIDText, instanceIDText,
+		),
+		Model:        model,
+		BudgetUSD:    budget,
+		SystemPrompt: mempalace.ComposeSystemPrompt(agent.AgentMD, wakeUpStdout, ticketIDText, instanceIDText),
+	}
+}
+
+// buildClaudeArgv renders the legacy direct-exec claude argv (M2.1 → M7
+// shape, byte-for-byte). TestBuildClaudeArgvGoldenLegacy pins the exact
+// flag sequence so the container path (T011) provably runs the same
+// invocation contract (FR-013).
+func buildClaudeArgv(p argvParams) []string {
+	return []string{
+		"-p", p.TaskDescription,
+		"--output-format", "stream-json",
+		"--verbose",
+		"--no-session-persistence",
+		"--model", p.Model,
+		"--max-budget-usd", strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.6f", p.BudgetUSD), "0"), "."),
+		"--mcp-config", p.MCPConfigPath,
+		"--strict-mcp-config",
+		"--system-prompt", p.SystemPrompt,
+		"--permission-mode", "bypassPermissions",
+	}
+}
+
+// appendSecretEnv appends NAME=value pairs for every fetched vault secret
+// to env and returns it. This is the single sanctioned production
+// UnsafeBytes env-injection call site (AGENTS.md vaultlog rule: spawn env
+// injection + Rule 1 leak scan are the only two); the container path
+// (T011) reuses this helper rather than adding a third site. Values are
+// never logged or placed in argv; the caller owns Zero()ing the fetched
+// map after the env is handed to the subprocess/exec.
+func appendSecretEnv(env []string, fetched map[string]vault.SecretValue) []string {
+	for envVar, sv := range fetched {
+		//nolint:vaultlog // UnsafeBytes is the only safe path for env-var injection
+		env = append(env, envVar+"="+string(sv.UnsafeBytes()))
+	}
+	return env
 }
 
 // acceptanceGateSatisfied returns true for (role, origin-column) pairs
@@ -1070,15 +1048,16 @@ func runRealClaude(
 // default to false so the M1 safety net stays in place.
 func acceptanceGateSatisfied(roleSlug, fromColumn string) bool {
 	switch roleSlug {
-	case "engineer":
-		// M2.2 only skips the check when the engineer is running the
-		// in_dev workflow. M2.1 engineer@todo and any call without
-		// column info fall through to the M1 hello.txt check.
-		return fromColumn == "in_dev"
 	case roleQAEngineer:
 		return true
 	default:
-		return false
+		// The in_dev column implies the M2.2 finalize workflow for ANY
+		// role — engineer or M7 hire alike (a seo-writer run was
+		// misclassified acceptance_failed by the M1 hello.txt gate in
+		// the 2026-06-10 acceptance run). M2.1 engineer@todo and any
+		// call without column info fall through to the M1 hello.txt
+		// check, preserving the TestM21AcceptanceFailed* contract.
+		return fromColumn == "in_dev"
 	}
 }
 
@@ -1092,12 +1071,14 @@ func acceptanceGateSatisfied(roleSlug, fromColumn string) bool {
 // all short-circuit per plan §"Decisions baked into this plan" item 7.
 func finalizeExpectedForRole(roleSlug, fromColumn string) bool {
 	switch roleSlug {
-	case "engineer":
-		return fromColumn == "in_dev"
 	case roleQAEngineer:
 		return true
 	default:
-		return false
+		// Same generalization as acceptanceGateSatisfied: in_dev means
+		// the M2.2 finalize workflow regardless of role, so M7 hires
+		// get the finalize observer + Adjudicate branches. todo stays
+		// M2.1/fake-agent territory (finalize unexpected).
+		return fromColumn == "in_dev"
 	}
 }
 
@@ -1113,14 +1094,17 @@ func finalizeExpectedForRole(roleSlug, fromColumn string) bool {
 // write-safe.
 func transitionColumns(roleSlug, fromColumn string) (from, to string) {
 	switch roleSlug {
-	case "engineer":
-		if fromColumn == "todo" {
-			return "todo", "done"
-		}
-		return "in_dev", "qa_review"
 	case roleQAEngineer:
 		return "qa_review", "done"
 	default:
+		// Any role working the in_dev column lands at qa_review — for
+		// M7-hired single-role departments that column is the
+		// operator's HITL review parking spot (drag to done). todo
+		// keeps the M2.1 single-transition fallback for the fake-agent
+		// path and legacy tests.
+		if fromColumn == "in_dev" {
+			return "in_dev", "qa_review"
+		}
 		return "todo", "done"
 	}
 }
@@ -1255,6 +1239,14 @@ func writeTerminal(ctx context.Context, deps Deps, instanceID, eventID pgtype.UU
 // Non-empty on the succeeded path insert a ticket_transitions row and
 // update tickets.column_slug to p.ToCol.
 func writeTerminalCostAndWakeup(ctx context.Context, deps Deps, p terminalWriteParams) error {
+	// M7.1 T011: container-transport remap hook (plan D21). Runs before
+	// the test seam so both observe the final (status, exit_reason).
+	if deps.terminalReasonOverride != nil {
+		p.Status, p.ExitReason = deps.terminalReasonOverride(p.Status, p.ExitReason)
+	}
+	if deps.terminalWriteFn != nil {
+		return deps.terminalWriteFn(ctx, p)
+	}
 	tx, err := deps.Pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf(errBeginTerminalTx, err)
@@ -1294,9 +1286,11 @@ func writeTerminalCostAndWakeup(ctx context.Context, deps Deps, p terminalWriteP
 			return fmt.Errorf("spawn: UpdateTicketColumnSlug: %w", err)
 		}
 	}
-	if err := q.MarkEventProcessed(ctx, p.EventID); err != nil {
-		_ = tx.Rollback(ctx)
-		return fmt.Errorf(errMarkEventProcd, err)
+	if !p.SkipMarkProcessed {
+		if err := q.MarkEventProcessed(ctx, p.EventID); err != nil {
+			_ = tx.Rollback(ctx)
+			return fmt.Errorf(errMarkEventProcd, err)
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf(errCommitTerminal, err)

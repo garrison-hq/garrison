@@ -3,6 +3,8 @@ package agentcontainer
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -33,7 +35,14 @@ const containersPathPrefix = "/containers/"
 type socketProxyController struct {
 	baseURL string // e.g. "http://garrison-docker-proxy:2375"
 	http    *http.Client
-	logger  *slog.Logger
+	// stream is the http client minus the wall-clock Timeout, used for
+	// the exec-start raw stream only: http.Client.Timeout caps the
+	// ENTIRE response body read, which would tear down a claude exec
+	// stream 30s into the run (M7 latent bug surfaced by the T011 live
+	// smoke). Stream lifetime is bounded by the caller's request ctx
+	// instead — spawn passes execCtx = budget + slack (rule 4 analog).
+	stream *http.Client
+	logger *slog.Logger
 }
 
 // NewSocketProxyController constructs a production Controller.
@@ -47,20 +56,41 @@ func NewSocketProxyController(baseURL string, httpClient *http.Client, logger *s
 	return &socketProxyController{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		http:    httpClient,
-		logger:  logger,
+		stream: &http.Client{
+			Transport:     httpClient.Transport,
+			CheckRedirect: httpClient.CheckRedirect,
+			Jar:           httpClient.Jar,
+		},
+		logger: logger,
 	}
 }
 
 // containerCreateBody is the subset of the Docker Engine API's
 // /containers/create body that Garrison populates. Field names match
 // the Docker JSON schema; unset fields are omitted via omitempty.
+// Deliberately no Env field: per-exec ExecSpec.Env is the only
+// secret/runtime-env transit (FR-002 structural).
 type containerCreateBody struct {
 	Image      string            `json:"Image"`
 	User       string            `json:"User,omitempty"`
-	Env        []string          `json:"Env,omitempty"`
+	Entrypoint []string          `json:"Entrypoint,omitempty"`
+	Cmd        []string          `json:"Cmd,omitempty"`
 	Labels     map[string]string `json:"Labels,omitempty"`
 	HostConfig hostConfigBody    `json:"HostConfig"`
 }
+
+// shapeHashLabel carries the hex SHA-256 of the marshaled create body
+// (every per-agent field), computed after all fields are set and
+// before the label itself is added. The boot reconcile (FR-007)
+// compares it to decide recreate-vs-noop; any future shape edit or a
+// per-agent workspace/image/uid change flips the hash for exactly the
+// affected containers.
+const shapeHashLabel = "garrison.shape_hash"
+
+// supervisorBinContainerPath is where the host supervisor binary is
+// bind-mounted read-only inside every agent container (spike F6,
+// FR-014) so the in-container stdio MCP servers run from it.
+const supervisorBinContainerPath = "/usr/local/bin/garrison-supervisor"
 
 type hostConfigBody struct {
 	Binds          []string          `json:"Binds,omitempty"`
@@ -94,7 +124,12 @@ func buildCreateBody(spec ContainerSpec) (containerCreateBody, error) {
 
 	body := containerCreateBody{
 		Image: spec.Image,
-		Env:   append([]string(nil), spec.EnvVars...),
+		// The image's entrypoint is claude, which exits(1) without a
+		// prompt (spike F1 — the Exited(1) fleet). Idle `sleep
+		// infinity` PID 1 keeps the container standing between execs
+		// (FR-005).
+		Entrypoint: []string{"/bin/sleep"},
+		Cmd:        []string{"infinity"},
 		Labels: map[string]string{
 			"garrison.agent_id": spec.AgentID,
 			"garrison.managed":  "true",
@@ -106,8 +141,11 @@ func buildCreateBody(spec ContainerSpec) (containerCreateBody, error) {
 			},
 			ReadonlyRootfs: true,
 			Tmpfs: map[string]string{
-				"/tmp":     "rw,size=64m",
-				"/var/run": "",
+				"/tmp": "rw,size=64m",
+				// claude writes session state under ~/.claude; HOME
+				// on the read-only rootfs needs a tmpfs (spike F5).
+				"/home/node": "rw,size=64m",
+				"/var/run":   "",
 			},
 			NetworkMode: "none",
 			CapDrop:     []string{"ALL"},
@@ -117,12 +155,24 @@ func buildCreateBody(spec ContainerSpec) (containerCreateBody, error) {
 			Privileged:  false,
 		},
 	}
+	if spec.SupervisorBin != "" {
+		body.HostConfig.Binds = append(body.HostConfig.Binds,
+			spec.SupervisorBin+":"+supervisorBinContainerPath+":ro")
+	}
 	if spec.HostUID > 0 {
 		body.User = fmt.Sprintf("%d:%d", spec.HostUID, spec.HostUID)
 	}
 	if spec.NetworkName != "" {
 		body.HostConfig.NetworkMode = spec.NetworkName
 	}
+	// Shape hash last: it covers every field above (FR-007). Marshal
+	// is deterministic — fixed struct field order, sorted map keys.
+	hashable, err := json.Marshal(body)
+	if err != nil {
+		return containerCreateBody{}, fmt.Errorf("%w: marshal for shape hash: %v", ErrInvalidSpec, err)
+	}
+	sum := sha256.Sum256(hashable)
+	body.Labels[shapeHashLabel] = hex.EncodeToString(sum[:])
 	return body, nil
 }
 
@@ -132,7 +182,7 @@ func (c *socketProxyController) Create(ctx context.Context, spec ContainerSpec) 
 		return "", err
 	}
 	buf, _ := json.Marshal(body)
-	name := "garrison-agent-" + shortID(spec.AgentID)
+	name := ContainerName(spec.AgentID)
 
 	resp, err := c.do(ctx, http.MethodPost,
 		"/containers/create?name="+name, bytes.NewReader(buf))
@@ -201,57 +251,102 @@ func (c *socketProxyController) ConnectNetwork(ctx context.Context, id, network 
 	return nil
 }
 
-// Exec runs cmd inside the container using docker's exec API. The
-// streaming surface (hijacked stdout/stderr) is set up here as a
-// scaffolded shape; T011 wires the full stdin-pipe + line-buffered
-// stdout consumer for the spawn replacement. For T004 the method
-// shape is verified against the fake (TestExecPreservesNDJSON in the
-// fake-impl tests below) and against the request body shape
-// (TestExecCreatesExecInstance).
-func (c *socketProxyController) Exec(ctx context.Context, id string, cmd []string, stdin io.Reader) (io.ReadCloser, io.ReadCloser, error) {
+// Exec runs spec.Cmd inside the container using docker's exec API.
+// No stdin attach, no connection hijacking (FR-004): the exec-start
+// response body is a normal chunked application/vnd.docker.raw-stream
+// fed through the in-process demultiplexer (spike F2). Per-exec
+// spec.Env rides the exec-create body — the only secret/runtime-env
+// transit (FR-002).
+func (c *socketProxyController) Exec(ctx context.Context, id string, spec ExecSpec) (*ExecSession, error) {
 	createBody, _ := json.Marshal(map[string]any{
-		"AttachStdin":  stdin != nil,
+		"AttachStdin":  false,
 		"AttachStdout": true,
 		"AttachStderr": true,
 		"Tty":          false,
-		"Cmd":          cmd,
+		"Cmd":          spec.Cmd,
+		"Env":          spec.Env,
+		"WorkingDir":   spec.WorkingDir,
 	})
 	resp, err := c.do(ctx, http.MethodPost, containersPathPrefix+id+"/exec", bytes.NewReader(createBody))
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	defer resp.Body.Close()
+	// 404 = container missing; 409 = container exists but isn't
+	// running. Both mean "no container to exec into" — callers route
+	// to spawn_failed and the boot reconciler is the repair path
+	// (FR-019).
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusConflict {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return nil, fmt.Errorf("%w: exec-create: %s", ErrContainerNotFound, body)
+	}
 	if resp.StatusCode != http.StatusCreated {
-		return nil, nil, c.statusErr(resp, "exec-create")
+		return nil, c.statusErr(resp, "exec-create")
 	}
 	var out struct {
 		ID string `json:"Id"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, nil, fmt.Errorf("agentcontainer: parse exec create: %w", err)
+		return nil, fmt.Errorf("agentcontainer: parse exec create: %w", err)
 	}
 
-	// Start the exec — the docker-engine wire format multiplexes
-	// stdout/stderr over a single hijacked connection (8-byte frame
-	// header per chunk). T011 ships the demultiplexer; for T004 the
-	// scaffolded shape returns the raw stream as stdout and an
-	// empty stderr reader.
 	startBody, _ := json.Marshal(map[string]any{"Detach": false, "Tty": false})
-	startResp, err := c.do(ctx, http.MethodPost, "/exec/"+out.ID+"/start", bytes.NewReader(startBody))
+	// The exec-start response body IS the session's byte stream; it
+	// must ride the timeout-free stream client so it lives exactly as
+	// long as ctx allows, not the control-plane client's 30s wall cap.
+	startResp, err := c.doWith(ctx, c.stream, http.MethodPost, "/exec/"+out.ID+"/start", bytes.NewReader(startBody))
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	if startResp.StatusCode != http.StatusOK {
 		_ = startResp.Body.Close()
-		return nil, nil, c.statusErr(startResp, "exec-start")
+		return nil, c.statusErr(startResp, "exec-start")
 	}
-	// Spawn an stdin pump if the caller provided stdin. The hijacked
-	// connection direction here is request-only; for T011 we'll need
-	// a TCP-hijack equivalent. Scaffolded as a one-way drain.
-	if stdin != nil {
-		go func() { _, _ = io.Copy(io.Discard, stdin) }()
+	stdout, stderr := demuxRawStream(startResp.Body)
+	return &ExecSession{
+		ID:     out.ID,
+		Stdout: stdout,
+		Stderr: stderr,
+		inspect: func(ctx context.Context) (bool, int, error) {
+			return c.execInspect(ctx, out.ID)
+		},
+	}, nil
+}
+
+// execInspect reads GET /exec/<id>/json — the exit-code source for
+// ExecSession.ExitCode's poll loop. Allowed under the proxy's EXEC=1.
+func (c *socketProxyController) execInspect(ctx context.Context, execID string) (running bool, exitCode int, err error) {
+	resp, err := c.do(ctx, http.MethodGet, "/exec/"+execID+"/json", nil)
+	if err != nil {
+		return false, -1, err
 	}
-	return startResp.Body, io.NopCloser(strings.NewReader("")), nil
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return false, -1, c.statusErr(resp, "exec-inspect")
+	}
+	var out struct {
+		Running  bool `json:"Running"`
+		ExitCode int  `json:"ExitCode"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return false, -1, fmt.Errorf("agentcontainer: parse exec inspect: %w", err)
+	}
+	return out.Running, out.ExitCode, nil
+}
+
+// Restart issues POST /containers/<id>/restart with a 5s grace window
+// — the M7.1 SIGKILL analog (FR-016). The idle `sleep infinity` PID 1
+// returns and every in-flight exec stream EOFs.
+func (c *socketProxyController) Restart(ctx context.Context, id string) error {
+	resp, err := c.do(ctx, http.MethodPost, containersPathPrefix+id+"/restart?t=5", nil)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		return c.statusErr(resp, "restart")
+	}
+	return nil
 }
 
 // containerJSON is the response shape for GET /containers/json.
@@ -294,21 +389,38 @@ func (c *socketProxyController) ImageDigest(ctx context.Context, imageRef string
 		return "", c.statusErr(resp, "image-inspect")
 	}
 	var out struct {
+		ID          string   `json:"Id"`
 		RepoDigests []string `json:"RepoDigests"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return "", fmt.Errorf("agentcontainer: parse image inspect: %w", err)
 	}
-	if len(out.RepoDigests) == 0 {
-		return "", fmt.Errorf("%w: image has no RepoDigests (was it pulled?)", ErrImageNotFound)
+	if len(out.RepoDigests) > 0 {
+		return out.RepoDigests[0], nil
 	}
-	return out.RepoDigests[0], nil
+	// Locally-built images (docker build / compose build) carry no
+	// RepoDigests — only registry-pulled images do. The image ID is
+	// the content-addressed config digest, which serves the same
+	// pin-for-audit purpose in dev; production deploys that pull a
+	// pinned ref still get the registry digest above.
+	if out.ID != "" {
+		c.logger.Info("agentcontainer: image has no RepoDigests (locally built); using image ID as digest",
+			"image_ref", imageRef, "image_id", out.ID)
+		return out.ID, nil
+	}
+	return "", fmt.Errorf("%w: image has neither RepoDigests nor Id", ErrImageNotFound)
 }
 
 // do issues an HTTP request to the socket-proxy. Maps connection
 // errors to ErrSocketProxyDown so callers can route distinctly from
 // per-endpoint errors.
 func (c *socketProxyController) do(ctx context.Context, method, path string, body io.Reader) (*http.Response, error) {
+	return c.doWith(ctx, c.http, method, path, body)
+}
+
+// doWith is do with an explicit client: control-plane calls use c.http
+// (30s wall cap); the exec-start stream uses c.stream (ctx-bounded).
+func (c *socketProxyController) doWith(ctx context.Context, client *http.Client, method, path string, body io.Reader) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, body)
 	if err != nil {
 		return nil, fmt.Errorf("agentcontainer: build %s %s: %w", method, path, err)
@@ -316,7 +428,7 @@ func (c *socketProxyController) do(ctx context.Context, method, path string, bod
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := c.http.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		// Distinguish ctx cancel from connection failure for callers.
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {

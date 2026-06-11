@@ -26,10 +26,19 @@ type Handler func(ctx context.Context, eventID pgtype.UUID) error
 // loud startup/runtime error rather than a silent drop.
 var ErrUnknownChannel = errors.New("events: no handler registered for channel")
 
-// Dispatcher is the static route table built once at process startup (FR-014).
-// The handler map is copied into the dispatcher so callers cannot mutate the
-// routing after construction — dynamic registration is explicitly out of
-// scope for M1.
+// Dispatcher routes channels to handlers. The base table is built once
+// at process startup and frozen (FR-014); on top of it sits a dynamic
+// overlay for roster-derived routes (FR-014 amendment, 2026-06-10):
+// M7 hires must start dispatching when approved, not at the next
+// restart, so cmd/supervisor swaps the overlay on every agents.changed
+// cache reset via SetDynamicRoutes. Base routes win on conflict, so
+// the M2.2 engineering channels and the M8 worker channel can never be
+// shadowed by a roster row.
+//
+// New overlay channels are picked up by the fallback poll immediately
+// (pollOnce routes through this table every PollInterval) and by
+// LISTEN at the next reconnect cycle — worst-case notify latency for a
+// fresh hire is one poll interval, not a restart.
 //
 // inFlight dedupes concurrent dispatches of the same event_id across the
 // LISTEN and poll paths. The FR-006 SELECT ... FOR UPDATE check in spawn
@@ -40,6 +49,9 @@ var ErrUnknownChannel = errors.New("events: no handler registered for channel")
 type Dispatcher struct {
 	handlers map[string]Handler
 	inFlight sync.Map
+
+	mu      sync.RWMutex
+	dynamic map[string]Handler
 }
 
 // NewDispatcher returns a Dispatcher with the supplied route table frozen in.
@@ -66,6 +78,11 @@ func NewDispatcher(handlers map[string]Handler) *Dispatcher {
 func (d *Dispatcher) Dispatch(ctx context.Context, channel, payload string) error {
 	h, ok := d.handlers[channel]
 	if !ok {
+		d.mu.RLock()
+		h, ok = d.dynamic[channel]
+		d.mu.RUnlock()
+	}
+	if !ok {
 		return fmt.Errorf("%w: %q", ErrUnknownChannel, channel)
 	}
 	var env struct {
@@ -91,13 +108,35 @@ func (d *Dispatcher) Dispatch(ctx context.Context, channel, payload string) erro
 	return nil
 }
 
-// Channels returns the set of channels the dispatcher knows how to route.
-// The caller uses this to issue one LISTEN per channel after connect. Order
-// is unspecified; callers should not rely on it.
+// Channels returns the set of channels the dispatcher knows how to route
+// (base + dynamic overlay). The caller uses this to issue one LISTEN per
+// channel after connect. Order is unspecified; callers should not rely
+// on it.
 func (d *Dispatcher) Channels() []string {
-	out := make([]string, 0, len(d.handlers))
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	out := make([]string, 0, len(d.handlers)+len(d.dynamic))
 	for k := range d.handlers {
 		out = append(out, k)
 	}
+	for k := range d.dynamic {
+		if _, shadowed := d.handlers[k]; !shadowed {
+			out = append(out, k)
+		}
+	}
 	return out
+}
+
+// SetDynamicRoutes atomically replaces the dynamic overlay. Channels
+// present in the frozen base table are ignored at Dispatch time (base
+// wins), so callers may pass roster-derived maps without filtering.
+// Safe for concurrent use with Dispatch/Channels.
+func (d *Dispatcher) SetDynamicRoutes(routes map[string]Handler) {
+	copied := make(map[string]Handler, len(routes))
+	for k, v := range routes {
+		copied[k] = v
+	}
+	d.mu.Lock()
+	d.dynamic = copied
+	d.mu.Unlock()
 }

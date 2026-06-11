@@ -40,11 +40,13 @@ func TestServe_RejectsMissingPool(t *testing.T) {
 }
 
 func TestServe_RejectsMissingChatSessionID(t *testing.T) {
+	// Half a chat anchor (message id without session id) is a wiring
+	// bug, not agent mode.
 	deps := validDeps()
 	deps.ChatSessionID = pgtype.UUID{Valid: false}
 	err := Serve(context.Background(), strings.NewReader(""), io.Discard, deps)
-	if err == nil || !strings.Contains(err.Error(), "ChatSessionID is required") {
-		t.Errorf("expected ChatSessionID error; got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "chat anchor requires both") {
+		t.Errorf("expected partial chat anchor error; got %v", err)
 	}
 }
 
@@ -52,8 +54,54 @@ func TestServe_RejectsMissingChatMessageID(t *testing.T) {
 	deps := validDeps()
 	deps.ChatMessageID = pgtype.UUID{Valid: false}
 	err := Serve(context.Background(), strings.NewReader(""), io.Discard, deps)
-	if err == nil || !strings.Contains(err.Error(), "ChatMessageID is required") {
-		t.Errorf("expected ChatMessageID error; got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "chat anchor requires both") {
+		t.Errorf("expected partial chat anchor error; got %v", err)
+	}
+}
+
+func TestServe_RejectsNoCallerAnchor(t *testing.T) {
+	deps := validDeps()
+	deps.ChatSessionID = pgtype.UUID{Valid: false}
+	deps.ChatMessageID = pgtype.UUID{Valid: false}
+	err := Serve(context.Background(), strings.NewReader(""), io.Discard, deps)
+	if err == nil || !strings.Contains(err.Error(), "caller anchor required") {
+		t.Errorf("expected caller anchor error; got %v", err)
+	}
+}
+
+func TestServe_RejectsBothCallerAnchors(t *testing.T) {
+	deps := validDeps()
+	deps.AgentInstanceID = pgtype.UUID{Bytes: [16]byte{7, 8, 9}, Valid: true}
+	err := Serve(context.Background(), strings.NewReader(""), io.Discard, deps)
+	if err == nil || !strings.Contains(err.Error(), "both chat and agent caller anchors") {
+		t.Errorf("expected both-anchors error; got %v", err)
+	}
+}
+
+func TestServe_AgentMode_ListsOnlyAgentVerbs(t *testing.T) {
+	// M8 FR-005: agent-anchored servers advertise create_ticket only;
+	// the operator-anchored verbs stay chat-side.
+	deps := validDeps()
+	deps.ChatSessionID = pgtype.UUID{Valid: false}
+	deps.ChatMessageID = pgtype.UUID{Valid: false}
+	deps.AgentInstanceID = pgtype.UUID{Bytes: [16]byte{7, 8, 9}, Valid: true}
+	in := `{"jsonrpc":"2.0","id":1,"method":"tools/list"}` + "\n"
+	var out bytes.Buffer
+	if err := Serve(context.Background(), strings.NewReader(in), &out, deps); err != nil {
+		t.Fatalf("Serve: %v", err)
+	}
+	var resp struct {
+		Result toolsListResult `json:"result"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Result.Tools) != 1 || resp.Result.Tools[0].Name != "create_ticket" {
+		names := make([]string, 0, len(resp.Result.Tools))
+		for _, td := range resp.Result.Tools {
+			names = append(names, td.Name)
+		}
+		t.Errorf("agent-mode tools/list = %v, want [create_ticket]", names)
 	}
 }
 

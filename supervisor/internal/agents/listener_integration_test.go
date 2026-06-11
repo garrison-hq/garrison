@@ -4,6 +4,7 @@ package agents_test
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -71,8 +72,11 @@ func TestListenerReceivesAndAppliesAgentsChangedNotify(t *testing.T) {
 		t.Fatal("expected at least one cached agent")
 	}
 
-	// Start the listener.
-	if err := agents.StartChangeListener(ctx, pool, cache); err != nil {
+	// Start the listener. The onReset hook records invocations so the
+	// route-rebuild seam (FR-014 amendment) is covered here too.
+	var resetHooks atomic.Int64
+	onReset := func(context.Context) { resetHooks.Add(1) }
+	if err := agents.StartChangeListener(ctx, pool, cache, onReset); err != nil {
 		t.Fatalf("StartChangeListener: %v", err)
 	}
 
@@ -128,8 +132,8 @@ func TestListenerReceivesAndAppliesAgentsChangedNotify(t *testing.T) {
 					a, gerr := cache.GetForDepartmentAndRole(ctx, r.DepartmentID, "engineer")
 					if gerr == nil {
 						observed = a.AgentMD
-						if observed == "# post-reset" {
-							return // pass
+						if observed == "# post-reset" && resetHooks.Load() > 0 {
+							return // pass: cache reset applied AND onReset hook ran
 						}
 					}
 				}

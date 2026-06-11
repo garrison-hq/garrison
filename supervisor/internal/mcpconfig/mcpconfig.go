@@ -40,6 +40,12 @@ var ErrVaultMCPBanned = errors.New("mcpconfig: vault-pattern server banned")
 // MCP server in the config (Rule 3 / FR-410 / D2.4). Case-insensitive match.
 var bannedMCPNamePatterns = []string{"vault", "secret", "infisical"}
 
+// serverGarrisonMutate is the garrison-mutate MCP server's entry name
+// under mcpServers and its subcommand name on the supervisor binary —
+// the same string by design (the in-tree server runs as
+// `supervisor mcp garrison-mutate`).
+const serverGarrisonMutate = "garrison-mutate"
+
 // CheckExtraServers is a pre-spawn guard: it parses extraServersJSON (the raw
 // value of agents.mcp_config) and runs RejectVaultServers on the extra entries
 // alone. Call this BEFORE the vault fetch so Rule 3 can abort without touching
@@ -108,9 +114,9 @@ func BuildChatConfig(p ChatConfigParams) ([]byte, error) {
 		if p.ChatMessageID == "" {
 			return nil, errors.New("mcpconfig: BuildChatConfig: garrison-mutate requires ChatMessageID")
 		}
-		servers["garrison-mutate"] = mcpServerSpec{
+		servers[serverGarrisonMutate] = mcpServerSpec{
 			Command: p.SupervisorBin,
-			Args:    []string{"mcp", "garrison-mutate"},
+			Args:    []string{"mcp", serverGarrisonMutate},
 			Env: map[string]string{
 				"GARRISON_DATABASE_URL":    p.DatabaseURL,
 				"GARRISON_CHAT_SESSION_ID": p.ChatSessionID,
@@ -257,6 +263,24 @@ func (fp FinalizeParams) enabled() bool {
 	return fp.SupervisorBin != "" && fp.AgentInstanceID != "" && fp.DatabaseURL != ""
 }
 
+// GarrisonMutateParams bundles the values the M8 agent-caller
+// garrison-mutate entry needs. SupervisorBin and AgentInstanceID
+// mirror FinalizeParams; DatabaseURL is the supervisor's MAIN DSN
+// (the verbs INSERT tickets + audit rows — the agent_ro DSN cannot).
+// The agent-mode server restricts the verb surface to create_ticket
+// (FR-005) and anchors audit rows on agent_instance_id (FR-401).
+// Leaving any field empty disables the entry (M2.x-era callers and
+// tests keep the three-entry shape).
+type GarrisonMutateParams struct {
+	SupervisorBin   string
+	AgentInstanceID string
+	DatabaseURL     string
+}
+
+func (gp GarrisonMutateParams) enabled() bool {
+	return gp.SupervisorBin != "" && gp.AgentInstanceID != "" && gp.DatabaseURL != ""
+}
+
 // WriteParams bundles all parameters for Write / WriteWithOps so the
 // function signatures stay within SonarQube's S107 parameter-count limit.
 type WriteParams struct {
@@ -266,7 +290,14 @@ type WriteParams struct {
 	DSN              string
 	Mempalace        MempalaceParams
 	Finalize         FinalizeParams
+	GarrisonMutate   GarrisonMutateParams
 	ExtraServersJSON []byte
+	// OmitMempalace suppresses the mempalace entry even when Mempalace
+	// is enabled. The M7.1 container path sets it (FR-014, Q1): the
+	// in-container config carries exactly postgres + finalize +
+	// garrison-mutate — mid-turn MemPalace access is not available
+	// inside agent containers. Direct-exec callers leave it false.
+	OmitMempalace bool
 }
 
 // Write creates the per-invocation MCP config file. Returns the absolute
@@ -300,15 +331,35 @@ func WriteWithOps(_ context.Context, ops fileOps, p WriteParams) (string, error)
 	if p.Dir == "" {
 		return "", errors.New("mcpconfig: dir is empty")
 	}
+	data, fileName, err := Render(p)
+	if err != nil {
+		return "", err
+	}
+	filePath := filepath.Join(p.Dir, fileName)
+	if err := ops.WriteFile(filePath, data, 0o600); err != nil {
+		return "", fmt.Errorf("mcpconfig: write %s: %w", filePath, err)
+	}
+	return filePath, nil
+}
+
+// Render composes and validates the per-invocation MCP config without
+// touching disk (M7.1 FR-014, plan D16). It returns the marshaled JSON
+// bytes and the basename mcp-config-<instance-uuid>.json. Write is
+// Render-then-write-file; the container path Renders and pipes the bytes
+// into an in-container write exec instead, so the host filesystem never
+// carries the config. Rule 3 (RejectVaultServers) runs here so the check
+// is mode-independent: no vault-proxying config is ever produced,
+// regardless of where the bytes end up.
+func Render(p WriteParams) ([]byte, string, error) {
 	if p.SupervisorBin == "" {
-		return "", errors.New("mcpconfig: supervisorBin is empty")
+		return nil, "", errors.New("mcpconfig: supervisorBin is empty")
 	}
 	// Canonicalize the UUID to its textual form for the filename.
 	idText, err := formatUUID(p.InstanceID)
 	if err != nil {
-		return "", fmt.Errorf("mcpconfig: format instanceID: %w", err)
+		return nil, "", fmt.Errorf("mcpconfig: format instanceID: %w", err)
 	}
-	filePath := filepath.Join(p.Dir, "mcp-config-"+idText+".json")
+	fileName := "mcp-config-" + idText + ".json"
 
 	servers := map[string]mcpServerSpec{
 		"postgres": {
@@ -317,7 +368,7 @@ func WriteWithOps(_ context.Context, ops fileOps, p WriteParams) (string, error)
 			Env:     map[string]string{"GARRISON_PGMCP_DSN": p.DSN},
 		},
 	}
-	if p.Mempalace.enabled() {
+	if p.Mempalace.enabled() && !p.OmitMempalace {
 		command, args, env := mempalace.MCPServerSpec(mempalace.SpecConfig{
 			DockerBin:          p.Mempalace.DockerBin,
 			MempalaceContainer: p.Mempalace.MempalaceContainer,
@@ -347,13 +398,28 @@ func WriteWithOps(_ context.Context, ops fileOps, p WriteParams) (string, error)
 		}
 	}
 
+	// M8 FR-005 agent-caller entry: ticket agents get the
+	// garrison-mutate server in agent mode (create_ticket only; audit
+	// anchors on agent_instance_id per FR-401). Same in-tree server the
+	// chat container uses, different caller anchor.
+	if p.GarrisonMutate.enabled() {
+		servers[serverGarrisonMutate] = mcpServerSpec{
+			Command: p.GarrisonMutate.SupervisorBin,
+			Args:    []string{"mcp", serverGarrisonMutate},
+			Env: map[string]string{
+				"GARRISON_AGENT_INSTANCE_ID": p.GarrisonMutate.AgentInstanceID,
+				"GARRISON_DATABASE_URL":      p.GarrisonMutate.DatabaseURL,
+			},
+		}
+	}
+
 	// M2.3 T013: merge agent-specific servers from agents.mcp_config before
 	// Rule 3 runs. An agent may declare additional MCP servers in its DB row;
 	// any vault-pattern name among them triggers ExitVaultMCPInConfig.
 	if len(p.ExtraServersJSON) > 0 && string(p.ExtraServersJSON) != "{}" {
 		var extra map[string]mcpServerSpec
 		if err := json.Unmarshal(p.ExtraServersJSON, &extra); err != nil {
-			return "", fmt.Errorf("mcpconfig: parse extraServersJSON: %w", err)
+			return nil, "", fmt.Errorf("mcpconfig: parse extraServersJSON: %w", err)
 		}
 		for name, spec := range extra {
 			servers[name] = spec
@@ -366,20 +432,16 @@ func WriteWithOps(_ context.Context, ops fileOps, p WriteParams) (string, error)
 	// ever reaches disk. The error is classified into ExitVaultMCPInConfig
 	// by the spawn path (T008).
 	if err := RejectVaultServers(cfg); err != nil {
-		return "", err
+		return nil, "", err
 	}
 
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		// encoding/json never errors for this shape, but surface it
 		// anyway so the caller isn't surprised on a future schema bump.
-		return "", fmt.Errorf("mcpconfig: marshal: %w", err)
+		return nil, "", fmt.Errorf("mcpconfig: marshal: %w", err)
 	}
-
-	if err := ops.WriteFile(filePath, data, 0o600); err != nil {
-		return "", fmt.Errorf("mcpconfig: write %s: %w", filePath, err)
-	}
-	return filePath, nil
+	return data, fileName, nil
 }
 
 // Remove deletes the per-invocation config file. Tolerant of

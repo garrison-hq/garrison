@@ -1,10 +1,10 @@
 package agentcontainer
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 )
 
@@ -24,10 +24,10 @@ type FakeController struct {
 	// Containers tracks the in-memory state machine. Keyed by ID.
 	Containers map[string]*FakeContainerState
 
-	// ExecOutputs configurable per container — when Exec is called,
-	// the fake reads the queue's next entry and returns it as stdout.
-	// If empty, the fake echoes stdin.
-	ExecOutputs map[string][]string
+	// ExecResults scripts Exec per container: each call pops the
+	// queue's next entry. An empty queue yields a default session
+	// (empty streams, exit 0).
+	ExecResults map[string][]FakeExecResult
 
 	// CreateError, StartError, etc. let tests inject failures.
 	CreateError      error
@@ -35,19 +35,31 @@ type FakeController struct {
 	StopError        error
 	RemoveError      error
 	ExecError        error
+	RestartError     error
 	ImageDigestValue string
 	ImageDigestError error
 
-	nextID int
+	nextID     int
+	nextExecID int
 }
 
 type FakeCall struct {
 	Method string
 	Spec   ContainerSpec // for Create
-	ID     string        // for Start / Stop / Remove / Exec / ConnectNetwork
-	Cmd    []string      // for Exec
-	Stdin  string        // for Exec — read from the input reader at call time
+	ID     string        // for Start / Stop / Restart / Remove / Exec / ConnectNetwork
+	Exec   ExecSpec      // for Exec — the full per-exec spec (Cmd/Env/WorkingDir)
 	NetID  string        // for ConnectNetwork
+}
+
+// FakeExecResult scripts one Exec invocation: the streamed output, the
+// exit code ExitCode reports once the streams drain, and the optional
+// errors for the Exec call itself or the exit-code inspect.
+type FakeExecResult struct {
+	Stdout     string
+	Stderr     string
+	ExitCode   int
+	InspectErr error // ExitCode returns (-1, InspectErr)
+	Err        error // Exec itself fails; no session is returned
 }
 
 // FakeContainerState tracks per-container state in the fake.
@@ -55,13 +67,17 @@ type FakeContainerState struct {
 	Spec     ContainerSpec
 	State    string // "created", "running", "stopped", "removed"
 	Networks []string
+	// Labels mirrors the create body's label set (including the shape
+	// hash) so ReconcileShape can classify recreate-vs-noop. Tests
+	// seed old-shape containers by clearing or staling the map.
+	Labels map[string]string
 }
 
 // NewFakeController constructs an empty fake.
 func NewFakeController() *FakeController {
 	return &FakeController{
 		Containers:       map[string]*FakeContainerState{},
-		ExecOutputs:      map[string][]string{},
+		ExecResults:      map[string][]FakeExecResult{},
 		ImageDigestValue: "sha256:fake-digest-deadbeef",
 	}
 }
@@ -74,7 +90,14 @@ func (f *FakeController) Create(_ context.Context, spec ContainerSpec) (string, 
 	}
 	f.nextID++
 	id := fmt.Sprintf("fake-container-%d", f.nextID)
-	f.Containers[id] = &FakeContainerState{Spec: spec, State: "created"}
+	st := &FakeContainerState{Spec: spec, State: "created"}
+	// Best-effort label mirror: specs too sparse for buildCreateBody
+	// (older tests) simply get no labels, which ReconcileShape treats
+	// as old-shape — exactly like the real unlabeled fleet.
+	if body, err := buildCreateBody(spec); err == nil {
+		st.Labels = body.Labels
+	}
+	f.Containers[id] = st
 	f.Calls = append(f.Calls, FakeCall{Method: "Create", Spec: spec, ID: id})
 	return id, nil
 }
@@ -135,41 +158,56 @@ func (f *FakeController) ConnectNetwork(_ context.Context, id, network string) e
 	return nil
 }
 
-// Exec reads stdin into a captured buffer (so tests can assert what
-// the supervisor wrote) and returns either the queued ExecOutputs
-// or echoes stdin back as stdout.
-func (f *FakeController) Exec(ctx context.Context, id string, cmd []string, stdin io.Reader) (io.ReadCloser, io.ReadCloser, error) {
+// Exec pops the next scripted FakeExecResult for the container (or a
+// zero default) and returns it as a finished ExecSession with the
+// scripted exit code.
+func (f *FakeController) Exec(_ context.Context, id string, spec ExecSpec) (*ExecSession, error) {
 	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.ExecError != nil {
-		f.mu.Unlock()
-		return nil, nil, f.ExecError
+		return nil, f.ExecError
 	}
 	if _, ok := f.Containers[id]; !ok {
-		f.mu.Unlock()
-		return nil, nil, errContainerNotFoundf(id)
+		return nil, errContainerNotFoundf(id)
 	}
-	queue := f.ExecOutputs[id]
-	f.mu.Unlock()
-
-	stdinCapture := ""
-	if stdin != nil {
-		buf, _ := io.ReadAll(stdin)
-		stdinCapture = string(buf)
+	res := FakeExecResult{}
+	if queue := f.ExecResults[id]; len(queue) > 0 {
+		res = queue[0]
+		f.ExecResults[id] = queue[1:]
 	}
+	f.Calls = append(f.Calls, FakeCall{Method: "Exec", ID: id, Exec: spec})
+	if res.Err != nil {
+		return nil, res.Err
+	}
+	f.nextExecID++
+	return &ExecSession{
+		ID:     fmt.Sprintf("fake-exec-%d", f.nextExecID),
+		Stdout: io.NopCloser(strings.NewReader(res.Stdout)),
+		Stderr: io.NopCloser(strings.NewReader(res.Stderr)),
+		inspect: func(context.Context) (bool, int, error) {
+			if res.InspectErr != nil {
+				return false, -1, res.InspectErr
+			}
+			return false, res.ExitCode, nil
+		},
+	}, nil
+}
 
+// Restart records the call and leaves the container running — the
+// fake analog of the idle `sleep infinity` PID 1 coming back.
+func (f *FakeController) Restart(_ context.Context, id string) error {
 	f.mu.Lock()
-	f.Calls = append(f.Calls, FakeCall{Method: "Exec", ID: id, Cmd: cmd, Stdin: stdinCapture})
-	if len(queue) > 0 {
-		out := queue[0]
-		f.ExecOutputs[id] = queue[1:]
-		f.mu.Unlock()
-		return io.NopCloser(bytes.NewReader([]byte(out))), io.NopCloser(bytes.NewReader(nil)), nil
+	defer f.mu.Unlock()
+	if f.RestartError != nil {
+		return f.RestartError
 	}
-	f.mu.Unlock()
-
-	// Echo stdin back as stdout — the simplest line-buffering
-	// preserve check.
-	return io.NopCloser(bytes.NewReader([]byte(stdinCapture))), io.NopCloser(bytes.NewReader(nil)), nil
+	st, ok := f.Containers[id]
+	if !ok {
+		return errContainerNotFoundf(id)
+	}
+	st.State = "running"
+	f.Calls = append(f.Calls, FakeCall{Method: "Restart", ID: id})
+	return nil
 }
 
 // Reconcile uses the in-memory Containers map as "actual state".
@@ -216,6 +254,81 @@ func (f *FakeController) Reconcile(_ context.Context, expected []ExpectedContain
 		}
 	}
 	return report, nil
+}
+
+// ReconcileShape mirrors the production algorithm against the
+// in-memory state: per spec it finds the container whose Spec.AgentID
+// matches, compares the stored label set's shape hash to the desired
+// one, and converges via the fake's own Create/Start/Stop/Remove so
+// the Calls log records the same sequence the real impl would issue.
+func (f *FakeController) ReconcileShape(ctx context.Context, specs []ContainerSpec) (ShapeReport, error) {
+	report := ShapeReport{}
+	for _, spec := range specs {
+		desired, err := buildCreateBody(spec)
+		if err != nil {
+			return report, err
+		}
+		if err := f.convergeShape(ctx, spec, desired.Labels[shapeHashLabel], &report); err != nil {
+			return report, err
+		}
+	}
+	return report, nil
+}
+
+// convergeShape applies the per-spec convergence decision (create /
+// recreate / restart / no-op) against the in-memory state and appends
+// the outcome to the report — the same classification table the
+// production ReconcileShape walks.
+func (f *FakeController) convergeShape(ctx context.Context, spec ContainerSpec, desiredHash string, report *ShapeReport) error {
+	id, labels, state, found := f.findByAgentID(spec.AgentID)
+	switch {
+	case !found:
+		if err := f.fakeCreateAndStart(ctx, spec); err != nil {
+			return err
+		}
+		report.Created = append(report.Created, spec.AgentID)
+	case labels[shapeHashLabel] != desiredHash:
+		if err := f.Stop(ctx, id); err != nil {
+			return err
+		}
+		if err := f.Remove(ctx, id); err != nil {
+			return err
+		}
+		if err := f.fakeCreateAndStart(ctx, spec); err != nil {
+			return err
+		}
+		report.Recreated = append(report.Recreated, spec.AgentID)
+	case state != "running":
+		if err := f.Start(ctx, id); err != nil {
+			return err
+		}
+		report.Restarted = append(report.Restarted, spec.AgentID)
+	default:
+		report.Unchanged = append(report.Unchanged, spec.AgentID)
+	}
+	return nil
+}
+
+// findByAgentID snapshots the matching container's identity and state
+// under the lock; ReconcileShape's mutations go through the public
+// methods, which take the lock per call.
+func (f *FakeController) findByAgentID(agentID string) (id string, labels map[string]string, state string, found bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for cid, st := range f.Containers {
+		if st.Spec.AgentID == agentID {
+			return cid, st.Labels, st.State, true
+		}
+	}
+	return "", nil, "", false
+}
+
+func (f *FakeController) fakeCreateAndStart(ctx context.Context, spec ContainerSpec) error {
+	id, err := f.Create(ctx, spec)
+	if err != nil {
+		return err
+	}
+	return f.Start(ctx, id)
 }
 
 func (f *FakeController) ImageDigest(_ context.Context, _ string) (string, error) {

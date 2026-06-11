@@ -158,8 +158,8 @@ type Config struct {
 	FinalizeResultGrace time.Duration // GARRISON_FINALIZE_RESULT_GRACE, default 3s
 
 	// M7 fields. Per-agent runtime defaults + skill-registry endpoints
-	// + the direct-exec feature flag that flips false at the migrate7
-	// grandfathering cutover (T014).
+	// + the direct-exec feature flag (default false since M7.1 T012 —
+	// container exec is the production path).
 	AgentUIDRangeStart      int    // GARRISON_AGENT_UID_RANGE_START, default 1000
 	AgentUIDRangeEnd        int    // GARRISON_AGENT_UID_RANGE_END, default 1999
 	DefaultContainerMemory  string // GARRISON_DEFAULT_CONTAINER_MEMORY, default "512m"
@@ -168,14 +168,24 @@ type Config struct {
 	SkillsShURL             string // GARRISON_SKILLS_SH_URL, default "https://skills.sh"
 	SkillHubURL             string // GARRISON_SKILLHUB_URL, default "http://garrison-skillhub:8080"
 	SkillHubToken           string // GARRISON_SKILLHUB_TOKEN, no default — empty disables SkillHub
-	UseDirectExec           bool   // GARRISON_USE_DIRECT_EXEC, default true; flipped to false by migrate7.Run after grandfathering completes
+	UseDirectExec           bool   // GARRISON_USE_DIRECT_EXEC, default false (M7.1 T012); setting true is the rollback lever to direct-exec (FR-018)
 	DockerSocketProxyURL    string // GARRISON_DOCKER_SOCKET_PROXY_URL, default "http://garrison-docker-proxy:2375"
+	AgentContainerImage     string // GARRISON_AGENT_CONTAINER_IMAGE, default "garrison-claude:m5"; migrate7 resolves this ref to a digest at boot
+	AgentWorkspaceFS        string // GARRISON_AGENT_WORKSPACE_FS, default "/var/lib/garrison/workspaces"; per-agent workspace bind-mount base
+	AgentSkillsFS           string // GARRISON_AGENT_SKILLS_FS, default "/var/lib/garrison/skills"; per-agent skills bind-mount base
 
 	// M8 fields. MCPJungle integration — single-instance for alpha;
 	// per-customer-instance is the beta path (Option A) via the
 	// URLForCustomer seam in internal/mcpjungle.
 	MCPJungleURL            string // GARRISON_MCPJUNGLE_URL, required in non-fake-agent mode
 	MCPJungleAdminTokenPath string // GARRISON_MCPJUNGLE_ADMIN_TOKEN_PATH, default "mcpjungle/admin"
+
+	// M7.1 fields. The agents network is the internal compose network
+	// agent containers join at create time (FR-012); the egress proxy
+	// is the only route out of it (FR-009) and lands in claude execs as
+	// HTTPS_PROXY (T011).
+	AgentsNetwork  string // GARRISON_AGENTS_NETWORK, default "garrison-agents"
+	EgressProxyURL string // GARRISON_EGRESS_PROXY_URL, default "http://garrison-egress-proxy:3128"
 }
 
 // DefaultMinIOBucket per M5.4 spec FR-620.
@@ -279,12 +289,19 @@ func Load() (*Config, error) {
 		SkillsShURL:             "https://skills.sh",
 		SkillHubURL:             "http://garrison-skillhub:8080",
 		SkillHubToken:           "",
-		UseDirectExec:           true,
+		UseDirectExec:           false,
 		DockerSocketProxyURL:    "http://garrison-docker-proxy:2375",
+		AgentContainerImage:     "garrison-claude:m5",
+		AgentWorkspaceFS:        "/var/lib/garrison/workspaces",
+		AgentSkillsFS:           "/var/lib/garrison/skills",
 
 		// M8 defaults.
 		MCPJungleURL:            "",
 		MCPJungleAdminTokenPath: "mcpjungle/admin",
+
+		// M7.1 defaults.
+		AgentsNetwork:  "garrison-agents",
+		EgressProxyURL: "http://garrison-egress-proxy:3128",
 	}
 
 	// M5.1 env overrides — all optional; defaults above are used
@@ -384,6 +401,15 @@ func Load() (*Config, error) {
 		}
 		cfg.AgentUIDRangeEnd = n
 	}
+	if v := os.Getenv("GARRISON_AGENT_CONTAINER_IMAGE"); v != "" {
+		cfg.AgentContainerImage = v
+	}
+	if v := os.Getenv("GARRISON_AGENT_WORKSPACE_FS"); v != "" {
+		cfg.AgentWorkspaceFS = v
+	}
+	if v := os.Getenv("GARRISON_AGENT_SKILLS_FS"); v != "" {
+		cfg.AgentSkillsFS = v
+	}
 	if v := os.Getenv("GARRISON_DEFAULT_CONTAINER_MEMORY"); v != "" {
 		cfg.DefaultContainerMemory = v
 	}
@@ -426,6 +452,14 @@ func Load() (*Config, error) {
 	}
 	if v := os.Getenv("GARRISON_MCPJUNGLE_ADMIN_TOKEN_PATH"); v != "" {
 		cfg.MCPJungleAdminTokenPath = v
+	}
+
+	// M7.1 env overrides.
+	if v := os.Getenv("GARRISON_AGENTS_NETWORK"); v != "" {
+		cfg.AgentsNetwork = v
+	}
+	if v := os.Getenv("GARRISON_EGRESS_PROXY_URL"); v != "" {
+		cfg.EgressProxyURL = v
 	}
 
 	dbURL := os.Getenv("GARRISON_DATABASE_URL")

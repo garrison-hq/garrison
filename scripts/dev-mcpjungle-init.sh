@@ -36,14 +36,25 @@ if ! command -v infisical >/dev/null 2>&1; then
 fi
 
 echo "==> [1/3] running mcpjungle init-server in ${CONTAINER_NAME}"
-TOKEN_OUTPUT="$(docker exec "${CONTAINER_NAME}" mcpjungle init-server 2>&1)"
+# Full path: the upstream image is distroless (no shell, no PATH); the
+# binary lives at /mcpjungle (container entrypoint).
+TOKEN_OUTPUT="$(docker exec "${CONTAINER_NAME}" /mcpjungle init-server 2>&1)"
 echo "${TOKEN_OUTPUT}"
 
-# MCPJungle prints the admin token in a line like:
+# Older MCPJungle versions print the admin token to stdout as:
 #   admin_token: <token>
+# Newer versions write it to /root/.mcpjungle.conf inside the container
+# (YAML: access_token: <token>) and only print a confirmation.
 TOKEN="$(echo "${TOKEN_OUTPUT}" | awk -F': ' '/^admin_token:/ {print $2}' | tr -d '[:space:]')"
 if [[ -z "${TOKEN}" ]]; then
-  echo "error: failed to parse admin_token from init-server output" >&2
+  CONF_TMP="$(mktemp)"
+  if docker cp "${CONTAINER_NAME}:/root/.mcpjungle.conf" "${CONF_TMP}" >/dev/null 2>&1; then
+    TOKEN="$(awk -F': ' '/^access_token:/ {print $2}' "${CONF_TMP}" | tr -d '[:space:]')"
+  fi
+  rm -f "${CONF_TMP}"
+fi
+if [[ -z "${TOKEN}" ]]; then
+  echo "error: failed to parse admin token from init-server output or .mcpjungle.conf" >&2
   exit 1
 fi
 

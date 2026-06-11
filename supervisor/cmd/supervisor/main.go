@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/garrison-hq/garrison/supervisor/internal/agentcontainer"
 	"github.com/garrison-hq/garrison/supervisor/internal/agents"
 	"github.com/garrison-hq/garrison/supervisor/internal/chat"
 	"github.com/garrison-hq/garrison/supervisor/internal/config"
@@ -21,6 +22,7 @@ import (
 	"github.com/garrison-hq/garrison/supervisor/internal/mcpjungle"
 	"github.com/garrison-hq/garrison/supervisor/internal/mcpserverwork"
 	"github.com/garrison-hq/garrison/supervisor/internal/mempalace"
+	"github.com/garrison-hq/garrison/supervisor/internal/migrate7"
 	"github.com/garrison-hq/garrison/supervisor/internal/objstore"
 	"github.com/garrison-hq/garrison/supervisor/internal/pgdb"
 	"github.com/garrison-hq/garrison/supervisor/internal/spawn"
@@ -227,6 +229,14 @@ func runDaemon() int {
 		return exitCode
 	}
 
+	// M7 — per-agent container runtime. Constructs the socket-proxy
+	// controller and runs the idempotent grandfathering migration at
+	// boot, in the runbook-00 §0.9 contract position (vault → migrate7
+	// → mcpjungle reconcile). Degrades with a warning on failure (same
+	// posture as MCPJungle per FR-308): the supervisor continues on the
+	// direct-exec path rather than refusing to boot.
+	agentCtrl, useDirectExec := buildAgentContainerRuntime(ctx, cfg, pool, queries, supervisorBin, logger)
+
 	// M6 T014: throttle deps shared between spawn-prep gate (T007) and
 	// pipeline OnRateLimit actuator (T008). Pool=nil short-circuits the
 	// gate to "allow" so M2.x integration tests + chaos suites that
@@ -254,6 +264,9 @@ func runDaemon() int {
 		MCPConfigDir:       cfg.MCPConfigDir,
 		SupervisorBin:      supervisorBin,
 		AgentRODSN:         cfg.AgentRODSN(),
+		// M8 agent-caller: main DSN for the garrison-mutate entry's
+		// writes (tickets + agent-anchored audit rows).
+		DatabaseURL: cfg.DatabaseURL,
 		// M2.2 — docker/mempalace fields for MCP-config building + wake-up.
 		DockerBin:          cfg.DockerBin,
 		MempalaceContainer: cfg.MempalaceContainer,
@@ -268,9 +281,23 @@ func runDaemon() int {
 		// M6 T014 — result-grace + throttle gate.
 		FinalizeResultGrace: cfg.FinalizeResultGrace,
 		Throttle:            throttleDeps,
+		// M7/M7.1 — container runtime threading. As of T012 the
+		// config default routes spawns through the container exec
+		// pipeline; buildAgentContainerRuntime forces direct-exec
+		// only in fake-agent mode / with no socket-proxy URL (the
+		// M2.x suites), and GARRISON_USE_DIRECT_EXEC=true is the
+		// operator rollback lever (FR-018).
+		UseDirectExec:  useDirectExec,
+		AgentContainer: agentCtrl,
+		// M7.1 T010/T011 container-path collaborators: the shared
+		// per-agent in-flight slot (FR-017), the egress proxy that
+		// lands in claude execs as HTTPS_PROXY (FR-009/FR-011), and
+		// the host base dir of the agent-ID-keyed workspace binds
+		// for the acceptance gate (FR-006).
+		Inflight:         spawn.NewAgentInflight(),
+		EgressProxyURL:   cfg.EgressProxyURL,
+		AgentWorkspaceFS: cfg.AgentWorkspaceFS,
 	}
-
-	dispatcher := buildDispatcher(spawnDeps)
 
 	healthServer := health.NewServer(cfg, state, pool)
 
@@ -289,12 +316,21 @@ func runDaemon() int {
 	// MCPJungleURL empty in fake-agent mode and the M2.x chaos suites;
 	// the supervisor skips the whole subsystem in that case.
 	mcpjungleClient, mcpWorker := buildMcpjungleSubsystem(ctx, cfg, queries, pool, vaultClient, logger)
+	var workerExtras map[string]events.Handler
 	if mcpWorker != nil {
-		dispatcher = buildDispatcherWithExtras(spawnDeps, map[string]events.Handler{
-			mcpserverwork.Channel: mcpWorker.Handle,
-		})
+		workerExtras = map[string]events.Handler{mcpserverwork.Channel: mcpWorker.Handle}
 	}
 	_ = mcpjungleClient
+	dispatcher := buildDispatcherWithExtras(spawnDeps, workerExtras)
+
+	// Roster-derived routes live in the dispatcher's DYNAMIC overlay:
+	// every active agent's listens_for channels become dispatch routes
+	// for its role, so M7-hired departments receive work without a code
+	// change. The overlay is rebuilt on every agents.changed
+	// notification (see StartChangeListener below), so an approved hire
+	// starts dispatching within one poll interval — no supervisor
+	// restart (FR-014 amendment, 2026-06-10).
+	dispatcher.SetDynamicRoutes(buildRosterRoutes(agentsCache, spawnDeps, logger))
 
 	g, gctx := errgroup.WithContext(ctx)
 
@@ -319,15 +355,19 @@ func runDaemon() int {
 
 	startDashboardAPIServerIfWired(g, gctx, dashboardAPIServer, cfg, logger)
 
-	// M4 — agents.changed cache invalidator (T014 / FR-100).
-	// The dashboard's editAgent server action emits
-	// pg_notify('agents.changed', role_slug) on every successful
-	// agents-row write; the listener drives Cache.Reset so the
-	// next spawn picks up the new config. The listener owns its
-	// own dedicated pgx.Conn (LISTEN is connection-scoped) and
-	// cleanly exits on root-context cancellation per AGENTS.md
-	// §Concurrency rule 1.
-	if err := agents.StartChangeListener(gctx, pool, agentsCache); err != nil {
+	// M4 — agents.changed cache invalidator (T014 / FR-100), extended
+	// 2026-06-10: agents.changed now also fires from a DB trigger on
+	// agents INSERT/UPDATE (covering hire approval from any surface),
+	// and the onReset hook rebuilds the dispatcher's roster route
+	// overlay so a fresh hire dispatches without a restart. The
+	// listener owns its own dedicated pgx.Conn (LISTEN is
+	// connection-scoped) and cleanly exits on root-context
+	// cancellation per AGENTS.md §Concurrency rule 1.
+	onRosterReset := func(_ context.Context) {
+		dispatcher.SetDynamicRoutes(buildRosterRoutes(agentsCache, spawnDeps, logger))
+		logger.Info("roster routes rebuilt after agents.changed")
+	}
+	if err := agents.StartChangeListener(gctx, pool, agentsCache, onRosterReset); err != nil {
 		logger.Warn("agents.changed listener failed to start; agent edits will not propagate to the supervisor cache until restart", "err", err)
 	}
 
@@ -596,6 +636,52 @@ func buildDispatcher(spawnDeps spawn.Deps) *events.Dispatcher {
 	return buildDispatcherWithExtras(spawnDeps, nil)
 }
 
+// buildRosterRoutes derives channel→handler routes from every active
+// agent's listens_for column. This is the additive-department wiring
+// the M2.1 plan promised ("introducing a second department is purely
+// additive") and internal/agents has carried listens_for for since
+// T014 — M7-hired departments dispatch through these routes with no
+// code change.
+//
+// The static M2.2 engineering channels stay authoritative: a
+// listens_for entry that duplicates one is skipped (same handler
+// either way). Two roles claiming the same channel is a roster bug;
+// first-registered wins with a Warn. The dispatcher's route table is
+// frozen at construction (FR-014), so agents hired after boot start
+// dispatching at the next supervisor restart.
+func buildRosterRoutes(cache *agents.Cache, spawnDeps spawn.Deps, logger *slog.Logger) map[string]events.Handler {
+	static := map[string]bool{
+		EngineeringInDevChannel:     true,
+		EngineeringTodoInDevChannel: true,
+		EngineeringQABounceChannel:  true,
+		EngineeringQAReviewChannel:  true,
+	}
+	routes := make(map[string]events.Handler)
+	owner := make(map[string]string)
+	for _, a := range cache.All() {
+		role := a.Role
+		for _, ch := range a.ListensFor {
+			if static[ch] {
+				continue
+			}
+			if prev, dup := owner[ch]; dup {
+				if prev != role {
+					logger.Warn("roster route conflict; first registration wins",
+						"channel", ch, "registered_role", prev, "skipped_role", role)
+				}
+				continue
+			}
+			owner[ch] = role
+			handlerRole := role
+			routes[ch] = func(ctx context.Context, eventID pgtype.UUID) error {
+				return spawn.Spawn(ctx, spawnDeps, eventID, handlerRole)
+			}
+			logger.Info("roster route registered", "channel", ch, "role", role)
+		}
+	}
+	return routes
+}
+
 // buildDispatcherWithExtras composes the dispatcher with the
 // M2.2 channels plus any caller-supplied additions. M8 T011 uses
 // this seam to wire the MCPJungle reactive worker
@@ -692,7 +778,12 @@ func buildMcpjungleSubsystem(
 // configured path (default mcpjungle/admin). Returns "" on any error
 // — the client surfaces ErrAdminTokenInvalid on the first request,
 // which is the right shape for an operator-fixable misconfiguration.
-func fetchMcpjungleAdminToken(ctx context.Context, cfg *config.Config, vaultClient vault.Fetcher, logger *slog.Logger) string {
+// vaultClient is the CONCRETE pointer (not vault.Fetcher): the caller
+// type-asserts the interface, and a typed-nil *vault.Client inside a
+// non-nil interface would defeat the nil guard below and panic on the
+// nil receiver (observed in fake-agent mode, where buildVaultClient
+// returns nil but GARRISON_MCPJUNGLE_URL is still set by compose).
+func fetchMcpjungleAdminToken(ctx context.Context, cfg *config.Config, vaultClient *vault.Client, logger *slog.Logger) string {
 	if vaultClient == nil {
 		logger.Warn("mcpjungle: vault not wired; admin token unavailable",
 			"path", cfg.MCPJungleAdminTokenPath)
@@ -944,4 +1035,173 @@ func buildVaultClient(ctx context.Context, cfg *config.Config, logger *slog.Logg
 		return nil, ExitFailure
 	}
 	return vc, ExitOK
+}
+
+// buildAgentContainerRuntime wires the M7 per-agent container runtime
+// at boot: constructs the socket-proxy Controller and runs migrate7's
+// idempotent grandfathering pass (T014). Returns the controller for
+// spawn.Deps threading plus the effective UseDirectExec value.
+//
+// Posture decisions, recorded here because they're load-bearing:
+//   - Fake-agent mode and an unset proxy URL skip the subsystem
+//     entirely (M2.x chaos/integration suites; no Docker available).
+//   - migrate7 failure degrades with a warning (same posture as the
+//     MCPJungle subsystem): boot continues with whatever
+//     cfg.UseDirectExec says rather than crash-looping the supervisor
+//     over a missing agent image; a broken container surfaces per-spawn
+//     as spawn_failed retryable.
+//   - cfg.UseDirectExec is honoured as of M7.1 T012 (FR-018): the
+//     container exec pipeline (spawn/m7.go) is real, and the config
+//     default is false. GARRISON_USE_DIRECT_EXEC=true is the rollback
+//     lever back to supervisor-child direct-exec.
+func buildAgentContainerRuntime(
+	ctx context.Context,
+	cfg *config.Config,
+	pool *pgxpool.Pool,
+	queries *store.Queries,
+	supervisorBin string,
+	logger *slog.Logger,
+) (agentcontainer.Controller, bool) {
+	if cfg.UseFakeAgent || cfg.DockerSocketProxyURL == "" {
+		logger.Info("migrate7: skipped (fake-agent mode or no socket-proxy URL)")
+		return nil, true
+	}
+
+	ctrl := agentcontainer.NewSocketProxyController(cfg.DockerSocketProxyURL, nil, logger)
+
+	deps := migrate7.Deps{
+		Pool:        pool,
+		Queries:     queries,
+		Controller:  ctrl,
+		Logger:      logger,
+		ImageRef:    cfg.AgentContainerImage,
+		UIDStart:    cfg.AgentUIDRangeStart,
+		UIDEnd:      cfg.AgentUIDRangeEnd,
+		WorkspaceFS: cfg.AgentWorkspaceFS,
+		SkillsFS:    cfg.AgentSkillsFS,
+		Memory:      cfg.DefaultContainerMemory,
+		CPUs:        cfg.DefaultContainerCPUs,
+		PIDsLimit:   cfg.DefaultContainerPIDsLim,
+		// M7.1 (T006): agents network + the supervisor-binary host
+		// path. supervisorBin is resolveSupervisorBin's value — under
+		// the identical-path shared-dir bind (compose §supervisor) the
+		// same absolute path resolves on the docker host, so it works
+		// as a create-time bind source.
+		NetworkName:   cfg.AgentsNetwork,
+		SupervisorBin: supervisorBin,
+		OnComplete: func(flipUseDirectExec bool) {
+			if flipUseDirectExec {
+				logger.Info("migrate7: grandfathering complete; container exec is the default path (UseDirectExec defaults false since M7.1 T012)")
+			}
+		},
+	}
+	if err := migrate7.Run(ctx, deps); err != nil {
+		logger.Warn("migrate7: grandfathering failed; continuing on direct-exec (degrade-with-warning)", "err", err)
+	}
+
+	// M7.1 (T007): boot shape reconcile — converge every agent-owned
+	// container (grandfathered AND hired; host_uid IS NOT NULL) to the
+	// current create shape (FR-007). Runs right after migrate7 so
+	// freshly grandfathered containers reconcile as Unchanged. Same
+	// degrade posture as migrate7: failures warn and continue; a
+	// broken container surfaces per-spawn as spawn_failed retryable
+	// and the next boot repairs.
+	runBootShapeReconcile(ctx, cfg, queries, ctrl, supervisorBin, logger)
+
+	return ctrl, cfg.UseDirectExec
+}
+
+// runBootShapeReconcile lists every container-owning agent, ensures
+// each agent-ID-keyed workspace dir host-side (FR-006 — the
+// identical-path compose bind makes this MkdirAll land at the docker
+// daemon's bind source), builds the desired specs via the single
+// per-agent source, converges the fleet via ReconcileShape, and writes
+// agent_container_events rows from the report (plan §3/§9): a
+// removed+created pair per Recreated agent, created per Created,
+// started per Restarted. Every failure is warn-and-continue.
+func runBootShapeReconcile(
+	ctx context.Context,
+	cfg *config.Config,
+	queries *store.Queries,
+	ctrl agentcontainer.Controller,
+	supervisorBin string,
+	logger *slog.Logger,
+) {
+	rows, err := queries.ListAgentsForContainerReconcile(ctx)
+	if err != nil {
+		logger.Warn("shape-reconcile: list agents failed; skipping (next boot retries)", "err", err)
+		return
+	}
+	if len(rows) == 0 {
+		logger.Info("shape-reconcile: no container-owning agents; nothing to do")
+		return
+	}
+
+	specs := make([]agentcontainer.ContainerSpec, 0, len(rows))
+	agentRows := make(map[string]store.ListAgentsForContainerReconcileRow, len(rows))
+	for _, row := range rows {
+		agentID := uuidString(row.ID)
+		if agentID == "" || row.HostUid == nil || row.ImageDigest == nil || *row.ImageDigest == "" {
+			logger.Warn("shape-reconcile: agent missing host_uid/image_digest; skipping",
+				"agent_id", agentID, "role_slug", row.RoleSlug)
+			continue
+		}
+		spec := agentcontainer.SpecForAgent(agentcontainer.AgentSpecParams{
+			AgentID:       agentID,
+			RoleSlug:      row.RoleSlug,
+			ImageDigest:   *row.ImageDigest,
+			HostUID:       int(*row.HostUid),
+			WorkspaceFS:   cfg.AgentWorkspaceFS,
+			SkillsFS:      cfg.AgentSkillsFS,
+			NetworkName:   cfg.AgentsNetwork,
+			SupervisorBin: supervisorBin,
+			Memory:        cfg.DefaultContainerMemory,
+			CPUs:          cfg.DefaultContainerCPUs,
+			PIDsLimit:     cfg.DefaultContainerPIDsLim,
+		})
+		if err := os.MkdirAll(spec.Workspace, 0o755); err != nil {
+			logger.Warn("shape-reconcile: mkdir workspace failed; skipping agent",
+				"agent_id", agentID, "workspace", spec.Workspace, "err", err)
+			continue
+		}
+		specs = append(specs, spec)
+		agentRows[agentID] = row
+	}
+
+	report, err := ctrl.ReconcileShape(ctx, specs)
+	if err != nil {
+		logger.Warn("shape-reconcile: completed with errors (warn-and-continue; next boot repairs)", "err", err)
+	}
+
+	writeEvent := func(agentID, kind string) {
+		row, ok := agentRows[agentID]
+		if !ok {
+			return
+		}
+		if _, err := queries.InsertAgentContainerEvent(ctx, store.InsertAgentContainerEventParams{
+			AgentID:     row.ID,
+			Kind:        kind,
+			ImageDigest: row.ImageDigest,
+		}); err != nil {
+			logger.Warn("shape-reconcile: insert agent_container_events failed",
+				"agent_id", agentID, "kind", kind, "err", err)
+		}
+	}
+	for _, id := range report.Recreated {
+		writeEvent(id, "removed")
+		writeEvent(id, "created")
+	}
+	for _, id := range report.Created {
+		writeEvent(id, "created")
+	}
+	for _, id := range report.Restarted {
+		writeEvent(id, "started")
+	}
+
+	logger.Info("shape-reconcile: complete",
+		"created", len(report.Created),
+		"recreated", len(report.Recreated),
+		"restarted", len(report.Restarted),
+		"unchanged", len(report.Unchanged),
+	)
 }

@@ -109,6 +109,19 @@ func startSupervisor(t *testing.T, opts supervisorOpts) (int, *exec.Cmd) {
 		// pin the original todo-spawn contract still run. Production
 		// keeps this off — `todo` is the operator triage/backlog column.
 		"GARRISON_M21_BACKCOMPAT_DISPATCH=1",
+		// M7.1 T012 flipped UseDirectExec's default to false, so a bare
+		// binary boot now takes the container exec path — which cannot
+		// work here (no docker socket-proxy in the test env; the
+		// default proxy URL is non-empty so the force-direct guard
+		// doesn't fire). These binary-boot suites pin the legacy
+		// supervisor-child contract via the rollback lever (the plan's
+		// "legacy default restored in tests that construct config from
+		// env"); container-path coverage lives in-process in
+		// internal/spawn/m7_1_integration_test.go's fake docker proxy.
+		// Appended after os.Environ() so it wins over any parent-shell
+		// value — the SC-004 both-flag-positions suite runs depend on
+		// that.
+		"GARRISON_USE_DIRECT_EXEC=true",
 	)
 	if opts.FakeAgentCmd != "" {
 		env = append(env, "GARRISON_FAKE_AGENT_CMD="+opts.FakeAgentCmd)

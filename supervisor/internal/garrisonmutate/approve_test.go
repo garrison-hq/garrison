@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgtype"
+
+	"github.com/garrison-hq/garrison/supervisor/internal/store"
 )
 
 // operatorUUID is the canonical "operator clicked the approve button"
@@ -352,5 +354,30 @@ func TestUpdateAgentMD_ServerActionOnly(t *testing.T) {
 	}
 	if !strings.Contains(string(argsJSON), "new_agent_md") {
 		t.Errorf("audit args missing new_agent_md: %s", argsJSON)
+	}
+}
+
+// -------- Synthesized agent_md wording (M7.1 FR-015) ---------------------
+
+// Container-executed agents carry no mempalace MCP server, so the
+// synthesized hire template must not instruct them to consult
+// MemPalace mid-turn; context guidance points at the wake-up block
+// the supervisor injects instead.
+func TestSynthesizedAgentMDOmitsMempalaceToolGuidance(t *testing.T) {
+	summary := "growth, analytics"
+	md := composeApproveHireAgentMD(store.HiringProposal{
+		RoleTitle:       "growth-strategist",
+		JustificationMd: "we need someone to drive the growth funnel",
+		SkillsSummaryMd: &summary,
+	})
+	if strings.Contains(strings.ToLower(md), "mempalace") {
+		t.Errorf("synthesized agent_md still references mempalace:\n%s", md)
+	}
+	if !strings.Contains(md, "use the wake-up context provided") {
+		t.Errorf("synthesized agent_md missing wake-up-context guidance:\n%s", md)
+	}
+	// The finalize protocol the wording sits in must survive the edit.
+	if !strings.Contains(md, "finalize_ticket") {
+		t.Errorf("synthesized agent_md lost the finalize protocol:\n%s", md)
 	}
 }

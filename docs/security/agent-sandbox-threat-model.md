@@ -9,7 +9,9 @@ and `docs/security/chat-threat-model.md` (operator-vs-agent input
 boundary) — those address orthogonal axes; this document covers the
 agent's outbound blast radius.
 
-**Last updated**: 2026-05-02 (initial draft).
+**Last updated**: 2026-06-10 (M7.1 amendment notes — see §Amendments
+below; rule text under §4 is preserved unedited, the amendments are
+binding over it).
 
 **Precedence**: this document lives below `RATIONALE.md` and the active
 milestone context in the document hierarchy (see `AGENTS.md`). The
@@ -17,6 +19,82 @@ active milestone context (`specs/_context/m7-context.md` once written)
 supersedes this document for operational conflicts; this document
 supplies the threat model and architectural principles that context
 files cannot re-derive cheaply.
+
+---
+
+## Amendments
+
+Dated notes recording operator-approved deviations and acceptances.
+Each note is binding over the original rule text in §4, which is
+preserved unedited for history. All four were approved 2026-06-10
+alongside the M7.1 context file and shipped with the M7.1 container
+execution pipeline.
+
+### 2026-06-10 — Shared agents network instead of per-agent networks (Rule 3)
+
+Operator-approved deviation recorded in
+`specs/_context/m7-1-context.md` §"Scope deviation from committed
+docs" (deviation 1). M7.1 ships ONE internal `garrison-agents`
+network shared by all agent containers plus the sidecar set (egress
+proxy, postgres), instead of Rule 3's per-agent custom networks.
+Rationale: agent containers run no listening services (idle `sleep`
+PID 1 plus transient `claude` execs), so cross-agent reach is a
+low-value surface in the one-customer alpha, and per-agent networks
+add dynamic network-create machinery to every hire. Per-agent
+networks remain the multi-customer target (M9+), paired with the
+per-customer egress-proxy work.
+
+### 2026-06-10 — Mempalace is absent from the in-container sidecar set (Rule 3)
+
+Operator-approved deviation recorded in
+`specs/_context/m7-1-context.md` §"Scope deviation from committed
+docs" (deviation 2). Rule 3's default sidecar set names mempalace,
+but its MCP server is stdio-only and runs via `docker exec` into the
+shared `garrison-mempalace` container — unreachable from inside an
+agent container, which has no docker socket by design (Rule 6). The
+per-spawn in-container MCP config therefore carries exactly
+`postgres` + `finalize` + `garrison-mutate`. Palace *writes* are
+unaffected: the supervisor commits diary + KG triples from the
+finalize payload (M2.2.1 path). What container-executed agents lose
+is mid-run `mempalace_search` reads — accepted, because wake-up
+context is injected supervisor-side; seeded and synthesized agent_md
+guidance was re-worded to match (M7.1 FR-015).
+
+### 2026-06-10 — The egress proxy is the Rule 3 reading; `network=none` is superseded
+
+Recorded in `specs/_context/m7-1-context.md` §"Scope deviation from
+committed docs" (closing paragraph). A literal `network=none`
+execution posture is not viable: claude hangs rather than fails
+offline (`docs/research/m7-1-spike.md` F3), which would burn the
+full subprocess budget on every spawn. Rule 3's default-deny intent
+is delivered instead as: agent containers are created directly onto
+the internal `garrison-agents` network (`internal: true` — no route
+out), and the ONLY egress is CONNECT through the shared squid
+sidecar `garrison-egress-proxy`, whose committed allow-list
+(`supervisor/egress/squid.conf`) contains exactly
+`api.anthropic.com:443`. Claude telemetry is disabled via env
+(`DISABLE_TELEMETRY=1` + `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`)
+AND denied at the proxy. Denied CONNECTs surface as
+`TCP_DENIED/403` lines in `docker logs garrison-egress-proxy`.
+The create-with-none-then-attach sequencing in Rule 3 collapses
+into create-onto-the-agents-network.
+
+### 2026-06-10 — Secrets transit per-exec Env through the socket proxy
+
+Acceptance recorded in `specs/_context/m7-1-context.md` alongside
+the §"Scope deviation from committed docs" amendments (open
+question Q6, operator-resolved 2026-06-10). Vault-fetched secret
+values — and the rendered per-spawn MCP config — transit the docker
+socket proxy as exec-create POST-body `Env` fields, and that is the
+ONLY transit: never container-level Env (the create body forces it
+empty), never argv, never stdin. Cross-note to
+`docs/security/vault-threat-model.md`: the socket proxy is
+reachable only inside the compose network (not published to the
+host) and is already trusted with the docker socket itself — a
+strictly larger authority than the secret values in transit.
+Supervisor-side, the values remain `UnsafeBytes`-scoped (vaultlog
+discipline; the sanctioned production call-site count is unchanged
+at two) and appear in neither `docker inspect` output nor any argv.
 
 ---
 

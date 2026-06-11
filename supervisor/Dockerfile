@@ -33,7 +33,7 @@ FROM alpine:3.20 AS claude-install
 # Pin the Claude Code version. The M2 spike ran on 2.1.117; M2.1 inherits
 # that pin so every spike observation applies to the runtime image. Bumping
 # this is a dedicated change with a retro note.
-ARG CLAUDE_VERSION=2.1.117
+ARG CLAUDE_VERSION=2.1.170
 ARG CLAUDE_RELEASES=https://downloads.claude.ai/claude-code-releases
 ARG CLAUDE_KEY_URL=https://downloads.claude.ai/keys/claude-code.asc
 # Anthropic's Claude Code release signing key fingerprint as published at

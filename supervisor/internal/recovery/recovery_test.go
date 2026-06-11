@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"testing"
-	"time"
 
 	"github.com/garrison-hq/garrison/supervisor/internal/recovery"
 )
@@ -45,13 +44,5 @@ func TestRunOncePropagatesQuerierError(t *testing.T) {
 	}
 	if !errors.Is(err, want) {
 		t.Errorf("RunOnce err = %v, want wrapping %v", err, want)
-	}
-}
-
-func TestRecoveryWindowIsFiveMinutes(t *testing.T) {
-	// Pinning the NFR-006 grace period in a unit test so a silent edit to the
-	// constant is caught without running the full integration suite.
-	if recovery.RecoveryWindow != 5*time.Minute {
-		t.Errorf("RecoveryWindow = %s, want 5m (NFR-006)", recovery.RecoveryWindow)
 	}
 }

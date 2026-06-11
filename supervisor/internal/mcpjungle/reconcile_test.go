@@ -107,7 +107,7 @@ func seedReconcile(t *testing.T, allowList []string) *reconcileFixture {
 	var mu sync.Mutex
 	fx.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/clients":
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v0/clients":
 			mu.Lock()
 			defer mu.Unlock()
 			var body struct {
@@ -122,7 +122,7 @@ func seedReconcile(t *testing.T, allowList []string) *reconcileFixture {
 			fx.createHit++
 			w.WriteHeader(http.StatusCreated)
 			_ = json.NewEncoder(w).Encode(map[string]string{"id": "client-x", "name": body.Name})
-		case r.Method == http.MethodDelete && len(r.URL.Path) > len("/clients/"):
+		case r.Method == http.MethodDelete && len(r.URL.Path) > len("/api/v0/clients/"):
 			fx.deleteHit++
 			w.WriteHeader(http.StatusNoContent)
 		default:

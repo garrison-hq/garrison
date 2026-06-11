@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
 
 	"github.com/garrison-hq/garrison/supervisor/internal/agentcontainer"
 	"github.com/garrison-hq/garrison/supervisor/internal/store"
@@ -40,7 +41,12 @@ type Deps struct {
 	Memory      string // "512m"
 	CPUs        string // "1.0"
 	PIDsLimit   int    // 200
-	OnComplete  func(flipUseDirectExec bool)
+	// M7.1 (T006): the agents network containers join at create
+	// (cfg.AgentsNetwork, FR-012) and the host path of the supervisor
+	// binary bind-mounted ro for in-container MCP servers (FR-014).
+	NetworkName   string
+	SupervisorBin string
+	OnComplete    func(flipUseDirectExec bool)
 }
 
 // Run grandfathers every agent with last_grandfathered_at IS NULL.
@@ -105,17 +111,27 @@ func grandfatherOne(ctx context.Context, deps Deps, agent store.Agent, digest st
 		return fmt.Errorf("host_uid range exhausted (%d > %d)", uid, deps.UIDEnd)
 	}
 
-	containerName := "garrison-agent-" + agent.RoleSlug
-	spec := agentcontainer.ContainerSpec{
-		AgentID:     uuidString(agent.ID),
-		Image:       digest,
-		HostUID:     int(uid),
-		Workspace:   deps.WorkspaceFS + "/" + agent.RoleSlug,
-		Skills:      deps.SkillsFS + "/" + agent.RoleSlug,
-		NetworkName: "none",
-		Memory:      deps.Memory,
-		CPUs:        deps.CPUs,
-		PIDsLimit:   deps.PIDsLimit,
+	// M7.1 (T006): the spec goes through the single per-agent source —
+	// agent-UUID workspace keying (FR-006), the agents network (FR-012),
+	// the ro supervisor-binary mount (FR-014). The workspace dir is
+	// ensured before create so the docker bind source exists host-side
+	// (identical-path compose bind, plan §10).
+	containerName := agentcontainer.ContainerName(uuidString(agent.ID))
+	spec := agentcontainer.SpecForAgent(agentcontainer.AgentSpecParams{
+		AgentID:       uuidString(agent.ID),
+		RoleSlug:      agent.RoleSlug,
+		ImageDigest:   digest,
+		HostUID:       int(uid),
+		WorkspaceFS:   deps.WorkspaceFS,
+		SkillsFS:      deps.SkillsFS,
+		NetworkName:   deps.NetworkName,
+		SupervisorBin: deps.SupervisorBin,
+		Memory:        deps.Memory,
+		CPUs:          deps.CPUs,
+		PIDsLimit:     deps.PIDsLimit,
+	})
+	if err := os.MkdirAll(spec.Workspace, 0o755); err != nil {
+		return fmt.Errorf("mkdir workspace %s: %w", spec.Workspace, err)
 	}
 	containerID, err := deps.Controller.Create(ctx, spec)
 	if err != nil {

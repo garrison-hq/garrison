@@ -37,6 +37,11 @@ RUN pip install --no-cache-dir --require-hashes --only-binary :all: -r /tmp/requ
 
 USER nobody
 WORKDIR /palace
+# `nobody`'s passwd home is /nonexistent (Debian); mempalace's init/CLI
+# writes per-user state under $HOME and hard-fails without a writable
+# one. /palace is nobody-owned and volume-backed, so the state survives
+# container recreation alongside the palace itself.
+ENV HOME=/palace
 
 # Idle host: supervisor drives work via `docker exec`. Never kill-restart
 # this container without coordinating with supervisor shutdown — in-flight

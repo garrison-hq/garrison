@@ -93,9 +93,19 @@ SET status = 'failed',
     exit_reason = 'supervisor_restarted',
     finished_at = NOW()
 WHERE status = 'running'
-  AND started_at < NOW() - INTERVAL '5 minutes'
 `
 
+// Runs once at startup, after the advisory lock is acquired. The lock
+// guarantees no other supervisor is alive, and this process has not
+// spawned anything yet, so every 'running' row belongs to a dead
+// predecessor by construction. The original NFR-006 5-minute window
+// left rows younger than 5 minutes stranded after a fast crash+restart
+// (the normal compose/systemd restart path): recovery found nothing,
+// the row never cleared, and its department wedged on the concurrency
+// cap indefinitely — observed live in the 2026-06-10 acceptance run.
+// Host-topology orphan claude processes that outlive a SIGKILLed
+// supervisor cannot update these rows anyway; their finalize attempts
+// stay safe via the FR-260 already-committed check.
 func (q *Queries) RecoverStaleRunning(ctx context.Context) (int64, error) {
 	result, err := q.db.Exec(ctx, recoverStaleRunning)
 	if err != nil {

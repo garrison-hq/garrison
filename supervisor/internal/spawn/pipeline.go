@@ -276,6 +276,16 @@ func (p *FinalizePolicy) OnInit(_ context.Context, e claudeproto.InitEvent) clau
 		return claudeproto.RouterActionBail
 	}
 	p.result.SessionID = e.SessionID
+	if pending := claudeproto.PendingMCPServers(e.MCPServers); len(pending) > 0 {
+		// Claude Code ≥ 2.1.170 emits the init frame while stdio MCP
+		// servers may still be handshaking; log them so a server that
+		// never connects is traceable (its tool calls will fail and
+		// the run exits via the finalize-pending path).
+		p.logger.Warn("mcp servers still pending at init; continuing",
+			"instance_id", uuidString(p.instanceID),
+			"pending", pending,
+			"session_id", e.SessionID)
+	}
 	p.logger.Info("claude init",
 		"instance_id", uuidString(p.instanceID),
 		"session_id", e.SessionID,

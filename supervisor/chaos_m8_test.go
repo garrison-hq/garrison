@@ -94,7 +94,9 @@ func TestM8RegistrationRequestIdempotentEndState(t *testing.T) {
 	}
 	var registerHits int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost && r.URL.Path == "/servers" {
+		// /api/v0 is MCPJungle's management-API mount (client.go
+		// apiPrefix); the bare path 404s on the real image.
+		if r.Method == http.MethodPost && r.URL.Path == "/api/v0/servers" {
 			atomic.AddInt64(&registerHits, 1)
 			// Simulate a slow MCPJungle so the second goroutine's worker
 			// has time to observe the first goroutine's status flip.

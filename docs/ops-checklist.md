@@ -804,8 +804,111 @@ structural seam for the beta switch to per-customer instances (Option
 A from the multi-tenant analysis); the alpha implementation returns
 the configured `BaseURL` regardless of `customer_id`.
 
+## M7.1 — real container execution pipeline
+
+M7.1 flips ticket execution from supervisor-child direct-exec into
+the per-agent containers M7 created: claude runs as a `docker exec`
+in the agent's container, egress is allow-listed through a shared
+squid sidecar, and a boot-time shape reconciler converges the fleet.
+One data-only migration
+(`migrations/20260610000001_m7_1_agent_md_container_wording.sql`,
+idempotent `replace()` — re-words seeded agent_md mempalace guidance);
+no schema change, no drizzle pull.
+
+**1. Host directory creation (before first M7.1 boot)**
+
+The supervisor MkdirAll's per-agent workspace dirs through
+identical-path binds, but the two base directories must exist
+host-side with sane ownership first (a missing bind source would be
+auto-created root-owned by docker):
+
+```sh
+sudo mkdir -p /var/lib/garrison/workspaces /var/lib/garrison/skills
+# chown to the uid the supervisor container writes as, per your deploy.
+```
+
+To relocate them, set `GARRISON_AGENT_WORKSPACE_FS` /
+`GARRISON_AGENT_SKILLS_FS` in the compose `.env` — the compose file
+threads one variable into both the supervisor env var and the
+identical-path bind, so the override stays in lockstep. Workspace
+keying is per AGENT (`<workspaces>/<agent-uuid>`) on the container
+path; old per-department/role dirs are direct-exec legacy and need
+no migration (workspaces are scratch).
+
+**2. Compose deltas (pull + up)**
+
+`supervisor/docker-compose.yml` gains, all applied by a normal
+`docker compose up -d`:
+
+- `garrison-agents` network — `internal: true`, fixed name (the
+  supervisor passes it as create-time `NetworkMode`). No route out.
+- `egress-proxy` service — `ubuntu/squid` pinned by digest,
+  `container_name: garrison-egress-proxy`, dual-homed
+  (default + garrison-agents), mounts the committed allow-list
+  `./egress/squid.conf` read-only. The allow-list is exactly
+  `api.anthropic.com:443`; denied CONNECTs appear as
+  `TCP_DENIED/403` in `docker logs garrison-egress-proxy`.
+- `postgres` dual-homed onto `garrison-agents` (in-container MCP
+  servers keep the existing DSN hostnames).
+- `docker-proxy` gains `ALLOW_RESTARTS: 1` (container restart is the
+  timeout/shutdown backstop — the SIGKILL analog for execs).
+- `supervisor` gains the two identical-path workspace/skills binds
+  from step 1.
+
+**3. New / changed supervisor env knobs**
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `GARRISON_USE_DIRECT_EXEC` | `false` (flipped at M7.1) | `true` is the rollback lever to supervisor-child direct-exec |
+| `GARRISON_AGENTS_NETWORK` | `garrison-agents` | network agent containers join at create |
+| `GARRISON_EGRESS_PROXY_URL` | `http://garrison-egress-proxy:3128` | becomes `HTTPS_PROXY` inside every claude exec |
+
+**4. First-boot reconcile expectations**
+
+Boot order: migrate7 (grandfathers any never-grandfathered agents,
+already with the new shape) → shape reconcile over every
+container-owning agent (grandfathered AND hired). Watch for:
+
+```
+"shape-reconcile: complete" created=C recreated=R restarted=S unchanged=U
+```
+
+- First boot over a pre-M7.1 fleet: every old-shape container (the
+  unlabeled `Exited(1)` set) lands in `recreated`;
+  `agent_container_events` gains a `removed`+`created` pair per
+  recreated agent.
+- Second boot: everything in `unchanged`, zero container mutations.
+- Containers idle as `sleep infinity` PID 1 and stay Up between
+  spawns; each carries a `garrison.shape_hash` label the reconciler
+  compares.
+- Failures warn-and-continue (same posture as migrate7): a broken
+  container surfaces per-spawn as `spawn_failed` with the event left
+  retryable, and the next boot repairs.
+
+**5. Verification**
+
+Runbook 03 §3.4 (caps + egress deny/allow probes + proxy-log check),
+§3.5 (exec log lines for a live spawn), §3.6 (preamble probe ticket)
+are the post-deploy checks; every command there runs as written
+against a live stack.
+
+**6. Rollback**
+
+Set `GARRISON_USE_DIRECT_EXEC=true` on the supervisor and restart.
+Tickets run as supervisor children exactly as before M7.1 (zero exec
+API calls); the container substrate keeps reconciling but sits
+unused. The flag survives the soak window per the M7 retro — do not
+remove it.
+
+---
+
 ## Changelog
 
+- **2026-06-11**: M7.1 container execution pipeline section added
+  (host workspace/skills dir creation, garrison-agents network +
+  digest-pinned squid egress proxy compose deltas, ALLOW_RESTARTS,
+  three env knobs incl. the GARRISON_USE_DIRECT_EXEC=true rollback
+  lever, first-boot shape-reconcile expectations).
 - **2026-05-10**: M8 MCP-server registry deployment section added
   (MCPJungle + MCPJungle-Postgres sidecars, GARRISON_MCPJUNGLE_* env
   vars, dev-mcpjungle-init.sh bootstrap script, admin-token rotation
