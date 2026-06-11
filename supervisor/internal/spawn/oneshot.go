@@ -5,9 +5,11 @@ package spawn
 // event and drives the target agent through the existing claude pipeline
 // with the scheduled run record as origin — no ticket row, no Kanban
 // machinery at any point in the firing's lifecycle (FR-300). The
-// supervisor-side finalize commit (WriteFinalizeOneshot) lands in T008;
-// until then the onCommit hook rejects so adjudication records the
-// finalize failure instead of silently dropping the payload.
+// pipeline's onCommit routes to WriteFinalizeOneshot (T008): one tx
+// committing UpdateRunStructuredOutcome (payload + verification
+// sub-object) + the palace diary/KG writes + the terminal
+// agent_instances row, with SelectScheduledTaskRunFinalizedState as the
+// double-commit guard (FR-260 analog).
 
 import (
 	"bufio"
@@ -20,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -28,6 +31,7 @@ import (
 	"github.com/garrison-hq/garrison/supervisor/internal/agentpolicy"
 	"github.com/garrison-hq/garrison/supervisor/internal/agents"
 	"github.com/garrison-hq/garrison/supervisor/internal/concurrency"
+	"github.com/garrison-hq/garrison/supervisor/internal/finalize"
 	"github.com/garrison-hq/garrison/supervisor/internal/mcpconfig"
 	"github.com/garrison-hq/garrison/supervisor/internal/mempalace"
 	"github.com/garrison-hq/garrison/supervisor/internal/schedule"
@@ -957,17 +961,388 @@ func mirrorStderrLines(r io.Reader, logger *slog.Logger) {
 	}
 }
 
-// oneshotOnCommit is the pipeline OnCommit hook for oneshot spawns.
-// T008 routes it to WriteFinalizeOneshot — the one-tx commit of
-// UpdateRunStructuredOutcome + palace writes + the terminal instance
-// row. Until T008 lands, the hook rejects the commit so adjudication
-// records the finalize failure rather than silently treating the
-// payload as committed.
-func oneshotOnCommit(_ context.Context, _ Deps, in oneshotRunInputs, _ *Result, logger *slog.Logger) func(json.RawMessage) error {
-	return func(json.RawMessage) error {
-		logger.Error("finalize_oneshot commit requested but WriteFinalizeOneshot is not wired yet (M9 T008)",
-			"scheduled_task_run_id", formatUUID(in.prep.runID),
-		)
-		return errors.New("spawn: finalize_oneshot commit not wired (M9 T008 WriteFinalizeOneshot)")
+// oneshotOnCommit is the pipeline OnCommit hook for oneshot spawns
+// (plan §2 step 5): re-validate the raw finalize_oneshot payload (the
+// ticket-mode posture — the MCP server validated before signalling
+// ok=true, so a failure here is schema drift) and route to
+// WriteFinalizeOneshot's atomic tx. The *Result parameter is unused —
+// the WriteFinalizeOneshot signature carries no cost metadata (plan §2
+// public surface); the oneshot run's completion state reads through
+// the instance join (decision 5).
+func oneshotOnCommit(execCtx context.Context, deps Deps, in oneshotRunInputs, _ *Result, logger *slog.Logger) func(json.RawMessage) error {
+	return func(rawPayload json.RawMessage) error {
+		if deps.Palace == nil {
+			logger.Error("finalize_oneshot onCommit: deps.Palace is nil; skipping atomic write")
+			return fmt.Errorf("finalize_oneshot: no palace client wired")
+		}
+		parsed, verr := finalize.ValidateOneshot(rawPayload)
+		if verr != nil {
+			logger.Error("finalize_oneshot onCommit: re-validation failed",
+				"err", verr.Error(),
+				"field", verr.Field)
+			return fmt.Errorf("finalize_oneshot re-validate: %w", verr)
+		}
+		return WriteFinalizeOneshot(execCtx, deps, in.prep.runID, in.prep.instanceID, *parsed)
 	}
+}
+
+// -----------------------------------------------------------------------
+// WriteFinalizeOneshot — the supervisor-side finalize_oneshot commit
+// (M9 T008, plan §2 step 5)
+// -----------------------------------------------------------------------
+
+// oneshotThinDiaryThreshold is the diary-length bound the verification
+// sub-object applies inline (FR-403: oneshot completions never touch
+// the hygiene tables — the M2.x predicates run at commit time and the
+// result lands on the run record for operator review). The value
+// mirrors config.ThinDiaryThreshold's default (GARRISON_HYGIENE_THIN_
+// DIARY_THRESHOLD, 200); it is a constant here because spawn.Deps
+// carries no hygiene knobs and plan §2's WriteFinalizeOneshot surface
+// is sealed.
+const oneshotThinDiaryThreshold = 200
+
+// markOneshotEventProcessedSQL marks the run's work.scheduled.
+// oneshot_due outbox row processed inside the atomic tx — the oneshot
+// analog of ticket mode's MarkEventProcessed(meta.EventID). Resolved
+// through the payload's run id because WriteFinalizeOneshot's sealed
+// signature carries no event id; without this write the still-
+// unprocessed event would poll-redispatch a second instance for an
+// already-finalized run. Raw SQL per the sealed-M9-query-set precedent
+// at the top of this file.
+const markOneshotEventProcessedSQL = `UPDATE event_outbox
+   SET processed_at = NOW()
+ WHERE channel = 'work.scheduled.oneshot_due'
+   AND payload->>'scheduled_task_run_id' = $1
+   AND processed_at IS NULL`
+
+// oneshotVerification is the verification sub-object recorded inside
+// scheduled_task_runs.structured_outcome: the M2.x hygiene predicates
+// (thin diary, missing KG facts) applied inline at commit time
+// (FR-403's no-hygiene-table-coupling).
+type oneshotVerification struct {
+	DiaryLength        int  `json:"diary_length"`
+	ThinDiaryThreshold int  `json:"thin_diary_threshold"`
+	ThinDiary          bool `json:"thin_diary"`
+	KGTripleCount      int  `json:"kg_triple_count"`
+	MissingKGFacts     bool `json:"missing_kg_facts"`
+}
+
+// oneshotStructuredTriple is the persisted KG-triple shape. Explicit
+// because finalize.KGTriple tags ValidFrom `json:"-"` (it is
+// supervisor-substituted, not wire-carried) and the run record stores
+// the full payload.
+type oneshotStructuredTriple struct {
+	Subject   string    `json:"subject"`
+	Predicate string    `json:"predicate"`
+	Object    string    `json:"object"`
+	ValidFrom time.Time `json:"valid_from"`
+}
+
+// oneshotStructuredOutcome is the scheduled_task_runs.structured_outcome
+// JSONB shape: the full finalize_oneshot payload plus the verification
+// sub-object.
+type oneshotStructuredOutcome struct {
+	Outcome      string                    `json:"outcome"`
+	DiaryEntry   finalize.DiaryEntry       `json:"diary_entry"`
+	KGTriples    []oneshotStructuredTriple `json:"kg_triples"`
+	Verification oneshotVerification       `json:"verification"`
+}
+
+// oneshotWriteFailure carries one sad-path disposition through
+// failOneshotWrite (mirror of writeTerminalOutcome for the oneshot
+// origin — no hygiene_status: FR-403 keeps oneshot rows out of the
+// hygiene vocabulary).
+type oneshotWriteFailure struct {
+	reason string // canonical exit_reason value
+	class  string // "palace_write" | "commit" | "timeout"
+	orphan bool   // palace drawer landed before the failure
+	err    error
+}
+
+// WriteFinalizeOneshot performs the oneshot atomic write (plan §2 step
+// 5): one tx committing UpdateRunStructuredOutcome (full payload + the
+// verification sub-object), the palace diary/KG writes via the existing
+// client path, the terminal agent_instances row, and the event-outbox
+// processed mark. SelectScheduledTaskRunFinalizedState guards double
+// commit (FR-260 analog) — a second commit for an already-finalized run
+// is rejected without touching any row.
+//
+// On failure, a separate terminal failed agent_instances row is written
+// outside the rolled-back tx (the ticket-mode WriteFinalize posture);
+// the run row keeps outcome='fired' with the terminal state readable
+// through the run→instance join (decision 5 — UpdateRunOutcome(failed)
+// is reserved for pre-pipeline failures).
+func WriteFinalizeOneshot(parentCtx context.Context, deps Deps, runID pgtype.UUID, instanceID pgtype.UUID, payload finalize.OneshotPayload) error {
+	start := time.Now()
+	timeout := deps.FinalizeWriteTimeout
+	if timeout == 0 {
+		timeout = 30 * time.Second
+	}
+	// WithoutCancel: supervisor SIGTERM does NOT abort an in-flight
+	// commit (AGENTS.md rule 6); the timeout is the FR-261-shaped
+	// wall-clock ceiling.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parentCtx), timeout)
+	defer cancel()
+
+	logger := deps.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger = logger.With(
+		"scheduled_task_run_id", formatUUID(runID),
+		"agent_instance_id", formatUUID(instanceID),
+	)
+
+	if deps.Palace == nil {
+		return failOneshotWrite(parentCtx, deps, instanceID, oneshotWriteFailure{
+			reason: ExitFinalizePalaceWriteFailed, class: "palace_write",
+			err: errors.New("no palace client wired"),
+		}, logger)
+	}
+
+	tx, err := deps.Pool.Begin(ctx)
+	if err != nil {
+		return failOneshotWrite(parentCtx, deps, instanceID, oneshotWriteFailure{
+			reason: classifyCtxErr(ctx, ExitFinalizePalaceWriteFailed), class: "palace_write",
+			err: fmt.Errorf("begin tx: %w", err),
+		}, logger)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback(context.Background())
+		}
+	}()
+	q := deps.Queries.WithTx(tx)
+
+	// Double-commit guard (FR-260 analog): a non-NULL structured_outcome
+	// means a previous commit landed — reject WITHOUT writing a failure
+	// terminal row (the first commit's instance state is authoritative).
+	state, err := q.SelectScheduledTaskRunFinalizedState(ctx, runID)
+	if err != nil {
+		return failOneshotWrite(parentCtx, deps, instanceID, oneshotWriteFailure{
+			reason: ExitFinalizePalaceWriteFailed, class: "palace_write",
+			err: fmt.Errorf("SelectScheduledTaskRunFinalizedState: %w", err),
+		}, logger)
+	}
+	if finalized, _ := state.Finalized.(bool); finalized {
+		logger.Warn("finalize_oneshot double commit rejected; run already finalized")
+		return fmt.Errorf("spawn: finalize_oneshot double commit rejected: run %s already has structured_outcome", formatUUID(runID))
+	}
+
+	row, err := q.SelectScheduledTaskByRunID(ctx, runID)
+	if err != nil {
+		return failOneshotWrite(parentCtx, deps, instanceID, oneshotWriteFailure{
+			reason: ExitFinalizePalaceWriteFailed, class: "palace_write",
+			err: fmt.Errorf("SelectScheduledTaskByRunID: %w", err),
+		}, logger)
+	}
+
+	// M2.3 pattern-scanner hook (FR-418/FR-419 posture carried over):
+	// redact secret patterns from the payload fields before anything is
+	// persisted. Non-blocking — redact-and-warn only. The scan reuses
+	// the ticket-path helper through a TicketID-less FinalizePayload
+	// wrapper so the two paths cannot drift.
+	scanned := finalize.FinalizePayload{
+		Outcome:    payload.Outcome,
+		DiaryEntry: payload.DiaryEntry,
+		KGTriples:  payload.KGTriples,
+	}
+	if matched := scanAndRedactPayload(&scanned); len(matched) > 0 {
+		logger.Warn("pattern scanner matched secrets in finalize_oneshot payload; redacted before palace write",
+			"labels", matched)
+	}
+
+	// Drawer body + inline verification. The diary length is measured on
+	// the serialized drawer body — the same surface the M2.x thin-diary
+	// predicate evaluates (hygiene evaluator: len(drawer.Body)).
+	body := serializeOneshotDiary(row.Name, row.ObjectiveTemplate, runID, &scanned, time.Now().UTC())
+	verification := oneshotVerification{
+		DiaryLength:        len(body),
+		ThinDiaryThreshold: oneshotThinDiaryThreshold,
+		ThinDiary:          len(body) < oneshotThinDiaryThreshold,
+		KGTripleCount:      len(scanned.KGTriples),
+		MissingKGFacts:     len(scanned.KGTriples) < 1,
+	}
+
+	wing := resolveOneshotWing(ctx, deps, row, logger)
+	if err := deps.Palace.AddDrawer(ctx, wing, "hall_events", body); err != nil {
+		reason, class := classifyPalaceErr(ctx, err)
+		return failOneshotWrite(parentCtx, deps, instanceID, oneshotWriteFailure{
+			reason: reason, class: class,
+			err: fmt.Errorf("AddDrawer: %w", err),
+		}, logger)
+	}
+	if err := deps.Palace.AddTriples(ctx, toMempalaceTriples(scanned.KGTriples)); err != nil {
+		reason, class := classifyPalaceErr(ctx, err)
+		return failOneshotWrite(parentCtx, deps, instanceID, oneshotWriteFailure{
+			reason: reason, class: class, orphan: true,
+			err: fmt.Errorf("AddTriples: %w", err),
+		}, logger)
+	}
+
+	outcomeJSON, err := json.Marshal(buildOneshotStructuredOutcome(&scanned, verification))
+	if err != nil {
+		return failOneshotWrite(parentCtx, deps, instanceID, oneshotWriteFailure{
+			reason: ExitFinalizePalaceWriteFailed, class: "palace_write", orphan: true,
+			err: fmt.Errorf("marshal structured_outcome: %w", err),
+		}, logger)
+	}
+	if err := q.UpdateRunStructuredOutcome(ctx, store.UpdateRunStructuredOutcomeParams{
+		StructuredOutcome: outcomeJSON,
+		ID:                runID,
+	}); err != nil {
+		return failOneshotWrite(parentCtx, deps, instanceID, oneshotWriteFailure{
+			reason: ExitFinalizePalaceWriteFailed, class: "palace_write", orphan: true,
+			err: fmt.Errorf("UpdateRunStructuredOutcome: %w", err),
+		}, logger)
+	}
+
+	completedReason := ExitCompleted
+	if err := q.UpdateInstanceTerminalWithCostAndWakeup(ctx, store.UpdateInstanceTerminalWithCostAndWakeupParams{
+		ID:         instanceID,
+		Status:     "succeeded",
+		ExitReason: &completedReason,
+	}); err != nil {
+		return failOneshotWrite(parentCtx, deps, instanceID, oneshotWriteFailure{
+			reason: ExitFinalizePalaceWriteFailed, class: "palace_write", orphan: true,
+			err: fmt.Errorf("UpdateInstanceTerminalWithCostAndWakeup: %w", err),
+		}, logger)
+	}
+	if _, err := tx.Exec(ctx, markOneshotEventProcessedSQL, formatUUID(runID)); err != nil {
+		return failOneshotWrite(parentCtx, deps, instanceID, oneshotWriteFailure{
+			reason: ExitFinalizePalaceWriteFailed, class: "palace_write", orphan: true,
+			err: fmt.Errorf("mark oneshot event processed: %w", err),
+		}, logger)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		reason := ExitFinalizeCommitFailed
+		class := "commit"
+		if errors.Is(err, context.DeadlineExceeded) || isCtxDeadlineExceeded(ctx) {
+			reason = ExitFinalizeWriteTimeout
+			class = "timeout"
+		}
+		return failOneshotWrite(parentCtx, deps, instanceID, oneshotWriteFailure{
+			reason: reason, class: class, orphan: true,
+			err: fmt.Errorf("Commit: %w", err),
+		}, logger)
+	}
+	committed = true
+
+	logger.Info("oneshot_atomic_write_committed",
+		"triple_count", verification.KGTripleCount,
+		"diary_length", verification.DiaryLength,
+		"thin_diary", verification.ThinDiary,
+		"duration_ms", time.Since(start).Milliseconds(),
+	)
+	return nil
+}
+
+// buildOneshotStructuredOutcome assembles the persisted JSONB document
+// from the (post-redaction) payload + verification.
+func buildOneshotStructuredOutcome(p *finalize.FinalizePayload, v oneshotVerification) oneshotStructuredOutcome {
+	triples := make([]oneshotStructuredTriple, 0, len(p.KGTriples))
+	for _, t := range p.KGTriples {
+		triples = append(triples, oneshotStructuredTriple{
+			Subject:   t.Subject,
+			Predicate: t.Predicate,
+			Object:    t.Object,
+			ValidFrom: t.ValidFrom,
+		})
+	}
+	return oneshotStructuredOutcome{
+		Outcome:      p.Outcome,
+		DiaryEntry:   p.DiaryEntry,
+		KGTriples:    triples,
+		Verification: v,
+	}
+}
+
+// resolveOneshotWing resolves the palace wing for the drawer write.
+// WriteFinalizeOneshot's sealed signature carries no per-spawn agent
+// metadata, so the wing re-resolves through the agents cache (the same
+// department+role key the spawn resolved). Every failure mode degrades
+// to the empty wing — the ticket-mode behavior for agents without a
+// palace_wing.
+func resolveOneshotWing(ctx context.Context, deps Deps, row store.SelectScheduledTaskByRunIDRow, logger *slog.Logger) string {
+	if deps.AgentsCache == nil {
+		return ""
+	}
+	agent, err := deps.AgentsCache.GetForDepartmentAndRole(ctx, row.DepartmentID, row.RoleSlug)
+	if err != nil {
+		logger.Warn("oneshot wing resolution failed; drawer lands without a wing",
+			"role_slug", row.RoleSlug, "err", err)
+		return ""
+	}
+	if agent.PalaceWing == nil {
+		return ""
+	}
+	return *agent.PalaceWing
+}
+
+// serializeOneshotDiary composes the oneshot drawer body — the ticket
+// serializer's shape (M2.2.1 FR-263: leading prose so mempalace_search
+// lands on the drawer, YAML frontmatter, rationale body) keyed by
+// scheduled_task_run_id instead of ticket_id. The leading prose is the
+// task's objective template: stable searchable text that exists at
+// commit time without re-deriving the rendered brief.
+func serializeOneshotDiary(taskName, objective string, runID pgtype.UUID, payload *finalize.FinalizePayload, completedAt time.Time) string {
+	var b strings.Builder
+	b.WriteString(strings.TrimRight(objective, "\n"))
+	b.WriteString("\n\n---\n")
+	fmt.Fprintf(&b, "scheduled_task_run_id: %s\n", formatUUID(runID))
+	fmt.Fprintf(&b, "scheduled_task: %s\n", escapeYAML(taskName))
+	fmt.Fprintf(&b, "outcome: %s\n", escapeYAML(payload.Outcome))
+	b.WriteString("artifacts:\n")
+	for _, a := range payload.DiaryEntry.Artifacts {
+		fmt.Fprintf(&b, diaryListItemFmt, escapeYAML(a))
+	}
+	b.WriteString("blockers:\n")
+	for _, a := range payload.DiaryEntry.Blockers {
+		fmt.Fprintf(&b, diaryListItemFmt, escapeYAML(a))
+	}
+	b.WriteString("discoveries:\n")
+	for _, a := range payload.DiaryEntry.Discoveries {
+		fmt.Fprintf(&b, diaryListItemFmt, escapeYAML(a))
+	}
+	fmt.Fprintf(&b, "completed_at: %s\n", completedAt.Format(time.RFC3339))
+	b.WriteString("---\n\n")
+	b.WriteString(payload.DiaryEntry.Rationale)
+	return b.String()
+}
+
+// failOneshotWrite emits the failure log, writes the terminal failed
+// agent_instances row outside the rolled-back tx (fresh WithoutCancel
+// context so supervisor SIGTERM can't strand the row), and returns a
+// wrapped error whose string carries the canonical exit_reason — the
+// ticket-mode writeFinalizeFailure posture for the oneshot origin.
+func failOneshotWrite(parentCtx context.Context, deps Deps, instanceID pgtype.UUID, f oneshotWriteFailure, logger *slog.Logger) error {
+	if f.orphan {
+		logger.Warn("palace_write_orphaned",
+			"failure_class", f.class,
+			"err", fmt.Sprintf("%v", f.err),
+		)
+	}
+	level := slog.LevelError
+	if f.class == "timeout" {
+		level = slog.LevelWarn
+	}
+	logger.Log(parentCtx, level, "finalize_oneshot_write_failed",
+		"exit_reason", f.reason,
+		"failure_class", f.class,
+		"err", fmt.Sprintf("%v", f.err),
+	)
+
+	termCtx, cancel := context.WithTimeout(context.WithoutCancel(parentCtx), TerminalWriteGrace)
+	defer cancel()
+	reason := f.reason
+	if err := deps.Queries.UpdateInstanceTerminalWithCostAndWakeup(termCtx, store.UpdateInstanceTerminalWithCostAndWakeupParams{
+		ID:         instanceID,
+		Status:     "failed",
+		ExitReason: &reason,
+	}); err != nil {
+		logger.Error("oneshot terminal-failure write failed", "err", err)
+	}
+	return fmt.Errorf("spawn: finalize_oneshot %s: %w", f.reason, f.err)
 }

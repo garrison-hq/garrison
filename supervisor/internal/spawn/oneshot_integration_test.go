@@ -11,11 +11,19 @@ package spawn
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"os/exec"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/garrison-hq/garrison/supervisor/internal/dockerexec"
+	"github.com/garrison-hq/garrison/supervisor/internal/finalize"
+	"github.com/garrison-hq/garrison/supervisor/internal/mempalace"
 	"github.com/garrison-hq/garrison/supervisor/internal/store"
 	"github.com/garrison-hq/garrison/supervisor/internal/testdb"
 	"github.com/garrison-hq/garrison/supervisor/internal/throttle"
@@ -284,5 +292,345 @@ func TestSpawnOneshotInsertsOriginInstance(t *testing.T) {
 	}
 	if instances != 1 {
 		t.Errorf("agent_instances count = %d; want 1 (LockEventForProcessing dedupe)", instances)
+	}
+}
+
+// -----------------------------------------------------------------------
+// M9 T008 — WriteFinalizeOneshot (the supervisor-side finalize commit)
+// -----------------------------------------------------------------------
+
+// oneshotFailingPalaceExec is the sad-path dockerexec seam: every Run
+// errors, so AddDrawer fails inside WriteFinalizeOneshot's atomic
+// bracket and the whole tx must roll back.
+type oneshotFailingPalaceExec struct{}
+
+func (oneshotFailingPalaceExec) Run(_ context.Context, _ []string, stdin io.Reader) ([]byte, []byte, error) {
+	if stdin != nil {
+		_, _ = io.Copy(io.Discard, stdin)
+	}
+	return nil, nil, errors.New("palace sidecar down")
+}
+
+func (oneshotFailingPalaceExec) RunStream(
+	_ context.Context,
+	_ []string,
+	_ func(stdin io.WriteCloser) error,
+	_ func(stdout io.Reader) error,
+) (*exec.Cmd, error) {
+	return nil, errors.New("oneshotFailingPalaceExec: RunStream not implemented")
+}
+
+// seedOneshotRunningInstance inserts the running oneshot-origin
+// instance row prepareOneshot would have created (scheduled_task_run_id
+// set, ticket_id NULL) and backfills the run anchor — the state
+// WriteFinalizeOneshot finds when the pipeline fires onCommit.
+func seedOneshotRunningInstance(t *testing.T, ctx context.Context, pool *pgxpool.Pool, fx oneshotFixture) pgtype.UUID {
+	t.Helper()
+	var instanceID pgtype.UUID
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO agent_instances (department_id, scheduled_task_run_id, status, role_slug)
+		 VALUES ($1, $2, 'running', 'engineer') RETURNING id`,
+		fx.deptID, fx.runID,
+	).Scan(&instanceID); err != nil {
+		t.Fatalf("insert running oneshot instance: %v", err)
+	}
+	if _, err := pool.Exec(ctx,
+		`UPDATE scheduled_task_runs SET agent_instance_id = $1 WHERE id = $2`,
+		instanceID, fx.runID,
+	); err != nil {
+		t.Fatalf("backfill run agent_instance_id: %v", err)
+	}
+	return instanceID
+}
+
+// seedOneshotSiblingRun inserts a second fired run + outbox event on an
+// already-seeded task (one company/department/task chain per pool — the
+// companies unique constraint forbids re-seeding the full fixture).
+func seedOneshotSiblingRun(t *testing.T, ctx context.Context, pool *pgxpool.Pool, base oneshotFixture) oneshotFixture {
+	t.Helper()
+	fx := base
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO scheduled_task_runs (scheduled_task_id, slot_at, outcome)
+		VALUES ($1, NOW(), 'fired')
+		RETURNING id`,
+		fx.taskID,
+	).Scan(&fx.runID); err != nil {
+		t.Fatalf("insert sibling run: %v", err)
+	}
+	payload := fmt.Sprintf(
+		`{"scheduled_task_run_id":"%s","role_slug":"engineer","department_id":"%s"}`,
+		uuidString(fx.runID), uuidString(fx.deptID),
+	)
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO event_outbox (channel, payload) VALUES ('work.scheduled.oneshot_due', $1::jsonb) RETURNING id`,
+		payload,
+	).Scan(&fx.eventID); err != nil {
+		t.Fatalf("insert sibling event: %v", err)
+	}
+	return fx
+}
+
+// oneshotFinalizeDeps wires the base oneshot deps plus a palace client
+// riding the given dockerexec seam (the m7.1 fake-palace pattern).
+func oneshotFinalizeDeps(pool *pgxpool.Pool, palaceExec dockerexec.DockerExec) Deps {
+	deps := oneshotDeps(pool, "")
+	deps.Palace = &mempalace.Client{
+		DockerBin:          "/usr/bin/docker",
+		MempalaceContainer: "garrison-mempalace",
+		PalacePath:         "/palace",
+		Timeout:            5 * time.Second,
+		Exec:               palaceExec,
+	}
+	deps.FinalizeWriteTimeout = 10 * time.Second
+	return deps
+}
+
+// oneshotFinalizePayload is a validated-shape finalize_oneshot payload:
+// outcome ≥ 10 chars, rationale ≥ 50, exactly one KG triple (the
+// m71FakePalaceExec answers ids 1+2, the one-triple AddTriples shape).
+func oneshotFinalizePayload() finalize.OneshotPayload {
+	return finalize.OneshotPayload{
+		Outcome: "Weekly digest compiled and posted for the engineering department",
+		DiaryEntry: finalize.DiaryEntry{
+			Rationale: strings.Repeat("Scanned the week's activity and summarized the notable threads for the operator. ", 3),
+			Artifacts: []string{"digest.md"},
+			Blockers:  []string{},
+			Discoveries: []string{
+				"activity clusters on Mondays",
+			},
+		},
+		KGTriples: []finalize.KGTriple{
+			{Subject: "weekly-digest", Predicate: "covers", Object: "engineering", ValidFrom: time.Now().UTC()},
+		},
+	}
+}
+
+// oneshotStructuredOutcomeDoc mirrors the persisted structured_outcome
+// JSONB shape for assertions.
+type oneshotStructuredOutcomeDoc struct {
+	Outcome    string `json:"outcome"`
+	DiaryEntry struct {
+		Rationale string `json:"rationale"`
+	} `json:"diary_entry"`
+	KGTriples []struct {
+		Subject   string `json:"subject"`
+		Predicate string `json:"predicate"`
+		Object    string `json:"object"`
+	} `json:"kg_triples"`
+	Verification struct {
+		DiaryLength        int  `json:"diary_length"`
+		ThinDiaryThreshold int  `json:"thin_diary_threshold"`
+		ThinDiary          bool `json:"thin_diary"`
+		KGTripleCount      int  `json:"kg_triple_count"`
+		MissingKGFacts     bool `json:"missing_kg_facts"`
+	} `json:"verification"`
+}
+
+func readStructuredOutcome(t *testing.T, ctx context.Context, pool *pgxpool.Pool, runID pgtype.UUID) []byte {
+	t.Helper()
+	var raw []byte
+	if err := pool.QueryRow(ctx,
+		`SELECT structured_outcome FROM scheduled_task_runs WHERE id = $1`, runID,
+	).Scan(&raw); err != nil {
+		t.Fatalf("read structured_outcome: %v", err)
+	}
+	return raw
+}
+
+// TestWriteFinalizeOneshotCommitsAtomically — the payload commit writes
+// structured_outcome (payload + verification sub-object), the terminal
+// succeeded instance row, and the event-outbox processed mark in one
+// tx; a palace failure inside the bracket rolls back every DB write and
+// records the failed terminal instance outside the tx.
+func TestWriteFinalizeOneshotCommitsAtomically(t *testing.T) {
+	pool := testdb.Start(t)
+	ctx := context.Background()
+	fx := seedOneshot(t, ctx, pool, nil, "fired")
+
+	t.Run("happy_path_one_tx", func(t *testing.T) {
+		instanceID := seedOneshotRunningInstance(t, ctx, pool, fx)
+		palaceExec := &m71FakePalaceExec{}
+		deps := oneshotFinalizeDeps(pool, palaceExec)
+
+		if err := WriteFinalizeOneshot(ctx, deps, fx.runID, instanceID, oneshotFinalizePayload()); err != nil {
+			t.Fatalf("WriteFinalizeOneshot err = %v; want nil", err)
+		}
+
+		// structured_outcome: full payload + verification sub-object.
+		raw := readStructuredOutcome(t, ctx, pool, fx.runID)
+		if len(raw) == 0 {
+			t.Fatal("structured_outcome is NULL; want the committed payload document")
+		}
+		var doc oneshotStructuredOutcomeDoc
+		if err := json.Unmarshal(raw, &doc); err != nil {
+			t.Fatalf("decode structured_outcome: %v", err)
+		}
+		if want := oneshotFinalizePayload().Outcome; doc.Outcome != want {
+			t.Errorf("structured_outcome.outcome = %q; want %q", doc.Outcome, want)
+		}
+		if doc.DiaryEntry.Rationale == "" {
+			t.Error("structured_outcome.diary_entry.rationale is empty; want the payload rationale")
+		}
+		if len(doc.KGTriples) != 1 || doc.KGTriples[0].Subject != "weekly-digest" {
+			t.Errorf("structured_outcome.kg_triples = %+v; want the one payload triple", doc.KGTriples)
+		}
+		v := doc.Verification
+		if v.DiaryLength <= 0 {
+			t.Errorf("verification.diary_length = %d; want > 0", v.DiaryLength)
+		}
+		if v.ThinDiaryThreshold != 200 {
+			t.Errorf("verification.thin_diary_threshold = %d; want 200", v.ThinDiaryThreshold)
+		}
+		if got, want := v.ThinDiary, v.DiaryLength < v.ThinDiaryThreshold; got != want {
+			t.Errorf("verification.thin_diary = %v; want %v (diary_length %d vs threshold %d)",
+				got, want, v.DiaryLength, v.ThinDiaryThreshold)
+		}
+		if v.KGTripleCount != 1 {
+			t.Errorf("verification.kg_triple_count = %d; want 1", v.KGTripleCount)
+		}
+		if v.MissingKGFacts {
+			t.Error("verification.missing_kg_facts = true; want false (one triple committed)")
+		}
+
+		// Terminal instance row committed inside the same tx.
+		var (
+			status     string
+			exitReason *string
+			finished   pgtype.Timestamptz
+		)
+		if err := pool.QueryRow(ctx,
+			`SELECT status, exit_reason, finished_at FROM agent_instances WHERE id = $1`, instanceID,
+		).Scan(&status, &exitReason, &finished); err != nil {
+			t.Fatalf("read agent_instances: %v", err)
+		}
+		if status != "succeeded" {
+			t.Errorf("instance status = %q; want succeeded", status)
+		}
+		if exitReason == nil || *exitReason != ExitCompleted {
+			t.Errorf("instance exit_reason = %v; want %q", exitReason, ExitCompleted)
+		}
+		if !finished.Valid {
+			t.Error("instance finished_at is NULL; want set by the terminal write")
+		}
+
+		// Run row keeps outcome='fired' (decision 5) and the event is
+		// marked processed inside the tx (no poll re-dispatch).
+		if run := readRun(t, ctx, pool, fx.runID); run.Outcome != "fired" {
+			t.Errorf("run outcome = %q; want fired after finalize commit", run.Outcome)
+		}
+		var processed pgtype.Timestamptz
+		if err := pool.QueryRow(ctx,
+			`SELECT processed_at FROM event_outbox WHERE id = $1`, fx.eventID,
+		).Scan(&processed); err != nil {
+			t.Fatalf("read event_outbox: %v", err)
+		}
+		if !processed.Valid {
+			t.Error("event_outbox.processed_at is NULL; want marked inside the atomic tx")
+		}
+
+		// Palace writes: AddDrawer + the one-triple AddTriples.
+		if got := palaceExec.callCount(); got != 2 {
+			t.Errorf("palace exec calls = %d; want 2 (AddDrawer + AddTriples)", got)
+		}
+	})
+
+	t.Run("palace_failure_rolls_back_all_writes", func(t *testing.T) {
+		fx := seedOneshotSiblingRun(t, ctx, pool, fx)
+		instanceID := seedOneshotRunningInstance(t, ctx, pool, fx)
+		deps := oneshotFinalizeDeps(pool, oneshotFailingPalaceExec{})
+
+		err := WriteFinalizeOneshot(ctx, deps, fx.runID, instanceID, oneshotFinalizePayload())
+		if err == nil {
+			t.Fatal("WriteFinalizeOneshot err = nil; want palace-write failure")
+		}
+		if !strings.Contains(err.Error(), ExitFinalizePalaceWriteFailed) {
+			t.Errorf("err = %v; want the %s exit reason in the message", err, ExitFinalizePalaceWriteFailed)
+		}
+
+		// All tx writes rolled back: no structured_outcome, event still
+		// unprocessed, run still fired.
+		if raw := readStructuredOutcome(t, ctx, pool, fx.runID); len(raw) != 0 {
+			t.Errorf("structured_outcome = %s; want NULL after rollback", raw)
+		}
+		var processed pgtype.Timestamptz
+		if err := pool.QueryRow(ctx,
+			`SELECT processed_at FROM event_outbox WHERE id = $1`, fx.eventID,
+		).Scan(&processed); err != nil {
+			t.Fatalf("read event_outbox: %v", err)
+		}
+		if processed.Valid {
+			t.Error("event_outbox.processed_at set despite rollback; want NULL")
+		}
+		if run := readRun(t, ctx, pool, fx.runID); run.Outcome != "fired" {
+			t.Errorf("run outcome = %q; want fired (failure state reads through the instance join)", run.Outcome)
+		}
+
+		// The failed terminal row lands outside the rolled-back tx.
+		var (
+			status     string
+			exitReason *string
+		)
+		if err := pool.QueryRow(ctx,
+			`SELECT status, exit_reason FROM agent_instances WHERE id = $1`, instanceID,
+		).Scan(&status, &exitReason); err != nil {
+			t.Fatalf("read agent_instances: %v", err)
+		}
+		if status != "failed" {
+			t.Errorf("instance status = %q; want failed", status)
+		}
+		if exitReason == nil || *exitReason != ExitFinalizePalaceWriteFailed {
+			t.Errorf("instance exit_reason = %v; want %q", exitReason, ExitFinalizePalaceWriteFailed)
+		}
+	})
+}
+
+// TestWriteFinalizeOneshotRejectsDoubleCommit — the FR-260-analog
+// guard: a second commit for an already-finalized run errors without
+// touching the committed state (no extra palace writes, structured
+// outcome byte-identical, instance still succeeded).
+func TestWriteFinalizeOneshotRejectsDoubleCommit(t *testing.T) {
+	pool := testdb.Start(t)
+	ctx := context.Background()
+	fx := seedOneshot(t, ctx, pool, nil, "fired")
+	instanceID := seedOneshotRunningInstance(t, ctx, pool, fx)
+	palaceExec := &m71FakePalaceExec{}
+	deps := oneshotFinalizeDeps(pool, palaceExec)
+
+	if err := WriteFinalizeOneshot(ctx, deps, fx.runID, instanceID, oneshotFinalizePayload()); err != nil {
+		t.Fatalf("first WriteFinalizeOneshot err = %v; want nil", err)
+	}
+	committed := readStructuredOutcome(t, ctx, pool, fx.runID)
+
+	err := WriteFinalizeOneshot(ctx, deps, fx.runID, instanceID, oneshotFinalizePayload())
+	if err == nil {
+		t.Fatal("second WriteFinalizeOneshot err = nil; want double-commit rejection")
+	}
+	if !strings.Contains(err.Error(), "double commit") {
+		t.Errorf("err = %v; want a double-commit rejection", err)
+	}
+
+	// No second palace write fired (the guard runs before AddDrawer).
+	if got := palaceExec.callCount(); got != 2 {
+		t.Errorf("palace exec calls = %d; want 2 (first commit only)", got)
+	}
+	// Committed state untouched: structured_outcome byte-identical,
+	// instance still the first commit's terminal.
+	if after := readStructuredOutcome(t, ctx, pool, fx.runID); string(after) != string(committed) {
+		t.Errorf("structured_outcome changed across the rejected commit:\n first = %s\n after = %s", committed, after)
+	}
+	var (
+		status     string
+		exitReason *string
+	)
+	if err := pool.QueryRow(ctx,
+		`SELECT status, exit_reason FROM agent_instances WHERE id = $1`, instanceID,
+	).Scan(&status, &exitReason); err != nil {
+		t.Fatalf("read agent_instances: %v", err)
+	}
+	if status != "succeeded" {
+		t.Errorf("instance status = %q; want succeeded (unchanged)", status)
+	}
+	if exitReason == nil || *exitReason != ExitCompleted {
+		t.Errorf("instance exit_reason = %v; want %q (unchanged)", exitReason, ExitCompleted)
 	}
 }
