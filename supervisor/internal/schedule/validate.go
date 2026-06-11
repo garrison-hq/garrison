@@ -53,6 +53,21 @@ type ValidationInput struct {
 // template/mode rejections never cost a round-trip; DB-backed checks
 // (name, department, role) follow.
 func ValidateTask(ctx context.Context, q *store.Queries, minInterval time.Duration, now time.Time, in ValidationInput) (time.Time, error) {
+	next, err := validateTaskShape(minInterval, now, in)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if err := validateTaskReferences(ctx, q, in); err != nil {
+		return time.Time{}, err
+	}
+	return next, nil
+}
+
+// validateTaskShape runs the pure (DB-free) FR-105 checks: mode enum,
+// non-empty templates, grammar parse, the FR-404 minimum firing
+// interval, and the future-dated first slot. Returns the computed
+// next_fire_at on success.
+func validateTaskShape(minInterval time.Duration, now time.Time, in ValidationInput) (time.Time, error) {
 	if in.Mode != ModeTicket && in.Mode != ModeOneshot {
 		return time.Time{}, &ValidationError{Field: "mode", Msg: fmt.Sprintf("unknown mode %q (want ticket or oneshot)", in.Mode)}
 	}
@@ -83,20 +98,25 @@ func ValidateTask(ctx context.Context, q *store.Queries, minInterval time.Durati
 	if !next.After(now) {
 		return time.Time{}, &ValidationError{Field: "schedule_expr", Msg: "first computed slot is not future-dated"}
 	}
+	return next, nil
+}
 
+// validateTaskReferences runs the DB-backed FR-105 checks: live-name
+// uniqueness, department existence, and role existence.
+func validateTaskReferences(ctx context.Context, q *store.Queries, in ValidationInput) error {
 	// Name uniqueness among live tasks only (soft-deleted names are
 	// reusable, matching idx_scheduled_tasks_name_live).
 	if _, err := q.SelectScheduledTaskByName(ctx, in.Name); err == nil {
-		return time.Time{}, &ValidationError{Field: "name", Msg: fmt.Sprintf("a scheduled task named %q already exists", in.Name)}
+		return &ValidationError{Field: "name", Msg: fmt.Sprintf("a scheduled task named %q already exists", in.Name)}
 	} else if !errors.Is(err, pgx.ErrNoRows) {
-		return time.Time{}, fmt.Errorf("check name uniqueness: %w", err)
+		return fmt.Errorf("check name uniqueness: %w", err)
 	}
 
 	if _, err := q.GetDepartmentByID(ctx, in.DepartmentID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return time.Time{}, &ValidationError{Field: "department_id", Msg: "department does not exist"}
+			return &ValidationError{Field: "department_id", Msg: "department does not exist"}
 		}
-		return time.Time{}, fmt.Errorf("check department existence: %w", err)
+		return fmt.Errorf("check department existence: %w", err)
 	}
 
 	if _, err := q.GetAgentByDepartmentAndRole(ctx, store.GetAgentByDepartmentAndRoleParams{
@@ -104,10 +124,9 @@ func ValidateTask(ctx context.Context, q *store.Queries, minInterval time.Durati
 		RoleSlug:     in.RoleSlug,
 	}); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return time.Time{}, &ValidationError{Field: "role_slug", Msg: fmt.Sprintf("no active agent with role %q in the department", in.RoleSlug)}
+			return &ValidationError{Field: "role_slug", Msg: fmt.Sprintf("no active agent with role %q in the department", in.RoleSlug)}
 		}
-		return time.Time{}, fmt.Errorf("check role existence: %w", err)
+		return fmt.Errorf("check role existence: %w", err)
 	}
-
-	return next, nil
+	return nil
 }

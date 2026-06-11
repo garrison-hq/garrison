@@ -96,63 +96,92 @@ export function RunHistoryTable({ runs }: Readonly<{ runs: ScheduledTaskRunRow[]
         </tr>
       </thead>
       <tbody>
-        {runs.map((run) => {
-          const summary = summarizeStructuredOutcome(run.structuredOutcome);
-          return (
-            <tr key={run.id} className="border-t border-border-1 align-top">
-              <td className="px-3 py-2 whitespace-nowrap">
-                <span className="font-mono font-tabular text-text-2 text-xs">
-                  {formatIsoFull(run.slotAt)}
-                </span>
-              </td>
-              <td className="px-3 py-2 whitespace-nowrap">
-                <RunTimestamp value={run.firedAt} />
-              </td>
-              <td className="px-3 py-2 whitespace-nowrap">
-                <OutcomeChip outcome={run.outcome} />
-              </td>
-              <td className="px-3 py-2">
-                <div className="space-y-1">
-                  {run.ticketId ? (
-                    <div>
-                      <Link
-                        href={`/tickets/${run.ticketId}`}
-                        className="font-mono text-xs text-text-2 hover:text-text-1 hover:underline"
-                      >
-                        ticket {run.ticketId.slice(0, 8)}
-                      </Link>
-                    </div>
-                  ) : null}
-                  {run.agentInstanceId ? (
-                    <div className="flex items-center gap-2">
-                      <span className="font-mono text-xs text-text-3">
-                        instance {run.agentInstanceId.slice(0, 8)}
-                      </span>
-                      {run.instanceStatus ? (
-                        <Chip tone={run.instanceStatus === 'running' ? 'info' : 'neutral'}>
-                          {run.instanceStatus}
-                          {run.instanceExitReason ? `: ${run.instanceExitReason}` : ''}
-                        </Chip>
-                      ) : null}
-                    </div>
-                  ) : null}
-                  {summary?.outcome ? (
-                    <p className="text-text-2 text-xs leading-relaxed line-clamp-3">
-                      {summary.outcome}
-                    </p>
-                  ) : null}
-                  {summary?.thinDiary ? <Chip tone="warn">thin diary</Chip> : null}
-                  {summary?.missingKGFacts ? <Chip tone="warn">missing KG facts</Chip> : null}
-                  {run.detail ? <p className="text-text-3 text-xs">{run.detail}</p> : null}
-                  {!run.ticketId && !run.agentInstanceId && !summary && !run.detail ? (
-                    <span className="text-text-4 text-xs">—</span>
-                  ) : null}
-                </div>
-              </td>
-            </tr>
-          );
-        })}
+        {runs.map((run) => (
+          <RunHistoryRow key={run.id} run={run} />
+        ))}
       </tbody>
     </table>
+  );
+}
+
+function RunHistoryRow({ run }: Readonly<{ run: ScheduledTaskRunRow }>) {
+  const summary = summarizeStructuredOutcome(run.structuredOutcome);
+  return (
+    <tr className="border-t border-border-1 align-top">
+      <td className="px-3 py-2 whitespace-nowrap">
+        <span className="font-mono font-tabular text-text-2 text-xs">
+          {formatIsoFull(run.slotAt)}
+        </span>
+      </td>
+      <td className="px-3 py-2 whitespace-nowrap">
+        <RunTimestamp value={run.firedAt} />
+      </td>
+      <td className="px-3 py-2 whitespace-nowrap">
+        <OutcomeChip outcome={run.outcome} />
+      </td>
+      <RunResultCell run={run} summary={summary} />
+    </tr>
+  );
+}
+
+// RunResultCell renders the Result column: ticket link (ticket mode),
+// instance id + terminal-state chip (oneshot mode), the structured-
+// outcome summary, hygiene-predicate chips, and the run detail; an
+// em-dash when the run carries none of those.
+function RunResultCell({
+  run,
+  summary,
+}: Readonly<{ run: ScheduledTaskRunRow; summary: StructuredSummary | null }>) {
+  return (
+    <td className="px-3 py-2">
+      <div className="space-y-1">
+        {run.ticketId ? (
+          <div>
+            <Link
+              href={`/tickets/${run.ticketId}`}
+              className="font-mono text-xs text-text-2 hover:text-text-1 hover:underline"
+            >
+              ticket {run.ticketId.slice(0, 8)}
+            </Link>
+          </div>
+        ) : null}
+        {run.agentInstanceId ? (
+          <div className="flex items-center gap-2">
+            <span className="font-mono text-xs text-text-3">
+              instance {run.agentInstanceId.slice(0, 8)}
+            </span>
+            {run.instanceStatus ? (
+              <InstanceStatusChip
+                status={run.instanceStatus}
+                exitReason={run.instanceExitReason}
+              />
+            ) : null}
+          </div>
+        ) : null}
+        {summary?.outcome ? (
+          <p className="text-text-2 text-xs leading-relaxed line-clamp-3">
+            {summary.outcome}
+          </p>
+        ) : null}
+        {summary?.thinDiary ? <Chip tone="warn">thin diary</Chip> : null}
+        {summary?.missingKGFacts ? <Chip tone="warn">missing KG facts</Chip> : null}
+        {run.detail ? <p className="text-text-3 text-xs">{run.detail}</p> : null}
+        {!run.ticketId && !run.agentInstanceId && !summary && !run.detail ? (
+          <span className="text-text-4 text-xs">—</span>
+        ) : null}
+      </div>
+    </td>
+  );
+}
+
+function InstanceStatusChip({
+  status,
+  exitReason,
+}: Readonly<{ status: string; exitReason: string | null }>) {
+  return (
+    <Chip tone={status === 'running' ? 'info' : 'neutral'}>
+      {status}
+      {exitReason ? `: ${exitReason}` : ''}
+    </Chip>
   );
 }

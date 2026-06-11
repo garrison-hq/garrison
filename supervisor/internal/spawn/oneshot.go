@@ -139,25 +139,9 @@ func prepareOneshot(ctx context.Context, deps Deps, eventID pgtype.UUID) (onesho
 	}
 	q := deps.Queries.WithTx(tx)
 
-	evt, err := q.LockEventForProcessing(ctx, eventID)
-	if err != nil {
-		_ = tx.Rollback(ctx)
-		return oneshotPrep{}, fmt.Errorf("spawn: LockEventForProcessing: %w", err)
-	}
-	if evt.ProcessedAt.Valid {
-		_ = tx.Rollback(ctx)
-		return oneshotPrep{done: true}, nil
-	}
-
-	var payload oneshotEventPayload
-	if err := json.Unmarshal(evt.Payload, &payload); err != nil {
-		_ = tx.Rollback(ctx)
-		return oneshotPrep{}, fmt.Errorf("spawn: decode oneshot payload: %w", err)
-	}
-	runID, err := parseUUID(payload.ScheduledTaskRunID)
-	if err != nil {
-		_ = tx.Rollback(ctx)
-		return oneshotPrep{}, fmt.Errorf("spawn: scheduled_task_run_id: %w", err)
+	runID, done, err := lockOneshotEvent(ctx, tx, q, eventID)
+	if err != nil || done {
+		return oneshotPrep{done: done}, err
 	}
 
 	row, dept, done, err := resolveOneshotOrigin(ctx, deps, tx, q, eventID, runID)
@@ -165,24 +149,13 @@ func prepareOneshot(ctx context.Context, deps Deps, eventID pgtype.UUID) (onesho
 		return oneshotPrep{done: done}, err
 	}
 
-	// {{last_fired_at}} lookup (FR-107): the previous firing, excluding
-	// this run. ErrNoRows leaves prevFiring invalid → renders "never".
-	var prevFiring pgtype.Timestamptz
-	if err := tx.QueryRow(ctx, selectPreviousFiringSQL, row.ScheduledTaskID, runID).Scan(&prevFiring); err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		_ = tx.Rollback(ctx)
-		return oneshotPrep{}, fmt.Errorf("spawn: previous-firing lookup: %w", err)
+	prevFiring, err := lookupPreviousFiring(ctx, tx, row.ScheduledTaskID, runID)
+	if err != nil {
+		return oneshotPrep{}, err
 	}
 
-	// Gate 1: department concurrency cap. Defers exactly like the
-	// throttle gate below — gate_deferred run outcome, event unprocessed.
-	allowed, capN, running, err := concurrency.CheckCap(ctx, q, row.DepartmentID)
-	if err != nil {
-		_ = tx.Rollback(ctx)
-		return oneshotPrep{}, fmt.Errorf("spawn: CheckCap: %w", err)
-	}
-	if !allowed {
-		detail := fmt.Sprintf("department concurrency cap reached (cap=%d, running=%d); oneshot spawn deferred", capN, running)
-		return oneshotPrep{}, deferOneshot(ctx, deps, tx, q, runID, eventID, detail)
+	if err := checkOneshotCapGate(ctx, deps, tx, q, row.DepartmentID, runID, eventID); err != nil {
+		return oneshotPrep{}, err
 	}
 
 	// Per-agent in-flight slot (M7.1 FR-017). Slot-busy is a plain
@@ -198,39 +171,126 @@ func prepareOneshot(ctx context.Context, deps Deps, eventID pgtype.UUID) (onesho
 		)
 		return oneshotPrep{done: true}, nil
 	}
-	slotHandedOff := false
-	if releaseSlot != nil {
-		defer func() {
-			if !slotHandedOff {
-				releaseSlot()
-			}
-		}()
+
+	instanceID, err := gateAndInsertOneshotRunning(ctx, deps, tx, q, row, dept, runID, eventID)
+	if err != nil {
+		if releaseSlot != nil {
+			releaseSlot()
+		}
+		return oneshotPrep{}, err
+	}
+	return oneshotPrep{
+		instanceID: instanceID,
+		runID:      runID,
+		row:        row,
+		dept:       dept,
+		prevFiring: prevFiring,
+		release:    releaseSlot,
+	}, nil
+}
+
+// lockOneshotEvent locks the outbox row and decodes the oneshot payload
+// inside the prep tx: the LockEventForProcessing dedupe check (already
+// processed → done) plus the run-id parse. The tx is rolled back on
+// every non-proceed path.
+func lockOneshotEvent(ctx context.Context, tx pgx.Tx, q *store.Queries, eventID pgtype.UUID) (pgtype.UUID, bool, error) {
+	evt, err := q.LockEventForProcessing(ctx, eventID)
+	if err != nil {
+		_ = tx.Rollback(ctx)
+		return pgtype.UUID{}, false, fmt.Errorf("spawn: LockEventForProcessing: %w", err)
+	}
+	if evt.ProcessedAt.Valid {
+		_ = tx.Rollback(ctx)
+		return pgtype.UUID{}, true, nil
 	}
 
-	// Gate 2: M6 company throttle at spawn-prep, exactly where reactive
-	// spawns gate (FR-400). Budget defers fire the standard evidence row;
-	// rate-limit pauses were audited by OnRateLimit when set (M6 T008).
-	if dept.CompanyID.Valid && deps.Throttle.Pool != nil {
-		decision, err := throttle.Check(ctx, deps.Throttle, q, dept.CompanyID)
-		if err != nil {
-			_ = tx.Rollback(ctx)
-			return oneshotPrep{}, fmt.Errorf("spawn: throttle.Check: %w", err)
+	var payload oneshotEventPayload
+	if err := json.Unmarshal(evt.Payload, &payload); err != nil {
+		_ = tx.Rollback(ctx)
+		return pgtype.UUID{}, false, fmt.Errorf("spawn: decode oneshot payload: %w", err)
+	}
+	runID, err := parseUUID(payload.ScheduledTaskRunID)
+	if err != nil {
+		_ = tx.Rollback(ctx)
+		return pgtype.UUID{}, false, fmt.Errorf("spawn: scheduled_task_run_id: %w", err)
+	}
+	return runID, false, nil
+}
+
+// lookupPreviousFiring resolves {{last_fired_at}} (FR-107): the previous
+// firing, excluding this run. ErrNoRows leaves the result invalid →
+// renders "never".
+func lookupPreviousFiring(ctx context.Context, tx pgx.Tx, taskID, runID pgtype.UUID) (pgtype.Timestamptz, error) {
+	var prevFiring pgtype.Timestamptz
+	if err := tx.QueryRow(ctx, selectPreviousFiringSQL, taskID, runID).Scan(&prevFiring); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		_ = tx.Rollback(ctx)
+		return pgtype.Timestamptz{}, fmt.Errorf("spawn: previous-firing lookup: %w", err)
+	}
+	return prevFiring, nil
+}
+
+// checkOneshotCapGate is Gate 1: the department concurrency cap. Defers
+// exactly like the throttle gate — gate_deferred run outcome, event
+// unprocessed (FR-401).
+func checkOneshotCapGate(ctx context.Context, deps Deps, tx pgx.Tx, q *store.Queries, departmentID, runID, eventID pgtype.UUID) error {
+	allowed, capN, running, err := concurrency.CheckCap(ctx, q, departmentID)
+	if err != nil {
+		_ = tx.Rollback(ctx)
+		return fmt.Errorf("spawn: CheckCap: %w", err)
+	}
+	if !allowed {
+		detail := fmt.Sprintf("department concurrency cap reached (cap=%d, running=%d); oneshot spawn deferred", capN, running)
+		return deferOneshot(ctx, deps, tx, q, runID, eventID, detail)
+	}
+	return nil
+}
+
+// checkOneshotThrottleGate is Gate 2: the M6 company throttle at
+// spawn-prep, exactly where reactive spawns gate (FR-400). Budget defers
+// fire the standard evidence row; rate-limit pauses were audited by
+// OnRateLimit when set (M6 T008).
+func checkOneshotThrottleGate(ctx context.Context, deps Deps, tx pgx.Tx, q *store.Queries, dept store.Department, runID, eventID pgtype.UUID) error {
+	if !dept.CompanyID.Valid || deps.Throttle.Pool == nil {
+		return nil
+	}
+	decision, err := throttle.Check(ctx, deps.Throttle, q, dept.CompanyID)
+	if err != nil {
+		_ = tx.Rollback(ctx)
+		return fmt.Errorf("spawn: throttle.Check: %w", err)
+	}
+	if decision.Allowed {
+		return nil
+	}
+	if decision.Kind == throttle.KindCompanyBudgetExceeded {
+		if err := throttle.FireBudgetDefer(ctx, q, dept.CompanyID,
+			pgtype.Numeric{}, deps.Throttle.DefaultSpawnCostUSD, pgtype.Numeric{},
+		); err != nil {
+			deps.Logger.Warn("throttle: FireBudgetDefer failed; deferring without audit",
+				"event_id", formatUUID(eventID),
+				"company_id", formatUUID(dept.CompanyID),
+				"err", err,
+			)
 		}
-		if !decision.Allowed {
-			if decision.Kind == throttle.KindCompanyBudgetExceeded {
-				if err := throttle.FireBudgetDefer(ctx, q, dept.CompanyID,
-					pgtype.Numeric{}, deps.Throttle.DefaultSpawnCostUSD, pgtype.Numeric{},
-				); err != nil {
-					deps.Logger.Warn("throttle: FireBudgetDefer failed; deferring without audit",
-						"event_id", formatUUID(eventID),
-						"company_id", formatUUID(dept.CompanyID),
-						"err", err,
-					)
-				}
-			}
-			detail := fmt.Sprintf("company throttle gate deferred oneshot spawn (kind=%s)", decision.Kind)
-			return oneshotPrep{}, deferOneshot(ctx, deps, tx, q, runID, eventID, detail)
-		}
+	}
+	detail := fmt.Sprintf("company throttle gate deferred oneshot spawn (kind=%s)", decision.Kind)
+	return deferOneshot(ctx, deps, tx, q, runID, eventID, detail)
+}
+
+// gateAndInsertOneshotRunning finishes the prep tx after the agent slot
+// is held: Gate 2 (company throttle), the FR-401 gate_deferred → fired
+// clear, the running agent_instances insert, the run→instance anchor,
+// and the commit.
+func gateAndInsertOneshotRunning(
+	ctx context.Context,
+	deps Deps,
+	tx pgx.Tx,
+	q *store.Queries,
+	row store.SelectScheduledTaskByRunIDRow,
+	dept store.Department,
+	runID, eventID pgtype.UUID,
+) (pgtype.UUID, error) {
+	if err := checkOneshotThrottleGate(ctx, deps, tx, q, dept, runID, eventID); err != nil {
+		return pgtype.UUID{}, err
 	}
 
 	// FR-401: a previously deferred run clears back to fired BEFORE the
@@ -242,7 +302,7 @@ func prepareOneshot(ctx context.Context, deps Deps, eventID pgtype.UUID) (onesho
 			Detail:  nil,
 		}); err != nil {
 			_ = tx.Rollback(ctx)
-			return oneshotPrep{}, fmt.Errorf("spawn: UpdateRunOutcome(fired): %w", err)
+			return pgtype.UUID{}, fmt.Errorf("spawn: UpdateRunOutcome(fired): %w", err)
 		}
 	}
 
@@ -251,27 +311,19 @@ func prepareOneshot(ctx context.Context, deps Deps, eventID pgtype.UUID) (onesho
 		row.DepartmentID, runID, row.RoleSlug,
 	).Scan(&instanceID); err != nil {
 		_ = tx.Rollback(ctx)
-		return oneshotPrep{}, fmt.Errorf("spawn: InsertRunningOneshotInstance: %w", err)
+		return pgtype.UUID{}, fmt.Errorf("spawn: InsertRunningOneshotInstance: %w", err)
 	}
 	if err := q.SetRunAgentInstance(ctx, store.SetRunAgentInstanceParams{
 		AgentInstanceID: instanceID,
 		ID:              runID,
 	}); err != nil {
 		_ = tx.Rollback(ctx)
-		return oneshotPrep{}, fmt.Errorf("spawn: SetRunAgentInstance: %w", err)
+		return pgtype.UUID{}, fmt.Errorf("spawn: SetRunAgentInstance: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return oneshotPrep{}, fmt.Errorf("spawn: commit oneshot dedupe+running: %w", err)
+		return pgtype.UUID{}, fmt.Errorf("spawn: commit oneshot dedupe+running: %w", err)
 	}
-	slotHandedOff = true
-	return oneshotPrep{
-		instanceID: instanceID,
-		runID:      runID,
-		row:        row,
-		dept:       dept,
-		prevFiring: prevFiring,
-		release:    releaseSlot,
-	}, nil
+	return instanceID, nil
 }
 
 // resolveOneshotOrigin resolves the run → task join and the department
@@ -581,50 +633,11 @@ func runOneshotDirect(ctx context.Context, deps Deps, in oneshotRunInputs) error
 		return writeOneshotPrePipelineFail(ctx, deps, in.prep, in.eventID, exitReason, detail, logger)
 	}
 
-	data, fileName, err := buildOneshotMCPConfig(mcpconfig.WriteParams{
-		InstanceID:    in.prep.instanceID,
-		SupervisorBin: deps.SupervisorBin,
-		DSN:           deps.AgentRODSN,
-		Mempalace: mcpconfig.MempalaceParams{
-			DockerBin:          deps.DockerBin,
-			MempalaceContainer: deps.MempalaceContainer,
-			PalacePath:         deps.PalacePath,
-			DockerHost:         deps.DockerHost,
-		},
-		Finalize: mcpconfig.FinalizeParams{
-			SupervisorBin:   deps.SupervisorBin,
-			AgentInstanceID: formatUUID(in.prep.instanceID),
-			DatabaseURL:     deps.AgentRODSN,
-		},
-		GarrisonMutate: mcpconfig.GarrisonMutateParams{
-			SupervisorBin:   deps.SupervisorBin,
-			AgentInstanceID: formatUUID(in.prep.instanceID),
-			DatabaseURL:     deps.DatabaseURL,
-		},
-		ExtraServersJSON: in.agent.McpConfig,
-	}, formatUUID(in.prep.runID))
-	if err != nil {
-		if errors.Is(err, mcpconfig.ErrVaultMCPBanned) {
-			logger.Error("oneshot mcpconfig: Rule 3 violation — vault-pattern MCP server", "err", err)
-			return writeFail(ExitVaultMCPInConfig, err.Error())
-		}
-		logger.Error("oneshot mcpconfig build failed; recording spawn_failed", "err", err)
-		return writeFail(ExitSpawnFailed, "MCP config build failed")
+	mcpPath, failReason, failDetail := writeOneshotDirectMCPConfig(deps, in, logger)
+	if failReason != "" {
+		return writeFail(failReason, failDetail)
 	}
-	if deps.MCPConfigDir == "" {
-		logger.Error("MCPConfigDir is empty; recording spawn_failed")
-		return writeFail(ExitSpawnFailed, "MCPConfigDir is empty")
-	}
-	mcpPath := filepath.Join(deps.MCPConfigDir, fileName)
-	if err := os.WriteFile(mcpPath, data, 0o600); err != nil {
-		logger.Error("oneshot MCP config write failed; recording spawn_failed", "err", err)
-		return writeFail(ExitSpawnFailed, "MCP config write failed")
-	}
-	defer func() {
-		if rmErr := mcpconfig.Remove(mcpPath); rmErr != nil {
-			logger.Warn("mcpconfig.Remove failed; continuing", "path", mcpPath, "err", rmErr)
-		}
-	}()
+	defer removeOneshotMCPConfig(mcpPath, logger)
 
 	execCtx, execCancel := context.WithTimeout(context.WithoutCancel(ctx), deps.SubprocessTimeout)
 	defer execCancel()
@@ -634,24 +647,11 @@ func runOneshotDirect(ctx context.Context, deps Deps, in oneshotRunInputs) error
 	argv := buildClaudeArgv(argvIn)
 
 	cmd := exec.CommandContext(execCtx, deps.ClaudeBin, argv...)
-	if in.prep.dept.WorkspacePath != nil && *in.prep.dept.WorkspacePath != "" {
-		if err := os.MkdirAll(*in.prep.dept.WorkspacePath, 0o755); err != nil {
-			logger.Error("workspace MkdirAll failed; recording spawn_failed",
-				"workspace_path", *in.prep.dept.WorkspacePath, "err", err)
-			return writeFail(ExitSpawnFailed, "workspace MkdirAll failed")
-		}
-		cmd.Dir = *in.prep.dept.WorkspacePath
-	}
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error { return killProcessGroup(cmd, syscall.SIGTERM) }
-	cmd.WaitDelay = ShutdownSignalGrace
-	stdin, err := os.Open(os.DevNull)
-	if err != nil {
-		logger.Error("open /dev/null failed", "err", err)
-		return writeFail(ExitSpawnFailed, "open /dev/null failed")
+	stdin, failReason, failDetail := configureOneshotDirectCmd(cmd, in, logger)
+	if failReason != "" {
+		return writeFail(failReason, failDetail)
 	}
 	defer stdin.Close()
-	cmd.Stdin = stdin
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return writeFail(ExitSpawnFailed, "stdout pipe failed")
@@ -679,7 +679,98 @@ func runOneshotDirect(ctx context.Context, deps Deps, in oneshotRunInputs) error
 	}
 
 	var bailed atomic.Bool
-	onBail := func(_ string) {
+	onBail := killProcessGroupOnBail(cmd, &bailed, logger)
+	directTransport := oneshotDirectTransport(execCtx, cmd, stdout, stderr)
+
+	sessIn := in
+	sessIn.logger = logger
+	return runOneshotSession(ctx, execCtx, deps, directTransport, sessIn, &bailed, onBail)
+}
+
+// writeOneshotDirectMCPConfig builds the oneshot MCP config and writes
+// it under deps.MCPConfigDir. A non-empty failReason is a pre-pipeline
+// failure (failDetail carries the run-outcome detail).
+func writeOneshotDirectMCPConfig(deps Deps, in oneshotRunInputs, logger *slog.Logger) (mcpPath, failReason, failDetail string) {
+	data, fileName, err := buildOneshotMCPConfig(mcpconfig.WriteParams{
+		InstanceID:    in.prep.instanceID,
+		SupervisorBin: deps.SupervisorBin,
+		DSN:           deps.AgentRODSN,
+		Mempalace: mcpconfig.MempalaceParams{
+			DockerBin:          deps.DockerBin,
+			MempalaceContainer: deps.MempalaceContainer,
+			PalacePath:         deps.PalacePath,
+			DockerHost:         deps.DockerHost,
+		},
+		Finalize: mcpconfig.FinalizeParams{
+			SupervisorBin:   deps.SupervisorBin,
+			AgentInstanceID: formatUUID(in.prep.instanceID),
+			DatabaseURL:     deps.AgentRODSN,
+		},
+		GarrisonMutate: mcpconfig.GarrisonMutateParams{
+			SupervisorBin:   deps.SupervisorBin,
+			AgentInstanceID: formatUUID(in.prep.instanceID),
+			DatabaseURL:     deps.DatabaseURL,
+		},
+		ExtraServersJSON: in.agent.McpConfig,
+	}, formatUUID(in.prep.runID))
+	if err != nil {
+		if errors.Is(err, mcpconfig.ErrVaultMCPBanned) {
+			logger.Error("oneshot mcpconfig: Rule 3 violation — vault-pattern MCP server", "err", err)
+			return "", ExitVaultMCPInConfig, err.Error()
+		}
+		logger.Error("oneshot mcpconfig build failed; recording spawn_failed", "err", err)
+		return "", ExitSpawnFailed, "MCP config build failed"
+	}
+	if deps.MCPConfigDir == "" {
+		logger.Error("MCPConfigDir is empty; recording spawn_failed")
+		return "", ExitSpawnFailed, "MCPConfigDir is empty"
+	}
+	mcpPath = filepath.Join(deps.MCPConfigDir, fileName)
+	if err := os.WriteFile(mcpPath, data, 0o600); err != nil {
+		logger.Error("oneshot MCP config write failed; recording spawn_failed", "err", err)
+		return "", ExitSpawnFailed, "MCP config write failed"
+	}
+	return mcpPath, "", ""
+}
+
+// removeOneshotMCPConfig is the deferred cleanup for the direct-exec
+// MCP-config file; removal failures warn and continue.
+func removeOneshotMCPConfig(mcpPath string, logger *slog.Logger) {
+	if rmErr := mcpconfig.Remove(mcpPath); rmErr != nil {
+		logger.Warn("mcpconfig.Remove failed; continuing", "path", mcpPath, "err", rmErr)
+	}
+}
+
+// configureOneshotDirectCmd applies the direct-exec process posture to
+// cmd: workspace working dir, process-group isolation, the shutdown
+// signal grace, and /dev/null stdin. The returned *os.File is the stdin
+// handle the caller must close after the session; a non-empty failReason
+// is a pre-pipeline failure.
+func configureOneshotDirectCmd(cmd *exec.Cmd, in oneshotRunInputs, logger *slog.Logger) (*os.File, string, string) {
+	if in.prep.dept.WorkspacePath != nil && *in.prep.dept.WorkspacePath != "" {
+		if err := os.MkdirAll(*in.prep.dept.WorkspacePath, 0o755); err != nil {
+			logger.Error("workspace MkdirAll failed; recording spawn_failed",
+				"workspace_path", *in.prep.dept.WorkspacePath, "err", err)
+			return nil, ExitSpawnFailed, "workspace MkdirAll failed"
+		}
+		cmd.Dir = *in.prep.dept.WorkspacePath
+	}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return killProcessGroup(cmd, syscall.SIGTERM) }
+	cmd.WaitDelay = ShutdownSignalGrace
+	stdin, err := os.Open(os.DevNull)
+	if err != nil {
+		logger.Error("open /dev/null failed", "err", err)
+		return nil, ExitSpawnFailed, "open /dev/null failed"
+	}
+	cmd.Stdin = stdin
+	return stdin, "", ""
+}
+
+// killProcessGroupOnBail returns the direct-exec onBail hook: first bail
+// wins the CAS and SIGTERMs the subprocess's process group.
+func killProcessGroupOnBail(cmd *exec.Cmd, bailed *atomic.Bool, logger *slog.Logger) func(string) {
+	return func(_ string) {
 		if !bailed.CompareAndSwap(false, true) {
 			return
 		}
@@ -687,8 +778,13 @@ func runOneshotDirect(ctx context.Context, deps Deps, in oneshotRunInputs) error
 			logger.Warn("killProcessGroup on bail returned error", "err", err)
 		}
 	}
+}
 
-	directTransport := transport{
+// oneshotDirectTransport assembles the direct-exec transport: SIGTERM/
+// SIGKILL termination on the process group and the cmd.Wait-backed exit
+// detail (deadline exhaustion surfaces as ContextErr).
+func oneshotDirectTransport(execCtx context.Context, cmd *exec.Cmd, stdout, stderr io.ReadCloser) transport {
+	return transport{
 		Stdout: stdout,
 		Stderr: stderr,
 		Terminate: func(escalate bool) error {
@@ -711,9 +807,6 @@ func runOneshotDirect(ctx context.Context, deps Deps, in oneshotRunInputs) error
 			return wait
 		},
 	}
-	sessIn := in
-	sessIn.logger = logger
-	return runOneshotSession(ctx, execCtx, deps, directTransport, sessIn, &bailed, onBail)
 }
 
 // runOneshotViaContainer is the container-exec transport tail for
@@ -1112,24 +1205,13 @@ type OneshotTerminal struct {
 // is reserved for pre-pipeline failures).
 func WriteFinalizeOneshot(parentCtx context.Context, deps Deps, runID pgtype.UUID, instanceID pgtype.UUID, payload finalize.OneshotPayload, term OneshotTerminal) error {
 	start := time.Now()
-	timeout := deps.FinalizeWriteTimeout
-	if timeout == 0 {
-		timeout = 30 * time.Second
-	}
 	// WithoutCancel: supervisor SIGTERM does NOT abort an in-flight
 	// commit (AGENTS.md rule 6); the timeout is the FR-261-shaped
 	// wall-clock ceiling.
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(parentCtx), timeout)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parentCtx), oneshotFinalizeWriteTimeout(deps))
 	defer cancel()
 
-	logger := deps.Logger
-	if logger == nil {
-		logger = slog.Default()
-	}
-	logger = logger.With(
-		"scheduled_task_run_id", formatUUID(runID),
-		"agent_instance_id", formatUUID(instanceID),
-	)
+	logger := oneshotFinalizeLogger(deps, runID, instanceID)
 
 	if deps.Palace == nil {
 		return failOneshotWrite(parentCtx, deps, instanceID, oneshotWriteFailure{
@@ -1205,36 +1287,98 @@ func WriteFinalizeOneshot(parentCtx context.Context, deps Deps, runID pgtype.UUI
 	}
 
 	wing := resolveOneshotWing(ctx, deps, row, logger)
-	if err := deps.Palace.AddDrawer(ctx, wing, "hall_events", body); err != nil {
-		reason, class := classifyPalaceErr(ctx, err)
-		return failOneshotWrite(parentCtx, deps, instanceID, oneshotWriteFailure{
-			reason: reason, class: class,
-			err: fmt.Errorf("AddDrawer: %w", err),
-		}, logger)
+	if f := writeOneshotPalace(ctx, deps, wing, body, scanned.KGTriples); f != nil {
+		return failOneshotWrite(parentCtx, deps, instanceID, *f, logger)
 	}
-	if err := deps.Palace.AddTriples(ctx, toMempalaceTriples(scanned.KGTriples)); err != nil {
-		reason, class := classifyPalaceErr(ctx, err)
-		return failOneshotWrite(parentCtx, deps, instanceID, oneshotWriteFailure{
-			reason: reason, class: class, orphan: true,
-			err: fmt.Errorf("AddTriples: %w", err),
-		}, logger)
+	if f := persistOneshotOutcome(ctx, q, tx, runID, instanceID, &scanned, verification, term); f != nil {
+		return failOneshotWrite(parentCtx, deps, instanceID, *f, logger)
 	}
 
-	outcomeJSON, err := json.Marshal(buildOneshotStructuredOutcome(&scanned, verification))
+	if err := tx.Commit(ctx); err != nil {
+		return failOneshotWrite(parentCtx, deps, instanceID, classifyOneshotCommitErr(ctx, err), logger)
+	}
+	committed = true
+
+	logger.Info("oneshot_atomic_write_committed",
+		"triple_count", verification.KGTripleCount,
+		"diary_length", verification.DiaryLength,
+		"thin_diary", verification.ThinDiary,
+		"duration_ms", time.Since(start).Milliseconds(),
+	)
+	return nil
+}
+
+// oneshotFinalizeWriteTimeout resolves the atomic write's wall-clock
+// ceiling: deps.FinalizeWriteTimeout, defaulting to 30s.
+func oneshotFinalizeWriteTimeout(deps Deps) time.Duration {
+	if deps.FinalizeWriteTimeout == 0 {
+		return 30 * time.Second
+	}
+	return deps.FinalizeWriteTimeout
+}
+
+// oneshotFinalizeLogger anchors the finalize-write logger on the run +
+// instance identifiers (slog.Default when deps carries no logger).
+func oneshotFinalizeLogger(deps Deps, runID, instanceID pgtype.UUID) *slog.Logger {
+	logger := deps.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return logger.With(
+		"scheduled_task_run_id", formatUUID(runID),
+		"agent_instance_id", formatUUID(instanceID),
+	)
+}
+
+// writeOneshotPalace lands the drawer + KG triples through the existing
+// client path. A non-nil result is the classified sad-path disposition;
+// an AddTriples failure leaves the already-written drawer orphaned.
+func writeOneshotPalace(ctx context.Context, deps Deps, wing, body string, triples []finalize.KGTriple) *oneshotWriteFailure {
+	if err := deps.Palace.AddDrawer(ctx, wing, "hall_events", body); err != nil {
+		reason, class := classifyPalaceErr(ctx, err)
+		return &oneshotWriteFailure{
+			reason: reason, class: class,
+			err: fmt.Errorf("AddDrawer: %w", err),
+		}
+	}
+	if err := deps.Palace.AddTriples(ctx, toMempalaceTriples(triples)); err != nil {
+		reason, class := classifyPalaceErr(ctx, err)
+		return &oneshotWriteFailure{
+			reason: reason, class: class, orphan: true,
+			err: fmt.Errorf("AddTriples: %w", err),
+		}
+	}
+	return nil
+}
+
+// persistOneshotOutcome writes the run's structured_outcome, the
+// succeeded terminal instance row, and the event-outbox processed mark
+// inside the atomic tx. Every failure here is a palace_write-class
+// orphan — the drawer landed before any of these writes run.
+func persistOneshotOutcome(
+	ctx context.Context,
+	q *store.Queries,
+	tx pgx.Tx,
+	runID, instanceID pgtype.UUID,
+	scanned *finalize.FinalizePayload,
+	verification oneshotVerification,
+	term OneshotTerminal,
+) *oneshotWriteFailure {
+	outcomeJSON, err := json.Marshal(buildOneshotStructuredOutcome(scanned, verification))
 	if err != nil {
-		return failOneshotWrite(parentCtx, deps, instanceID, oneshotWriteFailure{
+		return &oneshotWriteFailure{
 			reason: ExitFinalizePalaceWriteFailed, class: "palace_write", orphan: true,
 			err: fmt.Errorf("marshal structured_outcome: %w", err),
-		}, logger)
+		}
 	}
 	if err := q.UpdateRunStructuredOutcome(ctx, store.UpdateRunStructuredOutcomeParams{
 		StructuredOutcome: outcomeJSON,
 		ID:                runID,
 	}); err != nil {
-		return failOneshotWrite(parentCtx, deps, instanceID, oneshotWriteFailure{
+		return &oneshotWriteFailure{
 			reason: ExitFinalizePalaceWriteFailed, class: "palace_write", orphan: true,
 			err: fmt.Errorf("UpdateRunStructuredOutcome: %w", err),
-		}, logger)
+		}
 	}
 
 	completedReason := ExitCompleted
@@ -1249,39 +1393,33 @@ func WriteFinalizeOneshot(parentCtx context.Context, deps Deps, runID pgtype.UUI
 		TotalCostUsd: term.Cost,
 		WakeUpStatus: wakeUpPtr,
 	}); err != nil {
-		return failOneshotWrite(parentCtx, deps, instanceID, oneshotWriteFailure{
+		return &oneshotWriteFailure{
 			reason: ExitFinalizePalaceWriteFailed, class: "palace_write", orphan: true,
 			err: fmt.Errorf("UpdateInstanceTerminalWithCostAndWakeup: %w", err),
-		}, logger)
+		}
 	}
 	if _, err := tx.Exec(ctx, markOneshotEventProcessedSQL, formatUUID(runID)); err != nil {
-		return failOneshotWrite(parentCtx, deps, instanceID, oneshotWriteFailure{
+		return &oneshotWriteFailure{
 			reason: ExitFinalizePalaceWriteFailed, class: "palace_write", orphan: true,
 			err: fmt.Errorf("mark oneshot event processed: %w", err),
-		}, logger)
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		reason := ExitFinalizeCommitFailed
-		class := "commit"
-		if errors.Is(err, context.DeadlineExceeded) || isCtxDeadlineExceeded(ctx) {
-			reason = ExitFinalizeWriteTimeout
-			class = "timeout"
 		}
-		return failOneshotWrite(parentCtx, deps, instanceID, oneshotWriteFailure{
-			reason: reason, class: class, orphan: true,
-			err: fmt.Errorf("Commit: %w", err),
-		}, logger)
 	}
-	committed = true
-
-	logger.Info("oneshot_atomic_write_committed",
-		"triple_count", verification.KGTripleCount,
-		"diary_length", verification.DiaryLength,
-		"thin_diary", verification.ThinDiary,
-		"duration_ms", time.Since(start).Milliseconds(),
-	)
 	return nil
+}
+
+// classifyOneshotCommitErr maps a tx.Commit failure to the commit /
+// timeout disposition (deadline exhaustion is the FR-261 timeout shape).
+func classifyOneshotCommitErr(ctx context.Context, err error) oneshotWriteFailure {
+	reason := ExitFinalizeCommitFailed
+	class := "commit"
+	if errors.Is(err, context.DeadlineExceeded) || isCtxDeadlineExceeded(ctx) {
+		reason = ExitFinalizeWriteTimeout
+		class = "timeout"
+	}
+	return oneshotWriteFailure{
+		reason: reason, class: class, orphan: true,
+		err: fmt.Errorf("Commit: %w", err),
+	}
 }
 
 // buildOneshotStructuredOutcome assembles the persisted JSONB document

@@ -346,6 +346,132 @@ export async function createScheduledTask(
   }
 }
 
+/** EditPatch is the validated, trimmed subset of editable columns an
+ *  edit applies (camelCase drizzle column names). */
+type EditPatch = Partial<{
+  name: string;
+  roleSlug: string;
+  scheduleExpr: string;
+  objectiveTemplate: string;
+  acceptanceCriteriaTemplate: string;
+}>;
+
+type LiveTaskRow = NonNullable<Awaited<ReturnType<typeof selectLiveTask>>>;
+
+/** buildEditPatch validates + trims the supplied editable fields into
+ *  the update patch; a typed failure is returned for empty values or an
+ *  empty patch. */
+function buildEditPatch(
+  input: EditScheduledTaskInput,
+): { ok: true; patch: EditPatch } | { ok: false; error: ScheduledTaskActionResult } {
+  const patch: EditPatch = {};
+  if (input.name !== undefined) {
+    const v = input.name.trim();
+    if (!v) return { ok: false, error: fail('validation_failed', 'name must be non-empty') };
+    patch.name = v;
+  }
+  if (input.roleSlug !== undefined) {
+    const v = input.roleSlug.trim();
+    if (!v) return { ok: false, error: fail('validation_failed', 'role_slug must be non-empty') };
+    patch.roleSlug = v;
+  }
+  if (input.objectiveTemplate !== undefined) {
+    if (input.objectiveTemplate.trim().length === 0) {
+      return { ok: false, error: fail('validation_failed', 'objective_template must be non-empty') };
+    }
+    patch.objectiveTemplate = input.objectiveTemplate;
+  }
+  if (input.acceptanceCriteriaTemplate !== undefined) {
+    if (input.acceptanceCriteriaTemplate.trim().length === 0) {
+      return {
+        ok: false,
+        error: fail('validation_failed', 'acceptance_criteria_template must be non-empty'),
+      };
+    }
+    patch.acceptanceCriteriaTemplate = input.acceptanceCriteriaTemplate;
+  }
+  if (input.scheduleExpr !== undefined) {
+    patch.scheduleExpr = input.scheduleExpr.trim();
+  }
+  if (Object.keys(patch).length === 0) {
+    return { ok: false, error: fail('validation_failed', 'no editable fields supplied') };
+  }
+  return { ok: true, patch };
+}
+
+/** buildEditAuditDiff snapshots the per-field before/after diff the
+ *  Tier-2 audit row captures in args_jsonb (snake_case field names;
+ *  next_fire_at rides along when the expression actually changed). */
+function buildEditAuditDiff(
+  patch: EditPatch,
+  prior: LiveTaskRow,
+  nextFireAt: string | null,
+): { before: Record<string, unknown>; after: Record<string, unknown> } {
+  const before: Record<string, unknown> = {};
+  const after: Record<string, unknown> = {};
+  const priorByField: Record<string, string> = {
+    name: prior.name,
+    roleSlug: prior.roleSlug,
+    scheduleExpr: prior.scheduleExpr,
+    objectiveTemplate: prior.objectiveTemplate,
+    acceptanceCriteriaTemplate: prior.acceptanceCriteriaTemplate,
+  };
+  const snakeByField: Record<string, string> = {
+    name: 'name',
+    roleSlug: 'role_slug',
+    scheduleExpr: 'schedule_expr',
+    objectiveTemplate: 'objective_template',
+    acceptanceCriteriaTemplate: 'acceptance_criteria_template',
+  };
+  for (const [field, value] of Object.entries(patch)) {
+    if (priorByField[field] !== value) {
+      before[snakeByField[field]] = priorByField[field];
+      after[snakeByField[field]] = value;
+    }
+  }
+  if (nextFireAt !== null && patch.scheduleExpr !== prior.scheduleExpr) {
+    before.next_fire_at = prior.nextFireAt;
+    after.next_fire_at = nextFireAt;
+  }
+  return { before, after };
+}
+
+/** runEditTransaction applies the validated patch + the Tier-2 audit
+ *  row in one tx (next_fire_at only moves when the expression actually
+ *  changed). */
+async function runEditTransaction(
+  id: string,
+  patch: EditPatch,
+  nextFireAt: string | null,
+): Promise<ScheduledTaskActionResult> {
+  return await appDb.transaction(async (tx) => {
+    const prior = await selectLiveTask(tx, id);
+    if (!prior) {
+      return fail('not_found', `scheduled task ${id} not found`);
+    }
+
+    const { before, after } = buildEditAuditDiff(patch, prior, nextFireAt);
+
+    await tx
+      .update(scheduledTasks)
+      .set({
+        ...patch,
+        ...(nextFireAt !== null && patch.scheduleExpr !== prior.scheduleExpr
+          ? { nextFireAt }
+          : {}),
+        updatedAt: sql`NOW()`,
+      })
+      .where(and(eq(scheduledTasks.id, id), isNull(scheduledTasks.deletedAt)));
+
+    const auditId = await writeAudit(tx, 'edit_scheduled_task', 2, id, {
+      task_id: id,
+      before,
+      after,
+    });
+    return { ok: true as const, id, auditId };
+  });
+}
+
 /** editScheduledTask — UPDATE the editable fields of a live row; when
  *  schedule_expr changes the validate endpoint recomputes next_fire_at.
  *  Tier-2 audit captures the per-field diff in args_jsonb. */
@@ -356,41 +482,9 @@ export async function editScheduledTask(
   const denied = await requireSession();
   if (denied) return denied;
 
-  const patch: Partial<{
-    name: string;
-    roleSlug: string;
-    scheduleExpr: string;
-    objectiveTemplate: string;
-    acceptanceCriteriaTemplate: string;
-  }> = {};
-  if (input.name !== undefined) {
-    const v = input.name.trim();
-    if (!v) return fail('validation_failed', 'name must be non-empty');
-    patch.name = v;
-  }
-  if (input.roleSlug !== undefined) {
-    const v = input.roleSlug.trim();
-    if (!v) return fail('validation_failed', 'role_slug must be non-empty');
-    patch.roleSlug = v;
-  }
-  if (input.objectiveTemplate !== undefined) {
-    if (input.objectiveTemplate.trim().length === 0) {
-      return fail('validation_failed', 'objective_template must be non-empty');
-    }
-    patch.objectiveTemplate = input.objectiveTemplate;
-  }
-  if (input.acceptanceCriteriaTemplate !== undefined) {
-    if (input.acceptanceCriteriaTemplate.trim().length === 0) {
-      return fail('validation_failed', 'acceptance_criteria_template must be non-empty');
-    }
-    patch.acceptanceCriteriaTemplate = input.acceptanceCriteriaTemplate;
-  }
-  if (input.scheduleExpr !== undefined) {
-    patch.scheduleExpr = input.scheduleExpr.trim();
-  }
-  if (Object.keys(patch).length === 0) {
-    return fail('validation_failed', 'no editable fields supplied');
-  }
+  const built = buildEditPatch(input);
+  if (!built.ok) return built.error;
+  const patch = built.patch;
 
   try {
     // Pre-read outside the validate call so the merged body carries the
@@ -423,59 +517,9 @@ export async function editScheduledTask(
     });
     if (!validated.ok) return failFromValidate(validated);
     const nextFireAt: string | null =
-      patch.scheduleExpr !== undefined ? validated.nextFireAt : null;
+      patch.scheduleExpr === undefined ? null : validated.nextFireAt;
 
-    return await appDb.transaction(async (tx) => {
-      const prior = await selectLiveTask(tx, id);
-      if (!prior) {
-        return fail('not_found', `scheduled task ${id} not found`);
-      }
-
-      const before: Record<string, unknown> = {};
-      const after: Record<string, unknown> = {};
-      const priorByField: Record<string, string> = {
-        name: prior.name,
-        roleSlug: prior.roleSlug,
-        scheduleExpr: prior.scheduleExpr,
-        objectiveTemplate: prior.objectiveTemplate,
-        acceptanceCriteriaTemplate: prior.acceptanceCriteriaTemplate,
-      };
-      const snakeByField: Record<string, string> = {
-        name: 'name',
-        roleSlug: 'role_slug',
-        scheduleExpr: 'schedule_expr',
-        objectiveTemplate: 'objective_template',
-        acceptanceCriteriaTemplate: 'acceptance_criteria_template',
-      };
-      for (const [field, value] of Object.entries(patch)) {
-        if (priorByField[field] !== value) {
-          before[snakeByField[field]] = priorByField[field];
-          after[snakeByField[field]] = value;
-        }
-      }
-      if (nextFireAt !== null && patch.scheduleExpr !== prior.scheduleExpr) {
-        before.next_fire_at = prior.nextFireAt;
-        after.next_fire_at = nextFireAt;
-      }
-
-      await tx
-        .update(scheduledTasks)
-        .set({
-          ...patch,
-          ...(nextFireAt !== null && patch.scheduleExpr !== prior.scheduleExpr
-            ? { nextFireAt }
-            : {}),
-          updatedAt: sql`NOW()`,
-        })
-        .where(and(eq(scheduledTasks.id, id), isNull(scheduledTasks.deletedAt)));
-
-      const auditId = await writeAudit(tx, 'edit_scheduled_task', 2, id, {
-        task_id: id,
-        before,
-        after,
-      });
-      return { ok: true as const, id, auditId };
-    });
+    return await runEditTransaction(id, patch, nextFireAt);
   } catch (err) {
     if (isLiveNameCollision(err)) {
       return fail('validation_failed', 'a live scheduled task with that name already exists');

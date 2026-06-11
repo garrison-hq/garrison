@@ -57,20 +57,23 @@ FAIL=0
 declare -a FAILURES=()
 
 ok() {
+  local label="$1"
   PASS=$((PASS + 1))
-  printf '  PASS  %s\n' "$1"
+  printf '  PASS  %s\n' "${label}"
   return 0
 }
 
 fail() {
+  local label="$1"
   FAIL=$((FAIL + 1))
-  FAILURES+=("$1")
-  printf '  FAIL  %s\n' "$1" >&2
+  FAILURES+=("${label}")
+  printf '  FAIL  %s\n' "${label}" >&2
   return 0
 }
 
 note() {
-  printf '  ....  %s\n' "$1"
+  local message="$1"
+  printf '  ....  %s\n' "${message}"
   return 0
 }
 
@@ -284,6 +287,7 @@ tested_pkgs() {
   [[ -n "${tags}" ]] && tagflag=(-tags="${tags}")
   (cd "${SUP_DIR}" && go list "${tagflag[@]}" \
      -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' ./... | sed '/^$/d')
+  return "$?"
 }
 
 mapfile -t DEFAULT_PKGS < <(tested_pkgs "")
@@ -344,7 +348,10 @@ coverage_probe() {
     while IFS= read -r pat; do
       [[ -z "${pat}" ]] && continue
       # shellcheck disable=SC2254 — pat is a glob on purpose.
-      case "$f" in ${pat}) skip=1; break ;; esac
+      case "$f" in
+        ${pat}) skip=1; break ;;
+        *) ;;
+      esac
     done <<<"${exclusions}"
     (( skip )) && continue
     new_files+=("$f")
@@ -468,6 +475,7 @@ json_total() {
   # First "total":N in a Sonar JSON payload (paging.total on both the
   # issues and hotspots endpoints). Avoids a jq dependency.
   sed -n 's/.*"total":\([0-9]\{1,\}\).*/\1/p' | head -1
+  return "$?"
 }
 
 sonar_preclearance() {

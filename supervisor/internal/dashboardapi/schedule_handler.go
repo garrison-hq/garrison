@@ -119,34 +119,47 @@ func newScheduleValidateHandler(queries *store.Queries, minInterval time.Duratio
 			handleFullValidate(w, r, queries, minInterval, now, req, logger)
 			return
 		}
-
-		expr, err := schedule.Parse(req.ScheduleExpr)
-		if err != nil {
-			var pe *schedule.ParseError
-			if errors.As(err, &pe) {
-				writeErrorResponse(w, http.StatusUnprocessableEntity, "validation_failed", pe.Error(), "", logger)
-				return
-			}
-			// Parse only returns *ParseError today; defensive against
-			// future grammar revisions leaking a generic error.
-			if logger != nil {
-				logger.Error("dashboardapi: schedule.Parse returned non-ParseError", "err", err)
-			}
-			writeErrorResponse(w, http.StatusInternalServerError, "InternalError", "", "", logger)
-			return
-		}
-
-		if got := expr.MinInterval(); got < minInterval {
-			ve := &schedule.ValidationError{
-				Field: "schedule_expr",
-				Msg:   fmt.Sprintf("effective interval %s is below the minimum firing interval %s (FR-404)", got, minInterval),
-			}
-			writeErrorResponse(w, http.StatusUnprocessableEntity, "validation_failed", ve.Error(), "", logger)
-			return
-		}
-
-		writeScheduleValidateOK(w, expr.Next(now()), logger)
+		handleExprValidate(w, req, minInterval, now, logger)
 	})
+}
+
+// handleExprValidate keeps the original expression-only contract
+// (grammar + FR-404 min-interval) for bodies without task-identity
+// fields — the shape the resume action and the pre-review T014 callers
+// send.
+func handleExprValidate(
+	w http.ResponseWriter,
+	req scheduleValidateRequest,
+	minInterval time.Duration,
+	now func() time.Time,
+	logger *slog.Logger,
+) {
+	expr, err := schedule.Parse(req.ScheduleExpr)
+	if err != nil {
+		var pe *schedule.ParseError
+		if errors.As(err, &pe) {
+			writeErrorResponse(w, http.StatusUnprocessableEntity, "validation_failed", pe.Error(), "", logger)
+			return
+		}
+		// Parse only returns *ParseError today; defensive against
+		// future grammar revisions leaking a generic error.
+		if logger != nil {
+			logger.Error("dashboardapi: schedule.Parse returned non-ParseError", "err", err)
+		}
+		writeErrorResponse(w, http.StatusInternalServerError, "InternalError", "", "", logger)
+		return
+	}
+
+	if got := expr.MinInterval(); got < minInterval {
+		ve := &schedule.ValidationError{
+			Field: "schedule_expr",
+			Msg:   fmt.Sprintf("effective interval %s is below the minimum firing interval %s (FR-404)", got, minInterval),
+		}
+		writeErrorResponse(w, http.StatusUnprocessableEntity, "validation_failed", ve.Error(), "", logger)
+		return
+	}
+
+	writeScheduleValidateOK(w, expr.Next(now()), logger)
 }
 
 // handleFullValidate runs the full schedule.ValidateTask path for
