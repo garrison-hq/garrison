@@ -136,22 +136,25 @@ func (q *Queries) HasOpenTicketForTask(ctx context.Context, scheduledTaskID pgty
 const hasRunningOneshotForTask = `-- name: HasRunningOneshotForTask :one
 SELECT EXISTS (
     SELECT 1
-      FROM (SELECT r.outcome, r.agent_instance_id
-              FROM scheduled_task_runs r
-             WHERE r.scheduled_task_id = $1
-             ORDER BY r.fired_at DESC
-             LIMIT 1) latest
-      LEFT JOIN agent_instances ai ON ai.id = latest.agent_instance_id
-     WHERE latest.outcome IN ('fired', 'gate_deferred')
-       AND (latest.agent_instance_id IS NULL OR ai.status = 'running')
+      FROM scheduled_task_runs r
+      LEFT JOIN agent_instances ai ON ai.id = r.agent_instance_id
+     WHERE r.scheduled_task_id = $1
+       AND r.outcome IN ('fired', 'gate_deferred')
+       AND (r.agent_instance_id IS NULL OR ai.status = 'running')
 ) AS has_running_oneshot
 `
 
-// Overlap predicate, oneshot mode (FR-303): the latest run counts as
-// in-flight when its outcome is 'fired' or 'gate_deferred' AND either
-// no instance has been backfilled yet (fired-but-not-yet-dispatched —
-// closes the tick→dispatch window) or the joined instance is still
-// running. gate_deferred is awaiting-poll-retry, hence in-flight.
+// Overlap predicate, oneshot mode (FR-303): ANY run of the task counts
+// as in-flight when its outcome is 'fired' or 'gate_deferred' AND
+// either no instance has been backfilled yet (fired-but-not-yet-
+// dispatched — closes the tick→dispatch window) or the joined instance
+// is still running. gate_deferred is awaiting-poll-retry, hence
+// in-flight. EXISTS over all runs (the HasOpenTicketForTask shape) —
+// NOT latest-run-only: a skipped_overlap row becomes the latest run
+// and would blind a latest-only predicate, double-firing the 2nd
+// consecutive overlapping slot. Terminal runs stop counting via their
+// own state: failed runs flip outcome to 'failed' (decision 5 failure
+// paths), completed runs hold a non-running joined instance.
 func (q *Queries) HasRunningOneshotForTask(ctx context.Context, scheduledTaskID pgtype.UUID) (bool, error) {
 	row := q.db.QueryRow(ctx, hasRunningOneshotForTask, scheduledTaskID)
 	var has_running_oneshot bool

@@ -317,6 +317,93 @@ func TestTickOnceSkipsOverlapOneshotMode(t *testing.T) {
 	}
 }
 
+// TestTickOnceConsecutiveOverlapStillSkips reproduces the review-#1
+// double-fire: after slot 2's skipped_overlap row becomes the task's
+// latest run, a latest-run-only overlap predicate goes blind and slot 3
+// fires a second oneshot while slot 1's instance is still running. The
+// EXISTS-over-any-run predicate must keep skipping.
+func TestTickOnceConsecutiveOverlapStillSkips(t *testing.T) {
+	pool := testdb.Start(t)
+	deptID := testdb.SeedM21(t, t.TempDir())
+	q := store.New(pool)
+	ctx := context.Background()
+	now := fixedNow()
+
+	task := seedScheduledTask(t, q, deptID, "probe", ModeOneshot, "every@30m", now.Add(-time.Minute))
+
+	// Slot 1 fires.
+	fired, skipped, deferred, err := tickOnce(ctx, tickDeps(pool, discardLogger(), now))
+	if err != nil {
+		t.Fatalf("slot-1 tickOnce: %v", err)
+	}
+	if fired != 1 || skipped != 0 || deferred != 0 {
+		t.Fatalf("slot-1 tickOnce = (fired=%d, skipped=%d, deferred=%d), want (1, 0, 0)", fired, skipped, deferred)
+	}
+	runs := listRuns(t, pool, task.ID)
+	if len(runs) != 1 || runs[0].Outcome != OutcomeFired {
+		t.Fatalf("after slot 1: runs = %+v, want exactly one fired run", runs)
+	}
+
+	// Dispatch happened: instance backfilled onto the run, still running.
+	var instanceID pgtype.UUID
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO agent_instances (department_id, scheduled_task_run_id, role_slug, status)
+		 VALUES ($1, $2, 'engineer', 'running') RETURNING id`,
+		deptID, runs[0].ID,
+	).Scan(&instanceID); err != nil {
+		t.Fatalf("insert running instance: %v", err)
+	}
+	if err := q.SetRunAgentInstance(ctx, store.SetRunAgentInstanceParams{
+		AgentInstanceID: instanceID,
+		ID:              runs[0].ID,
+	}); err != nil {
+		t.Fatalf("SetRunAgentInstance: %v", err)
+	}
+
+	// Slots 2 and 3 each come due while the instance is still running.
+	// Slot 2 skips; slot 3 — where the latest run is now the slot-2
+	// skipped_overlap row — MUST also skip (the double-fire case).
+	for slot := 2; slot <= 3; slot++ {
+		if _, err := pool.Exec(ctx,
+			`UPDATE scheduled_tasks SET next_fire_at = $1 WHERE id = $2`,
+			now.Add(-time.Minute), task.ID,
+		); err != nil {
+			t.Fatalf("slot-%d make due: %v", slot, err)
+		}
+		fired, skipped, deferred, err := tickOnce(ctx, tickDeps(pool, discardLogger(), now))
+		if err != nil {
+			t.Fatalf("slot-%d tickOnce: %v", slot, err)
+		}
+		if fired != 0 || skipped != 1 || deferred != 0 {
+			t.Fatalf("slot-%d tickOnce = (fired=%d, skipped=%d, deferred=%d), want (0, 1, 0)", slot, fired, skipped, deferred)
+		}
+	}
+
+	// Exactly one fired run + one outbox event total; slots 2 and 3 are
+	// typed skipped_overlap records.
+	runs = listRuns(t, pool, task.ID)
+	if len(runs) != 3 {
+		t.Fatalf("run rows = %d, want 3", len(runs))
+	}
+	var firedCount int
+	for _, r := range runs {
+		if r.Outcome == OutcomeFired {
+			firedCount++
+		}
+	}
+	if firedCount != 1 {
+		t.Fatalf("fired runs = %d, want exactly 1 (review #1: no double fire)", firedCount)
+	}
+	if runs[1].Outcome != OutcomeSkippedOverlap || runs[2].Outcome != OutcomeSkippedOverlap {
+		t.Fatalf("slot 2/3 outcomes = (%q, %q), want both %q", runs[1].Outcome, runs[2].Outcome, OutcomeSkippedOverlap)
+	}
+	if n := countRows(t, pool,
+		`SELECT COUNT(*) FROM event_outbox WHERE channel = $1`, ChannelOneshotDue,
+	); n != 1 {
+		t.Fatalf("oneshot outbox rows = %d, want exactly 1", n)
+	}
+}
+
 func TestTickOnceGateDeferredWritesEvidence(t *testing.T) {
 	pool := testdb.Start(t)
 	deptID := testdb.SeedM21(t, t.TempDir())
