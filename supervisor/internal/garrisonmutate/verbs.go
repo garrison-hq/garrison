@@ -41,7 +41,8 @@ type Verb struct {
 // same.
 //
 // Handlers are defined in per-domain files: verbs_tickets.go,
-// verbs_agents.go, verbs_hiring.go. Each verb's per-call business
+// verbs_agents.go, verbs_hiring.go, verbs_scheduled.go. Each verb's
+// per-call business
 // logic lands as part of the M5.3 task list (T005-T011); the registry
 // here exists so the sealed-allow-list test (T004) passes against
 // stub handlers before the verb logic ships (FR-433 ordering).
@@ -142,6 +143,19 @@ var Verbs = []Verb{
 		AffectedResourceType: "hiring_proposal",
 		Description:          "Propose bumping one installed skill to a new version. Operator review required before install.",
 	},
+	{
+		// M9 FR-600: the eleventh chat verb. Tier 3 per the threat-model
+		// amendment ("creates recurring cost-incurring state; accrued
+		// firings/spend do not reverse"). Edit/pause/resume/delete are
+		// dashboard-only Server Actions (ServerActionVerbs), never chat.
+		Name: "create_scheduled_task",
+		Handler: func(ctx context.Context, deps Deps, args json.RawMessage) (Result, error) {
+			return handleCreateScheduledTask(ctx, deps, args)
+		},
+		ReversibilityClass:   3,
+		AffectedResourceType: "scheduled_task",
+		Description:          "Create a named recurring scheduled task the supervisor fires on schedule, as either a ticket insert or an oneshot direct spawn.",
+	},
 }
 
 // FindVerb returns the Verb entry for name, or nil if not registered.
@@ -193,4 +207,6 @@ var (
 	handleProposeHire        HandlerFunc = stubHandler
 	handleProposeSkillChange HandlerFunc = stubHandler
 	handleBumpSkillVersion   HandlerFunc = stubHandler
+	// M9: replaced by verbs_scheduled.go's init.
+	handleCreateScheduledTask HandlerFunc = stubHandler
 )
