@@ -481,6 +481,8 @@ func runDaemon() int {
 		ChatInternalDatabaseURL: chatInternalDatabaseURL(cfg),
 		// M6 T014 — per-turn ticket-creation ceiling.
 		MaxTicketsPerTurn: cfg.MaxTicketsPerTurn,
+		// M9 T012 — per-turn scheduled-task-creation ceiling.
+		MaxScheduledTasksPerTurn: cfg.MaxScheduledTasksPerTurn,
 	}
 	if err := chat.RunRestartSweep(ctx, chatDeps); err != nil {
 		logger.Warn("chat: restart sweep failed; continuing", "err", err)

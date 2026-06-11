@@ -52,6 +52,18 @@ type ChatPolicy struct {
 	ticketCreationCount        int
 	ticketCreationCeilingFired bool
 
+	// M9 T012: per-turn scheduled-task-creation ceiling. Counts only
+	// mcp__garrison-mutate__create_scheduled_task invocations (NOT all
+	// tool calls); fires ChatErrorScheduledTaskCreationCeilingReached
+	// when exceeded (FR-603, default 3, tuned via
+	// GARRISON_CHAT_MAX_SCHEDULED_TASKS_PER_TURN → config.
+	// MaxScheduledTasksPerTurn). Independent of both ToolCallCeiling
+	// and MaxTicketsPerTurn — any combination can trigger in the same
+	// turn; bailReason stays first-set-wins.
+	MaxScheduledTasksPerTurn   int
+	scheduledTaskCreationCount int
+	scheduledTaskCeilingFired  bool
+
 	// runtime state populated as the stream is consumed
 	deltaSeq int
 	// messageBlock increments on each claude message_start. The
@@ -90,6 +102,10 @@ func NewChatPolicy(deps Deps, sessionID, messageID pgtype.UUID) *ChatPolicy {
 	if maxTickets <= 0 {
 		maxTickets = 10 // M6 T011 default per FR-004 / spec
 	}
+	maxSched := deps.MaxScheduledTasksPerTurn
+	if maxSched <= 0 {
+		maxSched = 3 // M9 T012 default per FR-603
+	}
 	return &ChatPolicy{
 		Pool:              deps.Pool,
 		Queries:           deps.Queries,
@@ -99,6 +115,11 @@ func NewChatPolicy(deps Deps, sessionID, messageID pgtype.UUID) *ChatPolicy {
 		GraceWrite:        deps.TerminalWriteGrace,
 		ToolCallCeiling:   ceiling,
 		MaxTicketsPerTurn: maxTickets,
+		// M9 T012 — operator tuning flows through
+		// GARRISON_CHAT_MAX_SCHEDULED_TASKS_PER_TURN → config.
+		// MaxScheduledTasksPerTurn (T002) → Deps.MaxScheduledTasksPerTurn
+		// (cmd/supervisor wiring), same chain as the M6 ticket ceiling.
+		MaxScheduledTasksPerTurn: maxSched,
 	}
 }
 
@@ -212,6 +233,12 @@ func (p *ChatPolicy) handleToolUseBlockStart(ctx context.Context, raw []byte) {
 		p.ticketCreationCount++
 		p.maybeFireTicketCreationCeiling(ctx)
 	}
+	// M9 T012: same shape for create_scheduled_task. Counter stays
+	// accurate even when an earlier ceiling already claimed bailReason.
+	if isCreateScheduledTaskBlockStart(raw) {
+		p.scheduledTaskCreationCount++
+		p.maybeFireScheduledTaskCeiling(ctx)
+	}
 }
 
 // isCreateTicketBlockStart inspects the raw content_block_start bytes
@@ -247,6 +274,52 @@ func (p *ChatPolicy) maybeFireTicketCreationCeiling(ctx context.Context) {
 		fmt.Sprintf("per-turn ticket-creation ceiling (%d) exceeded; terminating turn", p.MaxTicketsPerTurn),
 	); err != nil {
 		p.Logger.Warn("chat: EmitAssistantError ticket-creation ceiling failed", "err", err)
+	}
+}
+
+// ChatErrorScheduledTaskCreationCeilingReached is the M9 T012 bail
+// reason / error_kind for the per-turn scheduled-task-creation ceiling
+// (FR-603). The value matches the `scheduled_task_creation_ceiling_reached`
+// outcome added to the chat_mutation_audit CHECK by the M9 migration.
+// Declared alongside the ceiling (T012's surface is policy.go) rather
+// than in errorkind.go's const block.
+const ChatErrorScheduledTaskCreationCeilingReached ErrorKind = "scheduled_task_creation_ceiling_reached"
+
+// isCreateScheduledTaskBlockStart inspects the raw content_block_start
+// bytes for the canonical claude tool-name shape pointing at the M9
+// garrison-mutate.create_scheduled_task verb. Same substring-match
+// rationale as isCreateTicketBlockStart.
+func isCreateScheduledTaskBlockStart(raw []byte) bool {
+	return bytes.Contains(raw, []byte(`"name":"mcp__garrison-mutate__create_scheduled_task"`)) ||
+		bytes.Contains(raw, []byte(`"name": "mcp__garrison-mutate__create_scheduled_task"`))
+}
+
+// maybeFireScheduledTaskCeiling mirrors maybeFireTicketCreationCeiling:
+// once the per-turn create_scheduled_task count exceeds the ceiling,
+// emit the assistant-error SSE frame once and claim bailReason iff no
+// earlier ceiling already did (first-set wins).
+func (p *ChatPolicy) maybeFireScheduledTaskCeiling(ctx context.Context) {
+	if p.scheduledTaskCreationCount <= p.MaxScheduledTasksPerTurn || p.scheduledTaskCeilingFired {
+		return
+	}
+	p.scheduledTaskCeilingFired = true
+	if p.bailReason == "" {
+		p.bailReason = ChatErrorScheduledTaskCreationCeilingReached
+	}
+	p.Logger.Warn("chat: per-turn scheduled-task-creation ceiling exceeded",
+		"session_id", uuidString(p.SessionID),
+		"message_id", uuidString(p.MessageID),
+		"ceiling", p.MaxScheduledTasksPerTurn,
+		"observed", p.scheduledTaskCreationCount,
+	)
+	if p.Pool == nil {
+		return
+	}
+	if err := EmitAssistantError(ctx, p.Pool, p.MessageID,
+		ChatErrorScheduledTaskCreationCeilingReached,
+		fmt.Sprintf("per-turn scheduled-task-creation ceiling (%d) exceeded; terminating turn", p.MaxScheduledTasksPerTurn),
+	); err != nil {
+		p.Logger.Warn("chat: EmitAssistantError scheduled-task ceiling failed", "err", err)
 	}
 }
 

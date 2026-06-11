@@ -113,6 +113,13 @@ type Deps struct {
 	// Default 10 if unset; tuned via GARRISON_CHAT_MAX_TICKETS_PER_TURN.
 	MaxTicketsPerTurn int
 
+	// MaxScheduledTasksPerTurn caps the per-turn invocations of
+	// mcp__garrison-mutate__create_scheduled_task (M9 T012, FR-603).
+	// Same posture as MaxTicketsPerTurn: independent of the other
+	// ceilings, default 3 if unset, tuned via
+	// GARRISON_CHAT_MAX_SCHEDULED_TASKS_PER_TURN.
+	MaxScheduledTasksPerTurn int
+
 	// ShutdownSignalGrace bounds the SIGTERM-to-SIGKILL escalation
 	// window for the chat docker subprocess. AGENTS.md concurrency
 	// rule 7. Reused from spawn.ShutdownSignalGrace.
