@@ -239,15 +239,19 @@ type FinalizeDeps struct {
 	OnRateLimitRejected func(ctx context.Context, e claudeproto.RateLimitEvent)
 }
 
-// isFinalizeToolName matches either the bare tool name or Claude's
-// mcp__finalize__finalize_ticket prefix form (parallel to
-// isMempalaceToolName).
+// isFinalizeToolName matches either finalize tool — finalize_ticket or
+// its M9 oneshot sibling finalize_oneshot — bare or in Claude's
+// mcp__finalize__ prefix form (parallel to isMempalaceToolName). One
+// matcher serves both pipeline modes: the per-mode finalize MCP server
+// exposes exactly one of the two tools (FR-304), so a ticket spawn can
+// never observe finalize_oneshot frames and vice versa; each session's
+// onCommit hook re-validates against its own mode's schema.
 func isFinalizeToolName(name string) bool {
 	const prefix = "mcp__finalize__"
 	if len(name) >= len(prefix) && name[:len(prefix)] == prefix {
 		name = name[len(prefix):]
 	}
-	return name == "finalize_ticket"
+	return name == "finalize_ticket" || name == "finalize_oneshot"
 }
 
 // isMempalaceToolName returns true if the tool name belongs to the

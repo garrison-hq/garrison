@@ -450,3 +450,18 @@ func TestTickOnceCorruptExprLogsAndSkips(t *testing.T) {
 		t.Fatalf("expected an error-level corrupt-expression log, got: %q", logged)
 	}
 }
+
+// -----------------------------------------------------------------------
+// M9 T016 — golden-path suite bridge
+// -----------------------------------------------------------------------
+
+// TickOnce exposes the unexported tickOnce claim-and-fire transaction
+// to the golden-path tests (golden_path_integration_test.go, package
+// schedule_test). Those tests must live in the external test package:
+// they drive the dispatcher into internal/spawn, and spawn imports
+// schedule (oneshot.go), so an in-package test importing spawn is an
+// import cycle the Go toolchain rejects ("import cycle not allowed in
+// test"). Test-only surface — integration-tagged, no production caller.
+func TickOnce(ctx context.Context, deps Deps) (fired, skipped, deferred int, err error) {
+	return tickOnce(ctx, deps)
+}
