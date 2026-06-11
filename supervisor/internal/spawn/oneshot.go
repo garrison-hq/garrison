@@ -172,7 +172,7 @@ func prepareOneshot(ctx context.Context, deps Deps, eventID pgtype.UUID) (onesho
 		return oneshotPrep{done: true}, nil
 	}
 
-	instanceID, err := gateAndInsertOneshotRunning(ctx, deps, tx, q, row, dept, runID, eventID)
+	instanceID, err := gateAndInsertOneshotRunning(ctx, deps, tx, q, oneshotClaim{row: row, dept: dept, runID: runID, eventID: eventID})
 	if err != nil {
 		if releaseSlot != nil {
 			releaseSlot()
@@ -276,6 +276,16 @@ func checkOneshotThrottleGate(ctx context.Context, deps Deps, tx pgx.Tx, q *stor
 	return deferOneshot(ctx, deps, tx, q, runID, eventID, detail)
 }
 
+// oneshotClaim carries the resolved origin of a claimed oneshot event
+// (run→task row, department, and the two anchoring ids) through the
+// prep-tx helpers.
+type oneshotClaim struct {
+	row     store.SelectScheduledTaskByRunIDRow
+	dept    store.Department
+	runID   pgtype.UUID
+	eventID pgtype.UUID
+}
+
 // gateAndInsertOneshotRunning finishes the prep tx after the agent slot
 // is held: Gate 2 (company throttle), the FR-401 gate_deferred → fired
 // clear, the running agent_instances insert, the run→instance anchor,
@@ -285,11 +295,10 @@ func gateAndInsertOneshotRunning(
 	deps Deps,
 	tx pgx.Tx,
 	q *store.Queries,
-	row store.SelectScheduledTaskByRunIDRow,
-	dept store.Department,
-	runID, eventID pgtype.UUID,
+	claim oneshotClaim,
 ) (pgtype.UUID, error) {
-	if err := checkOneshotThrottleGate(ctx, deps, tx, q, dept, runID, eventID); err != nil {
+	row, runID := claim.row, claim.runID
+	if err := checkOneshotThrottleGate(ctx, deps, tx, q, claim.dept, runID, claim.eventID); err != nil {
 		return pgtype.UUID{}, err
 	}
 
@@ -1290,7 +1299,7 @@ func WriteFinalizeOneshot(parentCtx context.Context, deps Deps, runID pgtype.UUI
 	if f := writeOneshotPalace(ctx, deps, wing, body, scanned.KGTriples); f != nil {
 		return failOneshotWrite(parentCtx, deps, instanceID, *f, logger)
 	}
-	if f := persistOneshotOutcome(ctx, q, tx, runID, instanceID, &scanned, verification, term); f != nil {
+	if f := persistOneshotOutcome(ctx, q, tx, runID, instanceID, oneshotCommitData{scanned: &scanned, verification: verification, term: term}); f != nil {
 		return failOneshotWrite(parentCtx, deps, instanceID, *f, logger)
 	}
 
@@ -1355,16 +1364,23 @@ func writeOneshotPalace(ctx context.Context, deps Deps, wing, body string, tripl
 // succeeded terminal instance row, and the event-outbox processed mark
 // inside the atomic tx. Every failure here is a palace_write-class
 // orphan — the drawer landed before any of these writes run.
+// oneshotCommitData bundles the validated payload, its verification
+// verdict, and the terminal cost/wake-up values for the atomic commit.
+type oneshotCommitData struct {
+	scanned      *finalize.FinalizePayload
+	verification oneshotVerification
+	term         OneshotTerminal
+}
+
 func persistOneshotOutcome(
 	ctx context.Context,
 	q *store.Queries,
 	tx pgx.Tx,
 	runID, instanceID pgtype.UUID,
-	scanned *finalize.FinalizePayload,
-	verification oneshotVerification,
-	term OneshotTerminal,
+	data oneshotCommitData,
 ) *oneshotWriteFailure {
-	outcomeJSON, err := json.Marshal(buildOneshotStructuredOutcome(scanned, verification))
+	term := data.term
+	outcomeJSON, err := json.Marshal(buildOneshotStructuredOutcome(data.scanned, data.verification))
 	if err != nil {
 		return &oneshotWriteFailure{
 			reason: ExitFinalizePalaceWriteFailed, class: "palace_write", orphan: true,
