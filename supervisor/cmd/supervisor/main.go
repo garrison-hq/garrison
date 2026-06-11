@@ -281,13 +281,22 @@ func runDaemon() int {
 		// M6 T014 — result-grace + throttle gate.
 		FinalizeResultGrace: cfg.FinalizeResultGrace,
 		Throttle:            throttleDeps,
-		// M7 — container runtime threading. UseDirectExec stays true
-		// until the container exec pipeline ships (see retro M7 open
-		// questions + buildAgentContainerRuntime's guard); the
-		// controller is wired so hiring/migrate7-created containers
-		// are addressable the moment the flag flips for real.
+		// M7/M7.1 — container runtime threading. As of T012 the
+		// config default routes spawns through the container exec
+		// pipeline; buildAgentContainerRuntime forces direct-exec
+		// only in fake-agent mode / with no socket-proxy URL (the
+		// M2.x suites), and GARRISON_USE_DIRECT_EXEC=true is the
+		// operator rollback lever (FR-018).
 		UseDirectExec:  useDirectExec,
 		AgentContainer: agentCtrl,
+		// M7.1 T010/T011 container-path collaborators: the shared
+		// per-agent in-flight slot (FR-017), the egress proxy that
+		// lands in claude execs as HTTPS_PROXY (FR-009/FR-011), and
+		// the host base dir of the agent-ID-keyed workspace binds
+		// for the acceptance gate (FR-006).
+		Inflight:         spawn.NewAgentInflight(),
+		EgressProxyURL:   cfg.EgressProxyURL,
+		AgentWorkspaceFS: cfg.AgentWorkspaceFS,
 	}
 
 	healthServer := health.NewServer(cfg, state, pool)
@@ -1037,16 +1046,14 @@ func buildVaultClient(ctx context.Context, cfg *config.Config, logger *slog.Logg
 //   - Fake-agent mode and an unset proxy URL skip the subsystem
 //     entirely (M2.x chaos/integration suites; no Docker available).
 //   - migrate7 failure degrades with a warning (same posture as the
-//     MCPJungle subsystem): boot continues on direct-exec rather than
-//     crash-looping the supervisor over a missing agent image.
-//   - cfg.UseDirectExec=false is NOT honoured yet: the container exec
-//     branch (spawn/m7.go runRealClaudeViaContainer) is an outline that
-//     does not run the claudeproto pipeline, inject secrets, or call
-//     finalize — activating it would fabricate 'completed' run rows.
-//     Until the container pipeline milestone lands, the supervisor
-//     forces direct-exec and logs loudly so the misconfiguration is
-//     visible. migrate7's OnComplete readiness signal is logged for the
-//     operator's soak-window decision (retro M7 §open questions).
+//     MCPJungle subsystem): boot continues with whatever
+//     cfg.UseDirectExec says rather than crash-looping the supervisor
+//     over a missing agent image; a broken container surfaces per-spawn
+//     as spawn_failed retryable.
+//   - cfg.UseDirectExec is honoured as of M7.1 T012 (FR-018): the
+//     container exec pipeline (spawn/m7.go) is real, and the config
+//     default is false. GARRISON_USE_DIRECT_EXEC=true is the rollback
+//     lever back to supervisor-child direct-exec.
 func buildAgentContainerRuntime(
 	ctx context.Context,
 	cfg *config.Config,
@@ -1084,7 +1091,7 @@ func buildAgentContainerRuntime(
 		SupervisorBin: supervisorBin,
 		OnComplete: func(flipUseDirectExec bool) {
 			if flipUseDirectExec {
-				logger.Info("migrate7: grandfathering complete; UseDirectExec flip remains operator-deferred until the container exec pipeline ships (retro M7 §open questions)")
+				logger.Info("migrate7: grandfathering complete; container exec is the default path (UseDirectExec defaults false since M7.1 T012)")
 			}
 		},
 	}
@@ -1101,10 +1108,7 @@ func buildAgentContainerRuntime(
 	// and the next boot repairs.
 	runBootShapeReconcile(ctx, cfg, queries, ctrl, supervisorBin, logger)
 
-	if !cfg.UseDirectExec {
-		logger.Error("config: GARRISON_USE_DIRECT_EXEC=false requested, but the container exec path is an outline pending the container-pipeline milestone; forcing direct-exec to avoid fabricated run results")
-	}
-	return ctrl, true
+	return ctrl, cfg.UseDirectExec
 }
 
 // runBootShapeReconcile lists every container-owning agent, ensures

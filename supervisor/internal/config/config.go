@@ -158,8 +158,8 @@ type Config struct {
 	FinalizeResultGrace time.Duration // GARRISON_FINALIZE_RESULT_GRACE, default 3s
 
 	// M7 fields. Per-agent runtime defaults + skill-registry endpoints
-	// + the direct-exec feature flag that flips false at the migrate7
-	// grandfathering cutover (T014).
+	// + the direct-exec feature flag (default false since M7.1 T012 —
+	// container exec is the production path).
 	AgentUIDRangeStart      int    // GARRISON_AGENT_UID_RANGE_START, default 1000
 	AgentUIDRangeEnd        int    // GARRISON_AGENT_UID_RANGE_END, default 1999
 	DefaultContainerMemory  string // GARRISON_DEFAULT_CONTAINER_MEMORY, default "512m"
@@ -168,7 +168,7 @@ type Config struct {
 	SkillsShURL             string // GARRISON_SKILLS_SH_URL, default "https://skills.sh"
 	SkillHubURL             string // GARRISON_SKILLHUB_URL, default "http://garrison-skillhub:8080"
 	SkillHubToken           string // GARRISON_SKILLHUB_TOKEN, no default — empty disables SkillHub
-	UseDirectExec           bool   // GARRISON_USE_DIRECT_EXEC, default true; flipped to false by migrate7.Run after grandfathering completes
+	UseDirectExec           bool   // GARRISON_USE_DIRECT_EXEC, default false (M7.1 T012); setting true is the rollback lever to direct-exec (FR-018)
 	DockerSocketProxyURL    string // GARRISON_DOCKER_SOCKET_PROXY_URL, default "http://garrison-docker-proxy:2375"
 	AgentContainerImage     string // GARRISON_AGENT_CONTAINER_IMAGE, default "garrison-claude:m5"; migrate7 resolves this ref to a digest at boot
 	AgentWorkspaceFS        string // GARRISON_AGENT_WORKSPACE_FS, default "/var/lib/garrison/workspaces"; per-agent workspace bind-mount base
@@ -183,8 +183,7 @@ type Config struct {
 	// M7.1 fields. The agents network is the internal compose network
 	// agent containers join at create time (FR-012); the egress proxy
 	// is the only route out of it (FR-009) and lands in claude execs as
-	// HTTPS_PROXY (T011). UseDirectExec above keeps its true default
-	// until T012 flips it.
+	// HTTPS_PROXY (T011).
 	AgentsNetwork  string // GARRISON_AGENTS_NETWORK, default "garrison-agents"
 	EgressProxyURL string // GARRISON_EGRESS_PROXY_URL, default "http://garrison-egress-proxy:3128"
 }
@@ -290,7 +289,7 @@ func Load() (*Config, error) {
 		SkillsShURL:             "https://skills.sh",
 		SkillHubURL:             "http://garrison-skillhub:8080",
 		SkillHubToken:           "",
-		UseDirectExec:           true,
+		UseDirectExec:           false,
 		DockerSocketProxyURL:    "http://garrison-docker-proxy:2375",
 		AgentContainerImage:     "garrison-claude:m5",
 		AgentWorkspaceFS:        "/var/lib/garrison/workspaces",

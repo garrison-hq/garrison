@@ -949,8 +949,6 @@ func TestM8MCPJungleEnvVarsDefault(t *testing.T) {
 // TestAgentsNetworkAndEgressProxyDefaults — M7.1 knobs (plan §8): with
 // no env set, the agents network defaults to the compose network name
 // and the egress proxy URL to the squid sidecar's service DNS.
-// UseDirectExec keeps its true default in this task — the flip is
-// T012's single behavior-change commit.
 func TestAgentsNetworkAndEgressProxyDefaults(t *testing.T) {
 	clearAll(t)
 	t.Setenv("GARRISON_DATABASE_URL", validDBURL)
@@ -965,8 +963,31 @@ func TestAgentsNetworkAndEgressProxyDefaults(t *testing.T) {
 	if cfg.EgressProxyURL != "http://garrison-egress-proxy:3128" {
 		t.Errorf("EgressProxyURL default = %q; want http://garrison-egress-proxy:3128", cfg.EgressProxyURL)
 	}
+}
+
+// TestUseDirectExecDefaultsFalse — M7.1 T012, the milestone's single
+// behavior flip (FR-018): container exec is the default; setting
+// GARRISON_USE_DIRECT_EXEC=true is the rollback lever and must still
+// parse (the flag is NOT removed — post-soak polish per the M7 retro).
+func TestUseDirectExecDefaultsFalse(t *testing.T) {
+	clearAll(t)
+	t.Setenv("GARRISON_DATABASE_URL", validDBURL)
+	t.Setenv("GARRISON_FAKE_AGENT_CMD", validFakeCmd)
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.UseDirectExec {
+		t.Error("UseDirectExec default = true; want false (T012 flip)")
+	}
+
+	t.Setenv("GARRISON_USE_DIRECT_EXEC", "true")
+	cfg, err = config.Load()
+	if err != nil {
+		t.Fatalf("Load with GARRISON_USE_DIRECT_EXEC=true: %v", err)
+	}
 	if !cfg.UseDirectExec {
-		t.Error("UseDirectExec default = false; must stay true until T012 flips it")
+		t.Error("GARRISON_USE_DIRECT_EXEC=true did not override; rollback lever broken")
 	}
 }
 
