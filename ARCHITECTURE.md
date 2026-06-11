@@ -20,11 +20,13 @@ A zero-human company driver. Event-driven agent organization backed by Postgres 
 ## System components
 
 ### Postgres
+
 The durable state store and event bus. Every write that another part of the system needs to react to fires `pg_notify` on a channel matching the event shape. Single database, schemas per concern (`org`, `work`, `memory_hygiene`, `ops`).
 
 Channel names are dot-delimited and qualified: `work.ticket.created.<dept_slug>.<column_slug>` (from M2.1 onwards).
 
 ### Supervisor
+
 A single long-running Go binary. Its job:
 
 - Listen on pg_notify channels via a dedicated `pgx` connection (not from the pool)
@@ -46,11 +48,13 @@ The supervisor does not reason. It is a process manager.
 **Missed-event handling**: LISTEN is the fast path, but notifications are lost during reconnects. The event tables include a `processed_at` column, and the supervisor runs a fallback poll (`SELECT ... WHERE processed_at IS NULL LIMIT N`) every N seconds as a safety net.
 
 ### Postgres MCP server (`internal/pgmcp`)
+
 An in-tree Go MCP server that runs as `supervisor mcp postgres` subcommand. ~300 LOC plus tests. Stdio JSON-RPC. Exposes two tools: `query` and `explain`. Read-only enforced via two layers: a Postgres role (`garrison_agent_ro`) with SELECT-only grants on the M2.1 read surface **plus `agent_instances`** (added at M2.3 commit `59fc977` for the finalize-tool precheck — see `docs/forensics/pgmcp-three-bug-chain.md`), plus a protocol-layer SELECT filter for defense-in-depth.
 
 First-party component added in M2.1. Agents reach Postgres through this server; the supervisor never exposes Postgres credentials directly to Claude subprocesses. **The role explicitly has NO grants on the vault tables** (`agent_role_secrets`, `vault_access_log`, `secret_metadata`) — vault is opaque to agents per the M2.3 threat model. Returns use the MCP-spec-compliant `CallToolResult` envelope shape (`{"content":[{"type":"text","text":<payload>}],"isError":false}`); UUID columns are encoded as 36-char hex strings (not `[16]byte` integer arrays — both fixes landed in `59fc977` after the post-M2.2.2 pgmcp investigation).
 
 ### Agent processes
+
 Each agent is a Claude Code subprocess started by the supervisor. It receives:
 
 - Its `agent.md` as the system prompt
@@ -66,6 +70,7 @@ It runs until it has either committed a transition via `finalize_ticket` or hit 
 **Real-world cost baseline**: a trivial agent invocation (hello-world file write, ~8 Claude turns) observed at ~$0.04 per run in M2.1 (vs. $0.003 in mockclaude fixtures — 13× delta). Cost captured on `agent_instances.total_cost_usd` from the terminal `result` event's `total_cost_usd` field. **Caveat**: clean-finalize runs currently record `$0.00` because the supervisor signal-kills before claude's `result` event lands — see `docs/issues/cost-telemetry-blind-spot.md`. Failure-mode exits (`finalize_never_called`, `budget_exceeded`, `claude_error`) record cost correctly.
 
 ### CEO
+
 Not a daemon. When you send a message in the CEO chat:
 
 1. Web UI writes the message to `ceo_conversations`, fires pg_notify
@@ -77,9 +82,11 @@ Not a daemon. When you send a message in the CEO chat:
 No long-running context. Every message is a fresh spawn. The palace is the only memory.
 
 ### Web UI
+
 Next.js 16 + React 19. Reads from Postgres, writes to Postgres. WebSocket feed for real-time updates driven by pg_notify. Main surfaces (see dashboard section below). Shares Drizzle schema types with any TS tooling in the monorepo, but not with the supervisor — supervisor uses `sqlc`-generated Go types from the same migrations, so both sides derive from the SQL as source of truth.
 
 ### MemPalace
+
 Runs as an MCP server. Shared across every agent. The memory of the entire organization. Bootstrapped at a dedicated path (`~/.garrison/palace/` or an operator-configured path) outside any git-tracked directory. Wing and room creation is on-write via MCP `add_drawer`; init-time scanning defines only defaults.
 
 ---
@@ -365,15 +372,18 @@ At no point is anyone polling. At no point is an idle agent burning tokens.
 # Frontend Engineer
 
 ## Role
+
 You implement frontend features for tickets assigned to the engineering department.
 You work on whatever repo is set as your cwd.
 
 ## Context at wake
+
 - `company.md` is available via `mempalace_search`
 - Your wing is `wing_frontend_engineer`. Every past frontend ticket is there.
 - Check `hall_discoveries` in your wing for patterns worth knowing before you start.
 
 ## Work loop
+
 1. Read the ticket from Postgres: `SELECT * FROM tickets WHERE id = $TICKET_ID`
 2. Check your wing for related prior work: `mempalace_search("<objective keywords>", wing="wing_frontend_engineer")`
 3. Implement. Commit with a descriptive message that references the ticket id.
@@ -381,6 +391,7 @@ You work on whatever repo is set as your cwd.
 5. Transition the ticket.
 
 ## Completion protocol (MANDATORY)
+
 Before transitioning this ticket to the next column, you MUST:
 
 1. Write a diary entry to `wing_frontend_engineer` using `mempalace_add_drawer`:
@@ -405,12 +416,14 @@ Before transitioning this ticket to the next column, you MUST:
 4. Only then: `UPDATE tickets SET column_slug = 'qa_review' WHERE id = $TICKET_ID`
 
 ## Tools available
+
 - Claude Code built-in: file I/O, bash, git
 - MCP: mempalace (read + write), postgres (read tickets; write ticket state)
 - MCP: github (PR creation, issue linking)
 - Skills: whatever is installed in /workspaces/engineering/.claude/skills/
 
 ## What you do not do
+
 - You do not escalate to human unless blocked after 3 attempts at the same approach. The dashboard is where humans look; write your blocker to the ticket metadata and mark it `needs_review`.
 - You do not create tickets for other departments. If you need design or copy input, write to ticket metadata that you need it, and mark `needs_review`. The CTO handles cross-department coordination.
 ```
@@ -439,12 +452,14 @@ This never touches git. Configs live in Postgres. If you want version control, e
 Because soft gates + explicit writes means the system's memory is only as good as what agents write, this is the highest-leverage area to get right.
 
 **Wing structure:**
+
 - `wing_<role_slug>` per agent role — shared across instances (e.g. `wing_frontend_engineer`)
 - `wing_company` — CEO-level decisions, strategy, goals
 - `wing_<department_slug>` — department-level decisions by the manager agent
 - Halls within each wing: `hall_facts`, `hall_events`, `hall_discoveries`, `hall_preferences`, `hall_advice`
 
 **Diary entry schema** (YAML frontmatter in the drawer body):
+
 ```yaml
 ticket_id: <uuid>
 outcome: <one line>
@@ -457,6 +472,7 @@ completed_at: <iso timestamp>
 ```
 
 **KG triple conventions:**
+
 - `(agent_instance_<id>, completed, ticket_<id>, valid_from=now)` — always
 - `(<artifact>, created_in, ticket_<id>)` — for every new artifact
 - `(<decision>, decided_because, <reason>)` — for every non-trivial choice
@@ -464,12 +480,14 @@ completed_at: <iso timestamp>
 - `(<role>, owns, <surface>)` — ownership facts, written by managers
 
 **Hygiene check** (runs async after every `ticket_transitions` insert):
+
 - Did `mempalace_add_drawer` get called with the ticket_id in the body during the window between the agent_instance start and the transition?
 - Did at least one KG triple mentioning this ticket get written?
 - Thin writes (e.g. diary body < 100 chars) flagged as `hygiene_status = 'thin'`
 - Results stored on `ticket_transitions.hygiene_status`, surfaced in the dashboard
 
 **Hygiene status vocabulary** (accumulated across milestones; full set documented on the schema column above):
+
 - **M2.2 (palace-query path)**: `clean`, `pending`, `missing_diary`, `missing_kg`, `thin`
 - **M2.2.1 (finalize-shaped path)**: `finalize_failed`, `finalize_partial`, `stuck` — evaluated by pure-Go `EvaluateFinalizeOutcome` against the finalize-tool outcome rather than by querying the palace
 - **M2.3 (vault-path scanner)**: `suspected_secret_emitted` — set when `scanAndRedactPayload` matches any of 10 secret-shape patterns in the diary rationale or KG triples, before the MemPalace write. Non-blocking (the value is redacted in-place, not rejected)
@@ -507,12 +525,12 @@ departments:
 
 agents:
   - role_slug: ceo
-    department: null            # org-wide
+    department: null # org-wide
     agent_md_path: ./agents/ceo.md
     model: claude-opus-4-7
     palace_wing: wing_company
     skills: []
-    listens_for: []             # summoned only, not event-driven
+    listens_for: [] # summoned only, not event-driven
 
   - role_slug: cto
     department: engineering
@@ -532,7 +550,7 @@ agents:
       - anthropics/skills:frontend-design
       - shadcn/ui:shadcn
     listens_for:
-      - work.ticket.transitioned.engineering.*.in_dev  # with metadata filter
+      - work.ticket.transitioned.engineering.*.in_dev # with metadata filter
     concurrency_cap_override: 3
 
   - role_slug: backend-engineer
@@ -558,13 +576,13 @@ Some milestones carry genuine external unknowns — how a tool actually behaves 
 
 **M2.2 — MemPalace MCP wiring.** ✅ Shipped 2026-04-23. Retro: `docs/retros/m2-2.md`. MemPalace wired into every spawn — MCP tool always available, wake-up context injection, the completion protocol writes from `agent.md` become real. Three-container deployment topology (supervisor + mempalace sidecar + socket-proxy). New `garrison_agent_mempalace` Postgres role. `emit_ticket_transitioned` trigger added. The hygiene dashboard concept appears first here as a read-only query; the full hygiene UI waits for M3.
 
-  The memory thesis from RATIONALE §3 became testable here. M2.2's live run revealed the soft-gate failure mode RATIONALE §5 anticipated: real haiku skipped MANDATORY palace writes despite the prompt. That observation drove M2.2.1.
+The memory thesis from RATIONALE §3 became testable here. M2.2's live run revealed the soft-gate failure mode RATIONALE §5 anticipated: real haiku skipped MANDATORY palace writes despite the prompt. That observation drove M2.2.1.
 
 **M2.2.1 — Structured completion via `finalize_ticket` tool.** ✅ Shipped 2026-04-23. Retro: `docs/retros/m2-2-1.md`. Re-architected completion around a mechanism instead of a prompt. New in-tree MCP server (`internal/finalize`) exposing a single `finalize_ticket` tool; the agent cannot exit with a successful transition any other way. Hygiene-status vocabulary extended (`finalize_failed`, `finalize_partial`, `stuck`).
 
 **M2.2.2 — Compliance calibration.** ✅ Shipped 2026-04-24. Retro: `docs/retros/m2-2-2.md`. Richer structured error responses (line/column/excerpt/constraint/expected/actual/hint), Adjudicate precedence fix (budget-cap events no longer masked as `claude_error`), seed agent.md rewritten with front-loaded goal + palace-search calibration + example payload + retry framing. The original retro read the calibration thesis as falsified on live models; the post-ship pgmcp investigation revised that read — see arc retro.
 
-  **Post-M2.2.2 investigation** (closes the arc): a three-bug chain in `internal/pgmcp` (missing `agent_instances` SELECT grant, wrong `CallToolResult` envelope shape, UUID encoded as `[16]byte` integer array) had been silently contaminating compliance signal across M2.2 / M2.2.1 / M2.2.2 retros. Fixed in commit `59fc977` plus migration `20260424000007_agent_ro_agent_instances_grant.sql`. Forensic at `docs/forensics/pgmcp-three-bug-chain.md`. Post-fix matrix: 4 clean / 6 partial / 2 fail under strict scoring; 10/12 mechanism-compliant if the orthogonal workspace-sandbox-escape is separated out.
+**Post-M2.2.2 investigation** (closes the arc): a three-bug chain in `internal/pgmcp` (missing `agent_instances` SELECT grant, wrong `CallToolResult` envelope shape, UUID encoded as `[16]byte` integer array) had been silently contaminating compliance signal across M2.2 / M2.2.1 / M2.2.2 retros. Fixed in commit `59fc977` plus migration `20260424000007_agent_ro_agent_instances_grant.sql`. Forensic at `docs/forensics/pgmcp-three-bug-chain.md`. Post-fix matrix: 4 clean / 6 partial / 2 fail under strict scoring; 10/12 mechanism-compliant if the orthogonal workspace-sandbox-escape is separated out.
 
 **M2.3 — Secret vault (Infisical).** ✅ Shipped 2026-04-24. Retro: `docs/retros/m2-3.md`. Self-hosted Infisical with Garrison-native UI (operator never sees Infisical's UI directly); secrets injected as environment variables at spawn time; never enter agent prompts or context windows. Four vault rules (no-leaked-values, zero-grants-zero-secrets, vault-opaque-to-agents, fail-closed-audit). Custom `tools/vaultlog` go vet analyzer rejects slog/fmt/log calls with `vault.SecretValue` arguments at build time. Garrison's first PL/pgSQL trigger (`rebuild_secret_metadata_role_slugs`) shipped here. Design input at `docs/security/vault-threat-model.md`. **Locked-deps streak (M1 → M2.2.2: zero new deps) intentionally broken with two principled additions**: `infisical/go-sdk v0.7.1` and `golang.org/x/tools v0.44.0`.
 
@@ -596,7 +614,7 @@ Some milestones carry genuine external unknowns — how a tool actually behaves 
 
 **M9 — Scheduled / triggered wake-ups (heartbeat).** ✅ Shipped 2026-06-11. Retro: `docs/retros/m9.md`. Adds a cron-driven proactive spawn path alongside the pg_notify-reactive loop. Recurring work (daily standup, weekly drift-check, cadence-driven research) becomes first-class instead of requiring an external scheduler to poke the database. M6 cost-throttle and M8 runaway control apply unchanged. The proactive/scheduled axis is what lets a standing force operate on its own cadence rather than only reacting to operator-initiated events. The tick loop lives inside the supervisor (same shape as M1's `processed_at IS NULL` poll-fallback), uses `SELECT ... FROM scheduled_tasks WHERE next_fire_at <= now() FOR UPDATE SKIP LOCKED` for idempotency, and follows **fire-on-recovery semantics with collapse**: a tick missed because the supervisor was down fires exactly once when the supervisor returns (latest slot only; `next_fire_at` advances to the next future slot, no backfill of intermediate missed slots) — better to run late than never run, matching M1's missed-event handling. Backfill semantics are explicitly rejected: a daily standup that was missed for five days fires once on recovery, not five times.
 
-Each `scheduled_tasks` row is a **concrete named job with a bounded objective and acceptance criteria**, not a generic agent wake-up. The "summon an agent and let it look for work" pattern is explicitly rejected: it leaves gaps in audit, hygiene, and cost coverage, and depends on the agent inventing a brief under no concrete instruction. A daily-standup task fires *the daily standup* — templated objective, templated acceptance criteria, known department, known role — not "wake up the CTO and see what they find." This keeps M9 inside the discipline of M2.2.1's `finalize_ticket` mechanism (every committed transition has a structured outcome) and M6's hygiene predicates (every spawn has expected writes to verify against).
+Each `scheduled_tasks` row is a **concrete named job with a bounded objective and acceptance criteria**, not a generic agent wake-up. The "summon an agent and let it look for work" pattern is explicitly rejected: it leaves gaps in audit, hygiene, and cost coverage, and depends on the agent inventing a brief under no concrete instruction. A daily-standup task fires _the daily standup_ — templated objective, templated acceptance criteria, known department, known role — not "wake up the CTO and see what they find." This keeps M9 inside the discipline of M2.2.1's `finalize_ticket` mechanism (every committed transition has a structured outcome) and M6's hygiene predicates (every spawn has expected writes to verify against).
 
 Each scheduled task fires in one of two **firing modes**:
 
@@ -607,6 +625,14 @@ Both modes inherit M6 cost-throttle at spawn, M8 runaway control, hygiene-write 
 
 Shipped implementation pointers, per thread: (1) **Tick loop + firing transaction** — `supervisor/internal/schedule/` (`expr.go` grammar `daily@HH:MM` / `weekly@<day>@HH:MM` / `every@<N>{m|h}`, all UTC; `tick.go` + `fire.go` claim/fire/advance transaction; `validate.go` task validation), wired from `cmd/supervisor/main.go`; tick cadence `GARRISON_SCHED_TICK_INTERVAL` (default 30s), minimum task cadence `GARRISON_SCHED_MIN_INTERVAL` (default 15m). (2) **Oneshot spawn path** — `pg_notify('work.scheduled.oneshot_due')` consumed by the M1 dispatcher into `supervisor/internal/spawn/oneshot.go`; `finalize_oneshot` is a mode switch in `supervisor/internal/finalize/` selected by `GARRISON_FINALIZE_MODE=oneshot` (the `finalize_ticket` surface byte-for-byte unchanged); the supervisor-side commit lands on `scheduled_task_runs` via `WriteFinalizeOneshot` in `supervisor/internal/spawn/finalize.go`. (3) **Chat surface** — `create_scheduled_task` is the sealed registry's 11th verb (Tier 3) in `supervisor/internal/garrisonmutate/verbs_scheduled.go`, rejected for agent callers (agents cannot schedule work); per-turn ceiling `GARRISON_CHAT_MAX_SCHEDULED_TASKS_PER_TURN` (default 3, bail reason `scheduled_task_creation_ceiling_reached`) in `supervisor/internal/chat/policy.go`. (4) **Dashboard** — "Recurring jobs" surface at `/admin/recurring-jobs` (list + detail with run history) over Server-Action-only verbs (`edit/pause/resume/delete_scheduled_task` in `server_action_verbs.go`; delete is soft — run history and audit rows survive) backed by `POST /schedule/validate` on the dashboardapi; schedule-fired tickets carry a scheduled-origin chip on the kanban card. Schema: `scheduled_tasks` + immutable `scheduled_task_runs` history (outcomes `fired` / `skipped_overlap` / `gate_deferred` / `failed`) + `agent_instances.scheduled_task_run_id` exactly-one-origin discipline — migration `20260610000002_m9_scheduled_wakeups.sql`.
 
+**M10 — Ingress connectors (the company becomes reactive to the outside world).** Planned. Today the event bus is internal-only: every ticket originates from an operator, an agent (M8), or a schedule (M9). Real companies are reactive organisms — most work _arrives_. M10 adds inbound connectors that normalize external events into tickets on the existing bus: email-in, Stripe webhooks (payment failed, subscription created/cancelled), and GitHub (issues, mentions, review requests). Design commitments: connectors are supervisor-side components, never agent-reachable; each external event carries an idempotency key (webhook redelivery and email re-threading must not double-create tickets — same discipline as M1's `processed_at` and M9's `FOR UPDATE SKIP LOCKED`); every created ticket is tagged with connector provenance in `args_jsonb` so downstream hygiene can distinguish "operator asked" from "the internet asked." Noise filtering happens at the connector (spam, bot traffic, duplicate GitHub notifications), not in agent prompts — the ticket stream stays clean by construction. Per-connector rate caps feed the M6 throttle machinery so a webhook storm cannot stampede spawns. The likely first connector is GitHub, because the first dogfood workload (sortie issue triage → Concierge) needs it.
+
+**M11 — Action Broker (outbound external actions, gated by policy).** Planned — the keystone of the AI-native-company arc. Agents can currently _think_ and _write internally_; M11 is how they _act on the world_ without ever holding the ability to do so directly. Shape: a sealed `request_external_action` MCP verb (joining the M5.3/M8/M9 sealed-registry discipline) writes a pending-action row; a **tier policy table** classifies the action — `auto` (act + log), `notify` (act, then tell the operator), `approve` (blocked until operator click), `human_only` (agent prepares, dispatcher never executes); a dispatcher worker executes approved/auto actions using vault-scoped credentials the agent containers never see; an **Outbox** dashboard surface is the operator's approval queue. This generalizes the M7 hiring-queue pattern (propose → human approves → system executes) into the universal outbound path. Two doctrines carry over hard: policy lives in the tier table, not in prompts (M2.2.1 mechanism-over-prompt), and M7's default-deny container networking is the enforcement primitive — agents _physically cannot_ reach external services, so the broker is the only door, not a convention. Anything public-facing (posts, replies, releases, mail to non-customers, price/copy changes) is Approve-tier **permanently**: reputation damage is the existential risk for an agent-operated company, and one spammy autopost costs more than a year of approval clicks saves. Every action row is immutable and anchored to its `agent_instance_id`, same as the M8 audit posture.
+
+**M12 — sortie as the audited web gateway.** Planned. Agents need the web (research, competitor watch, registry submissions, link verification), and generic egress from agent containers is exactly what M7's default-deny networking exists to prevent. M12 resolves the tension by routing **all** agent web access through a sortie sidecar (github.com/garrison-hq/sortie — the company's own product) on the internal network, registered to agents via the M8 MCPJungle registry: `web_search` / `web_fetch` / `web_extract` / `run_agent` as MCP tools, no other egress path granted. Every fetch, search, and agent-browse lands in sortie's SQLite run history, which makes the audit log a _product feature we already shipped_ rather than new supervisor surface. Logged-in automation composes with the vault rules from M2.3: sortie's credential model (`{{cred:NAME}}` placeholders, substitution at type-time, model never sees values) means web credentials follow the same never-in-context discipline as every other secret. Strategic note: this milestone closes the dogfood loop — garrison's first company ships sortie, and sortie's go-to-market runs on garrison. That loop is the launch story for both products.
+
+**M13 — Multi-project companies (proposed, spec deferred until after dogfood week).** garrison-hq is the company; garrison and sortie (later: more) are **projects** under it. Tickets carry a `project_id`; departments, agents, workflows, and the approval queue are shared across projects — the project is an organizational umbrella for tickets, not a tenancy boundary. MemPalace already models this exactly (wings are projects sharing one palace), so the memory layer needs nothing; the ticket layer needs the schema column and dashboard/Analyst filtering. The load-bearing design problem is **per-project context injection**: an agent picking up a sortie ticket needs sortie's repo, conventions, and palace wing; a garrison ticket needs garrison's — the ticket → project → workspace/context mapping is the real spec, not the schema. Open questions parked for the spec: whether M8 concurrency/budget caps become per-(department, project) so a noisy project can't starve its siblings, and whether the M11 tier policy table gains a project dimension. Deliberately deferred: dogfood week runs single-project first, and the observed friction — what context was an agent missing when it picked up a ticket cold — writes this spec from evidence rather than speculation.
+
 > **Decision provenance for the target-state items above** (Supervisor↔Vault rather than Agent↔Vault, SkillHub at M7, MCPJungle at M8, workspace-sandbox tracked separately): `docs/architecture-reconciliation-2026-04-24.md`. That file is a frozen snapshot of the 2026-04-24 architecture session — kept as committed history, not edited. Any future architecture-reconciliation pass gets its own dated file (`docs/architecture-reconciliation-YYYY-MM-DD.md`) following the same shape.
 
 ---
@@ -616,6 +642,7 @@ Shipped implementation pointers, per thread: (1) **Tick loop + firing transactio
 Specs are produced with `specify-cli` (with Garrison-flavored `/garrison-*` slash commands layered on) and live in a dedicated `specs/` directory in the repo. Each milestone has one spec (sub-milestones get their own specs — `specs/003-m2-1-claude-invocation/`, `specs/004-m2-2-mempalace/`). Specs are scoped narrowly — the M1 spec covers the event bus and supervisor core only, not the full system. A 40-page monolithic spec is an antipattern; it produces paralysis rather than code.
 
 **What gets specified formally:**
+
 - Event bus contract (pg_notify channel names, payload shapes, who writes and who listens)
 - Database schema with constraints and the processed_at fallback pattern
 - Supervisor state machine and concurrency invariants
@@ -624,6 +651,7 @@ Specs are produced with `specify-cli` (with Garrison-flavored `/garrison-*` slas
 - Write contract for MemPalace (diary schema, KG triple conventions)
 
 **What doesn't get formally specified:**
+
 - Dashboard UI screens (iterate too fast; use design prompts instead)
 - Individual agent.md contents (prompts, not code — evolve empirically)
 - CEO conversational behavior (emerges from prompt + tools, not spec-able)
@@ -675,7 +703,7 @@ The UI is the product. Views to build across M3 and M4:
 
 ---
 
-## What this is *not*
+## What this is _not_
 
 - It is not a general orchestrator. Agents run Claude Code; that's the only runtime we care about supporting.
 - It is not a no-code tool. Agents are configured by markdown + YAML. Dashboards edit those, but the model is "config files as first-class data in a database," not "visual workflow builder."

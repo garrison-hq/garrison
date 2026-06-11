@@ -23,14 +23,12 @@ from the solution.
 Which milestone should this land in? See ARCHITECTURE.md
 §"Build plan — milestones" for the list.
 
-- [ ] M2 — first real agent loop
-- [ ] M3 — dashboard read-only
-- [ ] M4 — dashboard mutations
-- [ ] M5 — CEO chat (read-only)
-- [ ] M6 — CEO ticket decomposition + hygiene
-- [ ] M7 — hiring flow
-- [ ] M8 — agent-spawned tickets
-- [ ] Post-M8 / backlog
+- [ ] M10 — ingress connectors (email-in / Stripe / GitHub → tickets)
+- [ ] M11 — Action Broker (gated outbound external actions)
+- [ ] M12 — sortie as the audited web gateway
+- [ ] M13 — multi-project companies (proposed)
+- [ ] Post-M13 / backlog
+- [ ] Already-shipped area (M1–M9) — bug fixes / extensions
 
 If you're not sure, pick the earliest milestone where this becomes
 load-bearing, not the earliest it's technically possible.
