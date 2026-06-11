@@ -895,6 +895,46 @@ func TestBuildChatConfigGarrisonMutateEntryShape(t *testing.T) {
 	}
 }
 
+// TestBuildChatConfigSchedMinIntervalEnv (M9 review #3): a non-empty
+// SchedMinInterval rides the garrison-mutate entry's env as
+// GARRISON_SCHED_MIN_INTERVAL — the create_scheduled_task verb reads it
+// in the MCP subprocess to enforce the same FR-404 bound the
+// dashboardapi validate endpoint gets from config. Empty omits the var
+// (the verb's 15m-default fallback).
+func TestBuildChatConfigSchedMinIntervalEnv(t *testing.T) {
+	p := chatM53Params()
+	p.SchedMinInterval = "1h0m0s"
+	raw, err := BuildChatConfig(p)
+	if err != nil {
+		t.Fatalf("BuildChatConfig: %v", err)
+	}
+	var cfg chatConfigCfg
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	gm, ok := cfg.MCPServers["garrison-mutate"]
+	if !ok {
+		t.Fatalf("garrison-mutate entry missing; keys=%v", keys(cfg.MCPServers))
+	}
+	if gm.Env["GARRISON_SCHED_MIN_INTERVAL"] != "1h0m0s" {
+		t.Errorf("garrison-mutate.env.GARRISON_SCHED_MIN_INTERVAL = %q; want 1h0m0s", gm.Env["GARRISON_SCHED_MIN_INTERVAL"])
+	}
+
+	// Empty SchedMinInterval omits the var entirely.
+	p2 := chatM53Params()
+	raw2, err := BuildChatConfig(p2)
+	if err != nil {
+		t.Fatalf("BuildChatConfig (empty): %v", err)
+	}
+	var cfg2 chatConfigCfg
+	if err := json.Unmarshal(raw2, &cfg2); err != nil {
+		t.Fatalf("unmarshal (empty): %v", err)
+	}
+	if v, present := cfg2.MCPServers["garrison-mutate"].Env["GARRISON_SCHED_MIN_INTERVAL"]; present {
+		t.Errorf("GARRISON_SCHED_MIN_INTERVAL = %q; want omitted when unset", v)
+	}
+}
+
 // TestBuildChatConfigBackCompatTwoEntries verifies the M5.1 / M5.2
 // callers (which don't pass the M5.3 session-context fields) still get
 // the legacy two-entry shape. Lets the M5.3 mcpconfig change land

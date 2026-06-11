@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/garrison-hq/garrison/supervisor/internal/schedule"
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
@@ -273,5 +274,42 @@ func TestCreateScheduledTaskRejectsUnknownDepartment(t *testing.T) {
 	}
 	if n := auditOutcomeCount(t, fx, "validation_failed"); n != 1 {
 		t.Errorf("validation_failed audit rows = %d; want 1", n)
+	}
+}
+
+// TestCreateScheduledTaskMinIntervalEnvParity (M9 review #3): the verb
+// reads GARRISON_SCHED_MIN_INTERVAL from its own process env — the var
+// BuildChatConfig now plumbs onto the garrison-mutate MCP entry. With
+// the bound at 60m, an every@20m create must reject with
+// validation_failed carrying the EXACT detail the dashboardapi
+// /schedule/validate endpoint emits for the same config value (both
+// surfaces build the message through schedule.ValidationError with the
+// FR-404 wording, so equality here pins the parity).
+func TestCreateScheduledTaskMinIntervalEnvParity(t *testing.T) {
+	fx := setupIntegration(t)
+	t.Setenv("GARRISON_SCHED_MIN_INTERVAL", "60m")
+
+	r, err := realCreateScheduledTaskHandler(context.Background(), fx.deps, validScheduledTaskArgs("twenty-minute-probe", "every@20m"))
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if r.Success {
+		t.Fatal("every@20m under a 60m bound should be rejected")
+	}
+	if r.ErrorKind != string(ErrValidationFailed) {
+		t.Errorf("ErrorKind = %q; want %q", r.ErrorKind, ErrValidationFailed)
+	}
+
+	// The dashboardapi endpoint's rejection detail for the same config
+	// value (schedule_handler.go builds this identical ValidationError).
+	endpointDetail := (&schedule.ValidationError{
+		Field: "schedule_expr",
+		Msg:   fmt.Sprintf("effective interval %s is below the minimum firing interval %s (FR-404)", 20*time.Minute, 60*time.Minute),
+	}).Error()
+	if want := "create_scheduled_task: " + endpointDetail; r.Message != want {
+		t.Errorf("Message = %q; want %q (parity with /schedule/validate)", r.Message, want)
+	}
+	if n := scheduledTaskCount(t, fx); n != 0 {
+		t.Errorf("scheduled_tasks rows = %d; want 0", n)
 	}
 }

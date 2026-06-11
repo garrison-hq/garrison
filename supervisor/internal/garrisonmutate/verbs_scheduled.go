@@ -35,6 +35,16 @@ const verbCreateScheduledTask = "create_scheduled_task"
 // full supervisor config; it reads the same env var directly and falls
 // back to the same default, so both authoring surfaces (chat verb +
 // dashboardapi validate endpoint) enforce one bound (FR-404, FR-602).
+//
+// The env var reaches chat-mode subprocesses via the garrison-mutate
+// MCP entry mcpconfig.BuildChatConfig composes (M9 review #3 — the
+// chat container's own env never carries supervisor config). The
+// fallback stays load-bearing on purpose: agent-mode garrison-mutate
+// entries (mcpconfig.Render) deliberately do NOT carry the var —
+// create_scheduled_task rejects agent callers outright, so threading
+// the bound there would imply a surface that doesn't exist. A chat
+// deployment that predates the BuildChatConfig plumbing degrades to
+// the documented 15m default rather than failing the verb.
 const defaultSchedMinInterval = 15 * time.Minute
 
 // CreateScheduledTaskArgs is the JSON-encoded input shape for

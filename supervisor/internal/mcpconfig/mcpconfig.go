@@ -114,14 +114,25 @@ func BuildChatConfig(p ChatConfigParams) ([]byte, error) {
 		if p.ChatMessageID == "" {
 			return nil, errors.New("mcpconfig: BuildChatConfig: garrison-mutate requires ChatMessageID")
 		}
+		env := map[string]string{
+			"GARRISON_DATABASE_URL":    p.DatabaseURL,
+			"GARRISON_CHAT_SESSION_ID": p.ChatSessionID,
+			"GARRISON_CHAT_MESSAGE_ID": p.ChatMessageID,
+		}
+		// M9 review #3: the create_scheduled_task verb enforces the
+		// FR-404 min-interval bound inside the garrison-mutate
+		// subprocess, which reads GARRISON_SCHED_MIN_INTERVAL from its
+		// own env — the chat container's env doesn't carry the
+		// supervisor's config, so the bound must ride the MCP entry
+		// (the same way DATABASE_URL does). Empty omits the var; the
+		// verb falls back to the 15m default.
+		if p.SchedMinInterval != "" {
+			env["GARRISON_SCHED_MIN_INTERVAL"] = p.SchedMinInterval
+		}
 		servers[serverGarrisonMutate] = mcpServerSpec{
 			Command: p.SupervisorBin,
 			Args:    []string{"mcp", serverGarrisonMutate},
-			Env: map[string]string{
-				"GARRISON_DATABASE_URL":    p.DatabaseURL,
-				"GARRISON_CHAT_SESSION_ID": p.ChatSessionID,
-				"GARRISON_CHAT_MESSAGE_ID": p.ChatMessageID,
-			},
+			Env:     env,
 		}
 	}
 
@@ -167,6 +178,13 @@ type ChatConfigParams struct {
 	DatabaseURL   string
 	ChatSessionID string
 	ChatMessageID string
+	// SchedMinInterval is cfg.SchedMinInterval rendered as a Go
+	// duration string (e.g. "15m"). When non-empty it lands on the
+	// garrison-mutate entry's env as GARRISON_SCHED_MIN_INTERVAL so the
+	// create_scheduled_task verb enforces the same FR-404 bound the
+	// dashboardapi validate endpoint does (M9 review #3). Empty omits
+	// the var (the verb's documented 15m-default fallback applies).
+	SchedMinInterval string
 }
 
 func CheckExtraServers(extraServersJSON []byte) error {

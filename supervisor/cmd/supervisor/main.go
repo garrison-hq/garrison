@@ -483,6 +483,9 @@ func runDaemon() int {
 		MaxTicketsPerTurn: cfg.MaxTicketsPerTurn,
 		// M9 T012 — per-turn scheduled-task-creation ceiling.
 		MaxScheduledTasksPerTurn: cfg.MaxScheduledTasksPerTurn,
+		// M9 review #3 — FR-404 min-interval bound for the chat verb's
+		// garrison-mutate subprocess env.
+		SchedMinInterval: cfg.SchedMinInterval,
 	}
 	if err := chat.RunRestartSweep(ctx, chatDeps); err != nil {
 		logger.Warn("chat: restart sweep failed; continuing", "err", err)
