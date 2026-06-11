@@ -20,6 +20,7 @@ import (
 	"github.com/garrison-hq/garrison/supervisor/internal/agentcontainer"
 	"github.com/garrison-hq/garrison/supervisor/internal/agents"
 	"github.com/garrison-hq/garrison/supervisor/internal/concurrency"
+	"github.com/garrison-hq/garrison/supervisor/internal/finalize"
 	"github.com/garrison-hq/garrison/supervisor/internal/mcpconfig"
 	"github.com/garrison-hq/garrison/supervisor/internal/mempalace"
 	"github.com/garrison-hq/garrison/supervisor/internal/store"
@@ -1021,6 +1022,57 @@ func buildClaudeArgv(p argvParams) []string {
 		"--system-prompt", p.SystemPrompt,
 		"--permission-mode", "bypassPermissions",
 	}
+}
+
+// -----------------------------------------------------------------------
+// M9 T007: finalize-mode env seam (per-spawn MCP-config builder)
+// -----------------------------------------------------------------------
+
+// Env var names the finalize MCP entry carries in oneshot mode
+// (consumed by cmd/supervisor/mcp_finalize.go). Ticket-mode configs
+// never carry them — GARRISON_FINALIZE_MODE defaults to "ticket" in
+// runMCPFinalize, so the ticket-path config bytes stay byte-for-byte
+// unchanged (FR-302).
+const (
+	envFinalizeMode   = "GARRISON_FINALIZE_MODE"
+	envScheduledRunID = "GARRISON_SCHEDULED_RUN_ID"
+)
+
+// injectOneshotFinalizeEnv is the finalize-mode env seam in the
+// per-spawn MCP-config builder (M9 plan §2 step 4): it post-processes a
+// config rendered by mcpconfig.Render, adding GARRISON_FINALIZE_MODE=
+// oneshot + GARRISON_SCHEDULED_RUN_ID=<run-id> to the existing
+// `finalize` entry's env. Post-render injection keeps mcpconfig's
+// sealed entry set untouched — the seam can only annotate the finalize
+// entry that Render already emitted (and Rule 3 already checked), never
+// add a server. The ticket spawn paths never call it.
+func injectOneshotFinalizeEnv(cfgBytes []byte, scheduledRunID string) ([]byte, error) {
+	type serverSpec struct {
+		Command string            `json:"command"`
+		Args    []string          `json:"args,omitempty"`
+		Env     map[string]string `json:"env,omitempty"`
+	}
+	var cfg struct {
+		MCPServers map[string]serverSpec `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(cfgBytes, &cfg); err != nil {
+		return nil, fmt.Errorf("spawn: parse rendered MCP config for finalize-mode env: %w", err)
+	}
+	entry, ok := cfg.MCPServers["finalize"]
+	if !ok {
+		return nil, errors.New("spawn: rendered MCP config carries no finalize entry; oneshot spawns require one")
+	}
+	if entry.Env == nil {
+		entry.Env = map[string]string{}
+	}
+	entry.Env[envFinalizeMode] = finalize.ModeOneshot
+	entry.Env[envScheduledRunID] = scheduledRunID
+	cfg.MCPServers["finalize"] = entry
+	out, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("spawn: re-marshal MCP config with finalize-mode env: %w", err)
+	}
+	return out, nil
 }
 
 // appendSecretEnv appends NAME=value pairs for every fetched vault secret
