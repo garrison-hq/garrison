@@ -452,6 +452,206 @@ func TestTickOnceCorruptExprLogsAndSkips(t *testing.T) {
 }
 
 // -----------------------------------------------------------------------
+// M9 T017 — recovery collapse + pause/resume + zero idle
+// -----------------------------------------------------------------------
+
+func TestRecoveryCollapseFiresOnce(t *testing.T) {
+	pool := testdb.Start(t)
+	deptID := testdb.SeedM21(t, t.TempDir())
+	q := store.New(pool)
+	ctx := context.Background()
+	now := fixedNow()
+
+	// Supervisor "down" across three hourly slots: next_fire_at sits
+	// three intervals in the past (-3h; the -2h and -1h slots were
+	// never written — the row only ever carries the earliest due slot).
+	task := seedScheduledTask(t, q, deptID, "hourly-probe", ModeTicket, "every@1h", now.Add(-3*time.Hour))
+
+	fired, skipped, deferred, err := tickOnce(ctx, tickDeps(pool, discardLogger(), now))
+	if err != nil {
+		t.Fatalf("tickOnce: %v", err)
+	}
+	if fired != 1 || skipped != 0 || deferred != 0 {
+		t.Fatalf("tickOnce = (fired=%d, skipped=%d, deferred=%d), want (1, 0, 0)", fired, skipped, deferred)
+	}
+
+	// Exactly one run for three missed slots — collapse, not backfill
+	// (FR-104). The single run is anchored to the claimed (earliest
+	// missed) slot.
+	runs := listRuns(t, pool, task.ID)
+	if len(runs) != 1 {
+		t.Fatalf("run rows = %d, want exactly 1 (no backfill, FR-104)", len(runs))
+	}
+	if runs[0].Outcome != OutcomeFired {
+		t.Fatalf("run outcome = %q, want %q", runs[0].Outcome, OutcomeFired)
+	}
+	if !runs[0].SlotAt.Time.Equal(now.Add(-3 * time.Hour)) {
+		t.Fatalf("run slot_at = %v, want the claimed slot %v", runs[0].SlotAt.Time, now.Add(-3*time.Hour))
+	}
+
+	// One firing means one ticket — intermediate slots produced nothing.
+	if n := countRows(t, pool, `SELECT COUNT(*) FROM tickets WHERE department_id = $1`, deptID); n != 1 {
+		t.Fatalf("tickets = %d, want exactly 1 (no backfill, FR-104)", n)
+	}
+
+	// Advanced to the single next future slot computed from now, not
+	// to any of the stale intermediate slots.
+	expr, err := Parse(task.ScheduleExpr)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	reread := rereadTask(t, pool, task.ID)
+	if !reread.NextFireAt.Time.Equal(expr.Next(now)) {
+		t.Fatalf("next_fire_at = %v, want the single future slot %v", reread.NextFireAt.Time, expr.Next(now))
+	}
+	if !reread.NextFireAt.Time.After(now) {
+		t.Fatalf("next_fire_at = %v, want strictly future of %v", reread.NextFireAt.Time, now)
+	}
+
+	// A follow-up tick at the same instant finds nothing due: the
+	// collapse consumed every missed slot in one firing.
+	fired, skipped, deferred, err = tickOnce(ctx, tickDeps(pool, discardLogger(), now))
+	if err != nil {
+		t.Fatalf("second tickOnce: %v", err)
+	}
+	if fired+skipped+deferred != 0 {
+		t.Fatalf("second tickOnce = (fired=%d, skipped=%d, deferred=%d), want all zero", fired, skipped, deferred)
+	}
+	if n := len(listRuns(t, pool, task.ID)); n != 1 {
+		t.Fatalf("run rows after follow-up tick = %d, want still 1", n)
+	}
+}
+
+func TestPauseResumeAdvanceOnly(t *testing.T) {
+	pool := testdb.Start(t)
+	deptID := testdb.SeedM21(t, t.TempDir())
+	q := store.New(pool)
+	ctx := context.Background()
+	now := fixedNow()
+
+	// Paused across two daily slots: next_fire_at two days stale.
+	task := seedScheduledTask(t, q, deptID, "daily-digest", ModeTicket, "daily@09:00", now.Add(-48*time.Hour))
+	if _, err := pool.Exec(ctx, `UPDATE scheduled_tasks SET paused = TRUE WHERE id = $1`, task.ID); err != nil {
+		t.Fatalf("pause task: %v", err)
+	}
+
+	// Ticks during the pause claim nothing and record nothing — pausing
+	// stops firings without recording missed slots (FR-106).
+	for i := 0; i < 2; i++ {
+		fired, skipped, deferred, err := tickOnce(ctx, tickDeps(pool, discardLogger(), now))
+		if err != nil {
+			t.Fatalf("paused tickOnce %d: %v", i, err)
+		}
+		if fired+skipped+deferred != 0 {
+			t.Fatalf("paused tickOnce %d = (fired=%d, skipped=%d, deferred=%d), want all zero", i, fired, skipped, deferred)
+		}
+	}
+	if n := len(listRuns(t, pool, task.ID)); n != 0 {
+		t.Fatalf("run rows during pause = %d, want 0 (FR-106: no missed-slot records)", n)
+	}
+
+	// Resume with the FR-106 advance-only recompute — the same
+	// next-future-slot computation the dashboard resume action obtains
+	// from POST /schedule/validate. The two stale slots are dropped.
+	expr, err := Parse(task.ScheduleExpr)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	resumedNext := expr.Next(now)
+	if _, err := pool.Exec(ctx,
+		`UPDATE scheduled_tasks SET paused = FALSE, next_fire_at = $1 WHERE id = $2`,
+		resumedNext, task.ID,
+	); err != nil {
+		t.Fatalf("resume task: %v", err)
+	}
+
+	// Post-resume tick: nothing due, no catch-up firing for the slots
+	// missed while paused.
+	fired, skipped, deferred, err := tickOnce(ctx, tickDeps(pool, discardLogger(), now))
+	if err != nil {
+		t.Fatalf("post-resume tickOnce: %v", err)
+	}
+	if fired+skipped+deferred != 0 {
+		t.Fatalf("post-resume tickOnce = (fired=%d, skipped=%d, deferred=%d), want all zero (no catch-up, FR-106)", fired, skipped, deferred)
+	}
+	if n := len(listRuns(t, pool, task.ID)); n != 0 {
+		t.Fatalf("run rows after resume = %d, want 0", n)
+	}
+	if n := countRows(t, pool, `SELECT COUNT(*) FROM tickets WHERE department_id = $1`, deptID); n != 0 {
+		t.Fatalf("tickets after resume = %d, want 0", n)
+	}
+
+	// next_fire_at is future-only; nothing fired, so last_fired_at
+	// stays NULL (FR-107).
+	reread := rereadTask(t, pool, task.ID)
+	if !reread.NextFireAt.Time.Equal(resumedNext) {
+		t.Fatalf("next_fire_at = %v, want the resumed future slot %v", reread.NextFireAt.Time, resumedNext)
+	}
+	if !reread.NextFireAt.Time.After(now) {
+		t.Fatalf("next_fire_at = %v, want strictly future of %v", reread.NextFireAt.Time, now)
+	}
+	if reread.Paused {
+		t.Fatal("task still paused after resume")
+	}
+	if reread.LastFiredAt.Valid {
+		t.Fatalf("last_fired_at = %v, want NULL (no slot ever fired)", reread.LastFiredAt.Time)
+	}
+}
+
+func TestZeroIdleCost(t *testing.T) {
+	pool := testdb.Start(t)
+	deptID := testdb.SeedM21(t, t.TempDir())
+	q := store.New(pool)
+	ctx := context.Background()
+	now := fixedNow()
+
+	// Tasks exist in both modes but none are due — the steady idle
+	// state between slots (SC-008 proxy).
+	ticketTask := seedScheduledTask(t, q, deptID, "future-digest", ModeTicket, "daily@09:00", now.Add(time.Hour))
+	oneshotTask := seedScheduledTask(t, q, deptID, "future-probe", ModeOneshot, "every@30m", now.Add(30*time.Minute))
+
+	const nTicks = 5
+	for i := 0; i < nTicks; i++ {
+		fired, skipped, deferred, err := tickOnce(ctx, tickDeps(pool, discardLogger(), now))
+		if err != nil {
+			t.Fatalf("idle tickOnce %d: %v", i, err)
+		}
+		if fired+skipped+deferred != 0 {
+			t.Fatalf("idle tickOnce %d = (fired=%d, skipped=%d, deferred=%d), want all zero (FR-109)", i, fired, skipped, deferred)
+		}
+	}
+
+	// Zero runs, zero instances — and nothing queued that would spawn
+	// later: no tickets, no oneshot-due outbox rows.
+	if n := countRows(t, pool, `SELECT COUNT(*) FROM scheduled_task_runs`); n != 0 {
+		t.Fatalf("scheduled_task_runs = %d, want 0 after %d idle ticks", n, nTicks)
+	}
+	if n := countRows(t, pool, `SELECT COUNT(*) FROM agent_instances`); n != 0 {
+		t.Fatalf("agent_instances = %d, want 0 after %d idle ticks", n, nTicks)
+	}
+	if n := countRows(t, pool, `SELECT COUNT(*) FROM tickets WHERE department_id = $1`, deptID); n != 0 {
+		t.Fatalf("tickets = %d, want 0 after %d idle ticks", n, nTicks)
+	}
+	if n := countRows(t, pool, `SELECT COUNT(*) FROM event_outbox WHERE channel = $1`, ChannelOneshotDue); n != 0 {
+		t.Fatalf("oneshot outbox rows = %d, want 0 after %d idle ticks", n, nTicks)
+	}
+
+	// The idle ticks touched neither task's slot.
+	for _, tc := range []struct {
+		task store.ScheduledTask
+		due  time.Time
+	}{
+		{ticketTask, now.Add(time.Hour)},
+		{oneshotTask, now.Add(30 * time.Minute)},
+	} {
+		reread := rereadTask(t, pool, tc.task.ID)
+		if !reread.NextFireAt.Time.Equal(tc.due) {
+			t.Fatalf("task %q next_fire_at = %v, want untouched %v", tc.task.Name, reread.NextFireAt.Time, tc.due)
+		}
+	}
+}
+
+// -----------------------------------------------------------------------
 // M9 T016 — golden-path suite bridge
 // -----------------------------------------------------------------------
 
