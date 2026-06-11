@@ -58,6 +58,10 @@ var allEnvVars = []string{
 	"GARRISON_AGENTS_NETWORK",
 	"GARRISON_EGRESS_PROXY_URL",
 	"GARRISON_USE_DIRECT_EXEC",
+	// M9 additions
+	"GARRISON_SCHED_TICK_INTERVAL",
+	"GARRISON_SCHED_MIN_INTERVAL",
+	"GARRISON_CHAT_MAX_SCHEDULED_TASKS_PER_TURN",
 }
 
 // clearAll unsets every GARRISON_* env var the config package reads, so a test
@@ -1029,4 +1033,92 @@ func TestM8MCPJungleEnvVarsOverride(t *testing.T) {
 	if cfg.MCPJungleAdminTokenPath != "ops/mcpjungle/admin" {
 		t.Errorf("MCPJungleAdminTokenPath = %q; want override", cfg.MCPJungleAdminTokenPath)
 	}
+}
+
+// TestConfigSchedDefaults — with no M9 env vars set, the schedule knobs
+// carry their documented defaults: tick 30s, min interval 15m, per-turn
+// creation ceiling 3 (M9 plan decision 12).
+func TestConfigSchedDefaults(t *testing.T) {
+	clearAll(t)
+	t.Setenv("GARRISON_DATABASE_URL", validDBURL)
+	t.Setenv("GARRISON_FAKE_AGENT_CMD", validFakeCmd)
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.SchedTickInterval != 30*time.Second {
+		t.Errorf("SchedTickInterval = %v; want 30s", cfg.SchedTickInterval)
+	}
+	if cfg.SchedMinInterval != 15*time.Minute {
+		t.Errorf("SchedMinInterval = %v; want 15m", cfg.SchedMinInterval)
+	}
+	if cfg.MaxScheduledTasksPerTurn != 3 {
+		t.Errorf("MaxScheduledTasksPerTurn = %d; want 3", cfg.MaxScheduledTasksPerTurn)
+	}
+}
+
+// TestConfigSchedOverrides — every M9 env var is honoured when set to a
+// valid value.
+func TestConfigSchedOverrides(t *testing.T) {
+	clearAll(t)
+	t.Setenv("GARRISON_DATABASE_URL", validDBURL)
+	t.Setenv("GARRISON_FAKE_AGENT_CMD", validFakeCmd)
+	t.Setenv("GARRISON_SCHED_TICK_INTERVAL", "10s")
+	t.Setenv("GARRISON_SCHED_MIN_INTERVAL", "5m")
+	t.Setenv("GARRISON_CHAT_MAX_SCHEDULED_TASKS_PER_TURN", "7")
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.SchedTickInterval != 10*time.Second {
+		t.Errorf("SchedTickInterval = %v; want 10s", cfg.SchedTickInterval)
+	}
+	if cfg.SchedMinInterval != 5*time.Minute {
+		t.Errorf("SchedMinInterval = %v; want 5m", cfg.SchedMinInterval)
+	}
+	if cfg.MaxScheduledTasksPerTurn != 7 {
+		t.Errorf("MaxScheduledTasksPerTurn = %d; want 7", cfg.MaxScheduledTasksPerTurn)
+	}
+}
+
+// TestConfigSchedRejectsZeroTick — tick intervals below the 1s floor are
+// rejected at startup ("0s", "500ms", and negatives all fail Load).
+func TestConfigSchedRejectsZeroTick(t *testing.T) {
+	for _, v := range []string{"0s", "500ms", "-5s"} {
+		t.Run("v="+v, func(t *testing.T) {
+			clearAll(t)
+			t.Setenv("GARRISON_DATABASE_URL", validDBURL)
+			t.Setenv("GARRISON_FAKE_AGENT_CMD", validFakeCmd)
+			t.Setenv("GARRISON_SCHED_TICK_INTERVAL", v)
+			if _, err := config.Load(); err == nil {
+				t.Errorf("expected error for tick interval %q", v)
+			}
+		})
+	}
+}
+
+// TestConfigSchedRejectsZeroCeiling — a per-turn creation ceiling below 1
+// is rejected; also covers the min-interval <= 0 rejection in the same
+// startup-validation family.
+func TestConfigSchedRejectsZeroCeiling(t *testing.T) {
+	for _, v := range []string{"0", "-1"} {
+		t.Run("ceiling="+v, func(t *testing.T) {
+			clearAll(t)
+			t.Setenv("GARRISON_DATABASE_URL", validDBURL)
+			t.Setenv("GARRISON_FAKE_AGENT_CMD", validFakeCmd)
+			t.Setenv("GARRISON_CHAT_MAX_SCHEDULED_TASKS_PER_TURN", v)
+			if _, err := config.Load(); err == nil {
+				t.Errorf("expected error for ceiling %q", v)
+			}
+		})
+	}
+	t.Run("minInterval=0s", func(t *testing.T) {
+		clearAll(t)
+		t.Setenv("GARRISON_DATABASE_URL", validDBURL)
+		t.Setenv("GARRISON_FAKE_AGENT_CMD", validFakeCmd)
+		t.Setenv("GARRISON_SCHED_MIN_INTERVAL", "0s")
+		if _, err := config.Load(); err == nil {
+			t.Error("expected error for min interval 0s")
+		}
+	})
 }
