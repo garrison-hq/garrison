@@ -2,7 +2,7 @@
 // Run `bun run drizzle:pull` to regenerate.
 // Source: goose-managed migrations under ../../migrations/.
 
-import { pgTable, integer, bigint, boolean, timestamp, index, uuid, text, jsonb, type AnyPgColumn, foreignKey, numeric, check, unique, uniqueIndex, smallint, primaryKey, interval } from "drizzle-orm/pg-core"
+import { pgTable, integer, bigint, boolean, timestamp, index, uuid, text, jsonb, type AnyPgColumn, foreignKey, check, numeric, unique, uniqueIndex, smallint, primaryKey, interval } from "drizzle-orm/pg-core"
 import { sql } from "drizzle-orm"
 
 
@@ -28,7 +28,7 @@ export const eventOutbox = pgTable("event_outbox", {
 export const agentInstances = pgTable("agent_instances", {
 	id: uuid().defaultRandom().primaryKey().notNull(),
 	departmentId: uuid("department_id").notNull(),
-	ticketId: uuid("ticket_id").notNull(),
+	ticketId: uuid("ticket_id"),
 	pid: integer(),
 	startedAt: timestamp("started_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
 	finishedAt: timestamp("finished_at", { withTimezone: true, mode: 'string' }),
@@ -41,6 +41,7 @@ export const agentInstances = pgTable("agent_instances", {
 	preambleHash: text("preamble_hash").default("").notNull(),
 	claudeMdHash: text("claude_md_hash"),
 	originatingAuditId: uuid("originating_audit_id"),
+	scheduledTaskRunId: uuid("scheduled_task_run_id"),
 }, (table) => [
 	index("idx_agent_instances_running").using("btree", table.departmentId.asc().nullsLast().op("uuid_ops")).where(sql`(status = 'running'::text)`),
 	foreignKey({
@@ -58,6 +59,12 @@ export const agentInstances = pgTable("agent_instances", {
 			foreignColumns: [chatMutationAudit.id],
 			name: "agent_instances_originating_audit_id_fkey"
 		}).onDelete("set null"),
+	foreignKey({
+			columns: [table.scheduledTaskRunId],
+			foreignColumns: [scheduledTaskRuns.id],
+			name: "agent_instances_scheduled_task_run_id_fkey"
+		}),
+	check("agent_instances_exactly_one_origin", sql`(((ticket_id IS NOT NULL))::integer + ((scheduled_task_run_id IS NOT NULL))::integer) = 1`),
 ]);
 
 export const tickets = pgTable("tickets", {
@@ -345,6 +352,25 @@ export const agentContainerEvents = pgTable("agent_container_events", {
 	check("agent_container_events_kind_check", sql`kind = ANY (ARRAY['created'::text, 'started'::text, 'stopped'::text, 'removed'::text, 'migrated'::text, 'oom_killed'::text, 'crashed'::text, 'image_digest_drift_detected'::text, 'reconciled_on_supervisor_restart'::text])`),
 ]);
 
+export const agentInstallJournal = pgTable("agent_install_journal", {
+	id: uuid().defaultRandom().primaryKey().notNull(),
+	proposalId: uuid("proposal_id").notNull(),
+	step: text().notNull(),
+	outcome: text().notNull(),
+	errorKind: text("error_kind"),
+	payloadJsonb: jsonb("payload_jsonb").default({}).notNull(),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+}, (table) => [
+	index("idx_agent_install_journal_proposal_created").using("btree", table.proposalId.asc().nullsLast().op("timestamptz_ops"), table.createdAt.desc().nullsFirst().op("timestamptz_ops")),
+	foreignKey({
+			columns: [table.proposalId],
+			foreignColumns: [hiringProposals.id],
+			name: "agent_install_journal_proposal_id_fkey"
+		}).onDelete("cascade"),
+	check("agent_install_journal_outcome_check", sql`outcome = ANY (ARRAY['success'::text, 'failed'::text, 'interrupted'::text])`),
+	check("agent_install_journal_step_check", sql`step = ANY (ARRAY['download'::text, 'verify_digest'::text, 'extract'::text, 'mount'::text, 'container_create'::text, 'container_start'::text, 'mcpjungle_client_create'::text, 'mcpjungle_allowlist_apply'::text])`),
+]);
+
 export const chatMutationAudit = pgTable("chat_mutation_audit", {
 	id: uuid().defaultRandom().primaryKey().notNull(),
 	chatSessionId: uuid("chat_session_id"),
@@ -379,9 +405,9 @@ export const chatMutationAudit = pgTable("chat_mutation_audit", {
 	// declaration Drizzle's inference can't unwind. Joins from the
 	// dashboard side use the column reference directly.
 	check("chat_mutation_audit_reversibility_class_check", sql`reversibility_class = ANY (ARRAY[1, 2, 3])`),
-	check("chat_mutation_audit_affected_resource_type_check", sql`affected_resource_type = ANY (ARRAY['ticket'::text, 'agent_role'::text, 'hiring_proposal'::text])`),
-	check("chat_mutation_audit_verb_check", sql`verb = ANY (ARRAY['create_ticket'::text, 'edit_ticket'::text, 'transition_ticket'::text, 'pause_agent'::text, 'resume_agent'::text, 'spawn_agent'::text, 'edit_agent_config'::text, 'propose_hire'::text, 'propose_skill_change'::text, 'bump_skill_version'::text, 'approve_hire'::text, 'reject_hire'::text, 'approve_skill_change'::text, 'reject_skill_change'::text, 'approve_version_bump'::text, 'reject_version_bump'::text, 'update_agent_md'::text, 'grandfathered_at_m7'::text, 'register_mcp_server'::text])`),
-	check("chat_mutation_audit_outcome_check", sql`outcome = ANY (ARRAY['success'::text, 'validation_failed'::text, 'leak_scan_failed'::text, 'ticket_state_changed'::text, 'concurrency_cap_full'::text, 'invalid_transition'::text, 'resource_not_found'::text, 'tool_call_ceiling_reached'::text, 'dept_weekly_ticket_budget_exceeded'::text])`),
+	check("chat_mutation_audit_verb_check", sql`verb = ANY (ARRAY['create_ticket'::text, 'edit_ticket'::text, 'transition_ticket'::text, 'pause_agent'::text, 'resume_agent'::text, 'spawn_agent'::text, 'edit_agent_config'::text, 'propose_hire'::text, 'propose_skill_change'::text, 'bump_skill_version'::text, 'approve_hire'::text, 'reject_hire'::text, 'approve_skill_change'::text, 'reject_skill_change'::text, 'approve_version_bump'::text, 'reject_version_bump'::text, 'update_agent_md'::text, 'grandfathered_at_m7'::text, 'register_mcp_server'::text, 'create_scheduled_task'::text, 'edit_scheduled_task'::text, 'pause_scheduled_task'::text, 'resume_scheduled_task'::text, 'delete_scheduled_task'::text])`),
+	check("chat_mutation_audit_outcome_check", sql`outcome = ANY (ARRAY['success'::text, 'validation_failed'::text, 'leak_scan_failed'::text, 'ticket_state_changed'::text, 'concurrency_cap_full'::text, 'invalid_transition'::text, 'resource_not_found'::text, 'tool_call_ceiling_reached'::text, 'dept_weekly_ticket_budget_exceeded'::text, 'failed'::text, 'scheduled_task_creation_ceiling_reached'::text])`),
+	check("chat_mutation_audit_affected_resource_type_check", sql`(affected_resource_type IS NULL) OR (affected_resource_type = ANY (ARRAY['ticket'::text, 'agent_role'::text, 'hiring_proposal'::text, 'mcp_server'::text, 'scheduled_task'::text]))`),
 ]);
 
 export const companies = pgTable("companies", {
@@ -393,25 +419,6 @@ export const companies = pgTable("companies", {
 	customerSlug: text("customer_slug").default('garrison').notNull(),
 }, (table) => [
 	unique("companies_customer_slug_unique").on(table.customerSlug),
-]);
-
-export const agentInstallJournal = pgTable("agent_install_journal", {
-	id: uuid().defaultRandom().primaryKey().notNull(),
-	proposalId: uuid("proposal_id").notNull(),
-	step: text().notNull(),
-	outcome: text().notNull(),
-	errorKind: text("error_kind"),
-	payloadJsonb: jsonb("payload_jsonb").default({}).notNull(),
-	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-}, (table) => [
-	index("idx_agent_install_journal_proposal_created").using("btree", table.proposalId.asc().nullsLast().op("timestamptz_ops"), table.createdAt.desc().nullsFirst().op("timestamptz_ops")),
-	foreignKey({
-			columns: [table.proposalId],
-			foreignColumns: [hiringProposals.id],
-			name: "agent_install_journal_proposal_id_fkey"
-		}).onDelete("cascade"),
-	check("agent_install_journal_outcome_check", sql`outcome = ANY (ARRAY['success'::text, 'failed'::text, 'interrupted'::text])`),
-	check("agent_install_journal_step_check", sql`step = ANY (ARRAY['download'::text, 'verify_digest'::text, 'extract'::text, 'mount'::text, 'container_create'::text, 'container_start'::text, 'mcpjungle_client_create'::text, 'mcpjungle_allowlist_apply'::text])`),
 ]);
 
 export const mcpServers = pgTable("mcp_servers", {
@@ -437,6 +444,66 @@ export const mcpServers = pgTable("mcp_servers", {
 	unique("mcp_servers_customer_slug_name_key").on(table.customerSlug, table.name),
 	check("mcp_servers_transport_check", sql`transport = ANY (ARRAY['http'::text, 'stdio'::text, 'sse'::text])`),
 	check("mcp_servers_status_check", sql`status = ANY (ARRAY['pending'::text, 'registered'::text, 'failed'::text, 'deregistered'::text])`),
+]);
+
+export const scheduledTasks = pgTable("scheduled_tasks", {
+	id: uuid().defaultRandom().primaryKey().notNull(),
+	name: text().notNull(),
+	departmentId: uuid("department_id").notNull(),
+	roleSlug: text("role_slug").notNull(),
+	mode: text().notNull(),
+	scheduleExpr: text("schedule_expr").notNull(),
+	nextFireAt: timestamp("next_fire_at", { withTimezone: true, mode: 'string' }).notNull(),
+	objectiveTemplate: text("objective_template").notNull(),
+	acceptanceCriteriaTemplate: text("acceptance_criteria_template").notNull(),
+	paused: boolean().default(false).notNull(),
+	deletedAt: timestamp("deleted_at", { withTimezone: true, mode: 'string' }),
+	lastFiredAt: timestamp("last_fired_at", { withTimezone: true, mode: 'string' }),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	updatedAt: timestamp("updated_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+}, (table) => [
+	index("idx_scheduled_tasks_due").using("btree", table.nextFireAt.asc().nullsLast().op("timestamptz_ops")).where(sql`((NOT paused) AND (deleted_at IS NULL))`),
+	uniqueIndex("idx_scheduled_tasks_name_live").using("btree", table.name.asc().nullsLast().op("text_ops")).where(sql`(deleted_at IS NULL)`),
+	foreignKey({
+			columns: [table.departmentId],
+			foreignColumns: [departments.id],
+			name: "scheduled_tasks_department_id_fkey"
+		}),
+	check("scheduled_tasks_mode_check", sql`mode = ANY (ARRAY['ticket'::text, 'oneshot'::text])`),
+	check("scheduled_tasks_objective_template_check", sql`length(objective_template) > 0`),
+	check("scheduled_tasks_acceptance_criteria_template_check", sql`length(acceptance_criteria_template) > 0`),
+]);
+
+export const scheduledTaskRuns = pgTable("scheduled_task_runs", {
+	id: uuid().defaultRandom().primaryKey().notNull(),
+	scheduledTaskId: uuid("scheduled_task_id").notNull(),
+	slotAt: timestamp("slot_at", { withTimezone: true, mode: 'string' }).notNull(),
+	firedAt: timestamp("fired_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	outcome: text().notNull(),
+	detail: text(),
+	ticketId: uuid("ticket_id"),
+	agentInstanceId: uuid("agent_instance_id"),
+	structuredOutcome: jsonb("structured_outcome"),
+}, (table) => [
+	index("idx_scheduled_task_runs_task").using("btree", table.scheduledTaskId.asc().nullsLast().op("timestamptz_ops"), table.firedAt.desc().nullsFirst().op("timestamptz_ops")),
+	foreignKey({
+			columns: [table.scheduledTaskId],
+			foreignColumns: [scheduledTasks.id],
+			name: "scheduled_task_runs_scheduled_task_id_fkey"
+		}),
+	foreignKey({
+			columns: [table.ticketId],
+			foreignColumns: [tickets.id],
+			name: "scheduled_task_runs_ticket_id_fkey"
+		}),
+	// scheduled_task_runs.agent_instance_id → agent_instances.id FK is
+	// enforced by the DB (M9 migration) but not declared here because
+	// the back-reference (agent_instances.scheduled_task_run_id →
+	// scheduled_task_runs.id) creates a TypeScript-level circular
+	// declaration Drizzle's inference can't unwind — same shape as the
+	// chat_mutation_audit ↔ agent_instances cycle above. Joins from the
+	// dashboard side use the column reference directly.
+	check("scheduled_task_runs_outcome_check", sql`outcome = ANY (ARRAY['fired'::text, 'skipped_overlap'::text, 'gate_deferred'::text, 'failed'::text])`),
 ]);
 
 export const secretMetadata = pgTable("secret_metadata", {
