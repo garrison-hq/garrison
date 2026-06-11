@@ -170,66 +170,21 @@ func runRealClaudeViaContainer(ctx context.Context, deps Deps, in containerRunIn
 	// reference the bind-mounted supervisor binary; DSNs are identical
 	// to direct-exec (FR-010: trust model unchanged). Rule 3 runs
 	// inside Render regardless of mode.
-	cfgBytes, _, err := mcpconfig.Render(mcpconfig.WriteParams{
-		InstanceID:    in.InstanceID,
-		SupervisorBin: containerSupervisorBin,
-		DSN:           deps.AgentRODSN,
-		Finalize: mcpconfig.FinalizeParams{
-			SupervisorBin:   containerSupervisorBin,
-			AgentInstanceID: instanceIDText,
-			DatabaseURL:     deps.AgentRODSN,
-		},
-		GarrisonMutate: mcpconfig.GarrisonMutateParams{
-			SupervisorBin:   containerSupervisorBin,
-			AgentInstanceID: instanceIDText,
-			DatabaseURL:     deps.DatabaseURL,
-		},
-		ExtraServersJSON: in.Agent.McpConfig,
-		OmitMempalace:    true,
-	})
-	if err != nil {
-		if errors.Is(err, mcpconfig.ErrVaultMCPBanned) {
-			logger.Error("mcpconfig.Render: Rule 3 violation — vault-pattern MCP server", "err", err)
-			return writeContainerFail(ctx, deps, in, ExitVaultMCPInConfig, false)
-		}
-		logger.Error("mcpconfig.Render failed; recording spawn_failed", "err", err)
-		return writeContainerFail(ctx, deps, in, ExitSpawnFailed, false)
+	cfgBytes, renderFailReason := renderContainerMCPConfig(deps, in, instanceIDText, logger)
+	if renderFailReason != "" {
+		return writeContainerFail(ctx, deps, in, renderFailReason, false)
 	}
 	mcpPath := containerMCPDir + "/mcp-" + instanceIDText + ".json"
 
-	// Step 3: config-write exec (plan D15, operator-approved). The
-	// rendered bytes transit the exec-create Env exactly like the
-	// secrets do; the shell writes them onto the /tmp tmpfs with 0600
-	// perms. Non-zero exit or transport error → spawn_failed, the same
-	// contract as the host-side mcpconfig.Write failure — except a
-	// missing/stopped container, which stays retryable (FR-019: the
-	// boot reconciler is the repair path).
-	writeCtx, writeCancel := context.WithTimeout(ctx, helperExecTimeout)
-	code, werr := runHelperExec(writeCtx, deps.AgentContainer, name, agentcontainer.ExecSpec{
-		Cmd: []string{"/bin/sh", "-c", fmt.Sprintf("umask 077; printf %%s \"$%s\" > %s", mcpConfigEnvVar, mcpPath)},
-		Env: []string{mcpConfigEnvVar + "=" + string(cfgBytes)},
-	})
-	writeCancel()
-	if werr != nil || code != 0 {
-		logger.Error("container MCP-config write exec failed; recording spawn_failed",
-			"exit_code", code, "err", werr)
-		return writeContainerFail(ctx, deps, in, ExitSpawnFailed, errors.Is(werr, agentcontainer.ErrContainerNotFound))
+	// Step 3: config-write exec (plan D15, operator-approved).
+	if ok, retryable := writeContainerMCPConfig(ctx, deps, name, mcpPath, cfgBytes, logger); !ok {
+		return writeContainerFail(ctx, deps, in, ExitSpawnFailed, retryable)
 	}
 
 	// Step 4: deferred cleanup exec on every exit path — success, bail,
 	// and error paths all converge here (mirrors the host-side
-	// mcpconfig.Remove defer). Best-effort: the file lives on tmpfs and
-	// dies with the container, so a failed rm only warns.
-	defer func() {
-		cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), helperExecTimeout)
-		defer cleanupCancel()
-		if rmCode, rmErr := runHelperExec(cleanupCtx, deps.AgentContainer, name, agentcontainer.ExecSpec{
-			Cmd: []string{"/bin/rm", "-f", mcpPath},
-		}); rmErr != nil || rmCode != 0 {
-			logger.Warn("container MCP-config cleanup exec failed; tmpfs file dies with the container",
-				"exit_code", rmCode, "err", rmErr)
-		}
-	}()
+	// mcpconfig.Remove defer).
+	defer cleanupContainerMCPConfig(ctx, deps, name, mcpPath, logger)
 
 	// Step 5: shared argv (FR-013 — TestContainerArgvMatchesDirectExecFlagSet
 	// pins parity with direct-exec; only the --mcp-config path differs)
@@ -294,16 +249,7 @@ func runRealClaudeViaContainer(ctx context.Context, deps Deps, in containerRunIn
 	// lands in timeout. The goroutine ends with the session either way.
 	sessionDone := make(chan struct{})
 	defer close(sessionDone)
-	go func() {
-		select {
-		case <-execCtx.Done():
-			if errors.Is(execCtx.Err(), context.DeadlineExceeded) {
-				logger.Warn("execCtx deadline elapsed past the in-container timeout; restarting container")
-				restart("exec_ctx_deadline")
-			}
-		case <-sessionDone:
-		}
-	}()
+	go watchExecDeadline(execCtx, sessionDone, restart, logger)
 
 	// Bail hook (FR-108 MCP gate / parse error): where direct-exec
 	// group-kills, the container path restarts — same latch semantics
@@ -340,14 +286,9 @@ func runRealClaudeViaContainer(ctx context.Context, deps Deps, in containerRunIn
 			return deps.AgentContainer.Restart(rCtx, name)
 		},
 		ExitDetail: func(c context.Context) WaitDetail {
-			pollCtx, pollCancel := context.WithTimeout(context.WithoutCancel(c), exitPollGrace)
-			defer pollCancel()
-			exitCode, inspectErr := sess.ExitCode(pollCtx)
-			if inspectErr != nil {
-				logger.Warn("exec exit-code inspect failed; result frames govern", "err", inspectErr)
-			}
-			wrapperFailed = inspectErr == nil && isWrapperFailureExit(exitCode)
-			return containerWaitDetail(exitCode, inspectErr, execCtx.Err())
+			wait, wf := inspectContainerExit(c, sess, execCtx, logger)
+			wrapperFailed = wf
+			return wait
 		},
 	}
 
@@ -378,7 +319,7 @@ func runRealClaudeViaContainer(ctx context.Context, deps Deps, in containerRunIn
 	}
 
 	fromCol, toCol := transitionColumns(in.RoleSlug, in.Payload.ColumnSlug)
-	return runClaudeSession(ctx, sessDeps, containerTransport, sessionParams{
+	return runClaudeSession(ctx, execCtx, sessDeps, containerTransport, sessionParams{
 		InstanceID:       in.InstanceID,
 		EventID:          in.EventID,
 		TicketUUID:       in.TicketUUID,
@@ -392,11 +333,115 @@ func runRealClaudeViaContainer(ctx context.Context, deps Deps, in containerRunIn
 		FromCol:          fromCol,
 		ToCol:            toCol,
 		WorkspacePath:    workspacePath,
-		ExecCtx:          execCtx,
 		Bailed:           &bailed,
 		OnBail:           onBail,
 		Logger:           logger,
 	})
+}
+
+// renderContainerMCPConfig renders the in-container MCP config (step 2:
+// postgres + finalize + garrison-mutate, no mempalace — FR-014, Q1) and
+// classifies a render failure into the typed exit reason the caller
+// hands writeContainerFail: ExitVaultMCPInConfig on a Rule 3 violation,
+// ExitSpawnFailed otherwise. failReason == "" means success.
+func renderContainerMCPConfig(deps Deps, in containerRunInputs, instanceIDText string, logger *slog.Logger) (cfgBytes []byte, failReason string) {
+	cfgBytes, _, err := mcpconfig.Render(mcpconfig.WriteParams{
+		InstanceID:    in.InstanceID,
+		SupervisorBin: containerSupervisorBin,
+		DSN:           deps.AgentRODSN,
+		Finalize: mcpconfig.FinalizeParams{
+			SupervisorBin:   containerSupervisorBin,
+			AgentInstanceID: instanceIDText,
+			DatabaseURL:     deps.AgentRODSN,
+		},
+		GarrisonMutate: mcpconfig.GarrisonMutateParams{
+			SupervisorBin:   containerSupervisorBin,
+			AgentInstanceID: instanceIDText,
+			DatabaseURL:     deps.DatabaseURL,
+		},
+		ExtraServersJSON: in.Agent.McpConfig,
+		OmitMempalace:    true,
+	})
+	if err != nil {
+		if errors.Is(err, mcpconfig.ErrVaultMCPBanned) {
+			logger.Error("mcpconfig.Render: Rule 3 violation — vault-pattern MCP server", "err", err)
+			return nil, ExitVaultMCPInConfig
+		}
+		logger.Error("mcpconfig.Render failed; recording spawn_failed", "err", err)
+		return nil, ExitSpawnFailed
+	}
+	return cfgBytes, ""
+}
+
+// writeContainerMCPConfig runs the config-write exec (plan D15,
+// operator-approved). The rendered bytes transit the exec-create Env
+// exactly like the secrets do; the shell writes them onto the /tmp
+// tmpfs with 0600 perms. Non-zero exit or transport error → !ok, the
+// same contract as the host-side mcpconfig.Write failure — except a
+// missing/stopped container, which stays retryable (FR-019: the boot
+// reconciler is the repair path).
+func writeContainerMCPConfig(ctx context.Context, deps Deps, name, mcpPath string, cfgBytes []byte, logger *slog.Logger) (ok, eventRetryable bool) {
+	writeCtx, writeCancel := context.WithTimeout(ctx, helperExecTimeout)
+	defer writeCancel()
+	code, werr := runHelperExec(writeCtx, deps.AgentContainer, name, agentcontainer.ExecSpec{
+		Cmd: []string{"/bin/sh", "-c", fmt.Sprintf("umask 077; printf %%s \"$%s\" > %s", mcpConfigEnvVar, mcpPath)},
+		Env: []string{mcpConfigEnvVar + "=" + string(cfgBytes)},
+	})
+	if werr != nil || code != 0 {
+		logger.Error("container MCP-config write exec failed; recording spawn_failed",
+			"exit_code", code, "err", werr)
+		return false, errors.Is(werr, agentcontainer.ErrContainerNotFound)
+	}
+	return true, false
+}
+
+// cleanupContainerMCPConfig is the deferred cleanup exec every exit
+// path converges on (mirrors the host-side mcpconfig.Remove defer).
+// Best-effort: the file lives on tmpfs and dies with the container, so
+// a failed rm only warns.
+func cleanupContainerMCPConfig(ctx context.Context, deps Deps, name, mcpPath string, logger *slog.Logger) {
+	cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), helperExecTimeout)
+	defer cleanupCancel()
+	if rmCode, rmErr := runHelperExec(cleanupCtx, deps.AgentContainer, name, agentcontainer.ExecSpec{
+		Cmd: []string{"/bin/rm", "-f", mcpPath},
+	}); rmErr != nil || rmCode != 0 {
+		logger.Warn("container MCP-config cleanup exec failed; tmpfs file dies with the container",
+			"exit_code", rmCode, "err", rmErr)
+	}
+}
+
+// watchExecDeadline is the blackhole-backstop goroutine body (FR-016
+// ladder, t = budget + 30s): execCtx deadline expiry restarts the
+// container — the SIGKILL analog. The goroutine ends with the session
+// either way (sessionDone closes when runRealClaudeViaContainer
+// returns), so it never outlives the stream (concurrency rule 1).
+func watchExecDeadline(execCtx context.Context, sessionDone <-chan struct{}, restart func(reason string), logger *slog.Logger) {
+	select {
+	case <-execCtx.Done():
+		if errors.Is(execCtx.Err(), context.DeadlineExceeded) {
+			logger.Warn("execCtx deadline elapsed past the in-container timeout; restarting container")
+			restart("exec_ctx_deadline")
+		}
+	case <-sessionDone:
+	}
+}
+
+// inspectContainerExit is the container transport's ExitDetail body:
+// poll the exec inspect for the exit code (bounded by exitPollGrace),
+// map it through containerWaitDetail with the execCtx deadline overlay,
+// and report whether the coreutils-timeout wrapper itself failed
+// (exit 125–127 — remapped to spawn_failed by the terminal-reason
+// override). The runner calls ExitDetail only after both streams have
+// drained (concurrency rule 8), so the inspect never races a read.
+func inspectContainerExit(ctx context.Context, sess *agentcontainer.ExecSession, execCtx context.Context, logger *slog.Logger) (WaitDetail, bool) {
+	pollCtx, pollCancel := context.WithTimeout(context.WithoutCancel(ctx), exitPollGrace)
+	defer pollCancel()
+	exitCode, inspectErr := sess.ExitCode(pollCtx)
+	if inspectErr != nil {
+		logger.Warn("exec exit-code inspect failed; result frames govern", "err", inspectErr)
+	}
+	wrapperFailed := inspectErr == nil && isWrapperFailureExit(exitCode)
+	return containerWaitDetail(exitCode, inspectErr, execCtx.Err()), wrapperFailed
 }
 
 // containerExecEnv composes the claude exec's environment (plan D17) —

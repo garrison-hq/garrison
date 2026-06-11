@@ -942,7 +942,7 @@ func runRealClaude(
 		workspacePath = *dept.WorkspacePath
 	}
 	fromCol, toCol := transitionColumns(roleSlug, payload.ColumnSlug)
-	return runClaudeSession(ctx, deps, directTransport, sessionParams{
+	return runClaudeSession(ctx, execCtx, deps, directTransport, sessionParams{
 		InstanceID:       instanceID,
 		EventID:          eventID,
 		TicketUUID:       ticketUUID,
@@ -956,7 +956,6 @@ func runRealClaude(
 		FromCol:          fromCol,
 		ToCol:            toCol,
 		WorkspacePath:    workspacePath,
-		ExecCtx:          execCtx,
 		Bailed:           &bailed,
 		OnBail:           onBail,
 		Logger:           logger,

@@ -40,6 +40,12 @@ var ErrVaultMCPBanned = errors.New("mcpconfig: vault-pattern server banned")
 // MCP server in the config (Rule 3 / FR-410 / D2.4). Case-insensitive match.
 var bannedMCPNamePatterns = []string{"vault", "secret", "infisical"}
 
+// serverGarrisonMutate is the garrison-mutate MCP server's entry name
+// under mcpServers and its subcommand name on the supervisor binary —
+// the same string by design (the in-tree server runs as
+// `supervisor mcp garrison-mutate`).
+const serverGarrisonMutate = "garrison-mutate"
+
 // CheckExtraServers is a pre-spawn guard: it parses extraServersJSON (the raw
 // value of agents.mcp_config) and runs RejectVaultServers on the extra entries
 // alone. Call this BEFORE the vault fetch so Rule 3 can abort without touching
@@ -108,9 +114,9 @@ func BuildChatConfig(p ChatConfigParams) ([]byte, error) {
 		if p.ChatMessageID == "" {
 			return nil, errors.New("mcpconfig: BuildChatConfig: garrison-mutate requires ChatMessageID")
 		}
-		servers["garrison-mutate"] = mcpServerSpec{
+		servers[serverGarrisonMutate] = mcpServerSpec{
 			Command: p.SupervisorBin,
-			Args:    []string{"mcp", "garrison-mutate"},
+			Args:    []string{"mcp", serverGarrisonMutate},
 			Env: map[string]string{
 				"GARRISON_DATABASE_URL":    p.DatabaseURL,
 				"GARRISON_CHAT_SESSION_ID": p.ChatSessionID,
@@ -397,9 +403,9 @@ func Render(p WriteParams) ([]byte, string, error) {
 	// anchors on agent_instance_id per FR-401). Same in-tree server the
 	// chat container uses, different caller anchor.
 	if p.GarrisonMutate.enabled() {
-		servers["garrison-mutate"] = mcpServerSpec{
+		servers[serverGarrisonMutate] = mcpServerSpec{
 			Command: p.GarrisonMutate.SupervisorBin,
-			Args:    []string{"mcp", "garrison-mutate"},
+			Args:    []string{"mcp", serverGarrisonMutate},
 			Env: map[string]string{
 				"GARRISON_AGENT_INSTANCE_ID": p.GarrisonMutate.AgentInstanceID,
 				"GARRISON_DATABASE_URL":      p.GarrisonMutate.DatabaseURL,

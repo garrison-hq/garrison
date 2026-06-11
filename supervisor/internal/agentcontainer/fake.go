@@ -268,36 +268,45 @@ func (f *FakeController) ReconcileShape(ctx context.Context, specs []ContainerSp
 		if err != nil {
 			return report, err
 		}
-		desiredHash := desired.Labels[shapeHashLabel]
-
-		id, labels, state, found := f.findByAgentID(spec.AgentID)
-		switch {
-		case !found:
-			if err := f.fakeCreateAndStart(ctx, spec); err != nil {
-				return report, err
-			}
-			report.Created = append(report.Created, spec.AgentID)
-		case labels[shapeHashLabel] != desiredHash:
-			if err := f.Stop(ctx, id); err != nil {
-				return report, err
-			}
-			if err := f.Remove(ctx, id); err != nil {
-				return report, err
-			}
-			if err := f.fakeCreateAndStart(ctx, spec); err != nil {
-				return report, err
-			}
-			report.Recreated = append(report.Recreated, spec.AgentID)
-		case state != "running":
-			if err := f.Start(ctx, id); err != nil {
-				return report, err
-			}
-			report.Restarted = append(report.Restarted, spec.AgentID)
-		default:
-			report.Unchanged = append(report.Unchanged, spec.AgentID)
+		if err := f.convergeShape(ctx, spec, desired.Labels[shapeHashLabel], &report); err != nil {
+			return report, err
 		}
 	}
 	return report, nil
+}
+
+// convergeShape applies the per-spec convergence decision (create /
+// recreate / restart / no-op) against the in-memory state and appends
+// the outcome to the report — the same classification table the
+// production ReconcileShape walks.
+func (f *FakeController) convergeShape(ctx context.Context, spec ContainerSpec, desiredHash string, report *ShapeReport) error {
+	id, labels, state, found := f.findByAgentID(spec.AgentID)
+	switch {
+	case !found:
+		if err := f.fakeCreateAndStart(ctx, spec); err != nil {
+			return err
+		}
+		report.Created = append(report.Created, spec.AgentID)
+	case labels[shapeHashLabel] != desiredHash:
+		if err := f.Stop(ctx, id); err != nil {
+			return err
+		}
+		if err := f.Remove(ctx, id); err != nil {
+			return err
+		}
+		if err := f.fakeCreateAndStart(ctx, spec); err != nil {
+			return err
+		}
+		report.Recreated = append(report.Recreated, spec.AgentID)
+	case state != "running":
+		if err := f.Start(ctx, id); err != nil {
+			return err
+		}
+		report.Restarted = append(report.Restarted, spec.AgentID)
+	default:
+		report.Unchanged = append(report.Unchanged, spec.AgentID)
+	}
+	return nil
 }
 
 // findByAgentID snapshots the matching container's identity and state

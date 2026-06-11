@@ -28,16 +28,7 @@ func demuxRawStream(raw io.ReadCloser) (stdout, stderr io.ReadCloser) {
 		header := make([]byte, demuxHeaderSize)
 		for {
 			if _, err := io.ReadFull(raw, header); err != nil {
-				if err == io.EOF {
-					// Clean frame boundary: consumers get io.EOF.
-					_ = outW.Close()
-					_ = errW.Close()
-				} else {
-					// Truncated header (io.ErrUnexpectedEOF) or a
-					// torn-down raw stream: propagate to both sides.
-					outW.CloseWithError(err)
-					errW.CloseWithError(err)
-				}
+				closeDemuxPipes(outW, errW, err)
 				return
 			}
 			var dst *io.PipeWriter
@@ -64,6 +55,22 @@ func demuxRawStream(raw io.ReadCloser) (stdout, stderr io.ReadCloser) {
 		}
 	}()
 	return &demuxReader{pipe: outR, raw: raw}, &demuxReader{pipe: errR}
+}
+
+// closeDemuxPipes ends both demuxed sides when the raw stream's frame
+// loop terminates. A clean frame boundary (io.EOF on the header read)
+// closes both writers so consumers get io.EOF exactly like
+// subprocess-stdout EOF today; anything else — a truncated header
+// (io.ErrUnexpectedEOF) or a torn-down raw stream — propagates the
+// error to both sides via CloseWithError.
+func closeDemuxPipes(outW, errW *io.PipeWriter, err error) {
+	if err == io.EOF {
+		_ = outW.Close()
+		_ = errW.Close()
+		return
+	}
+	outW.CloseWithError(err)
+	errW.CloseWithError(err)
 }
 
 // demuxReader is one demuxed pipe end. On the stdout side raw is the

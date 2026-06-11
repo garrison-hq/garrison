@@ -55,18 +55,24 @@ FAIL=0
 declare -a FAILURES=()
 
 ok() {
+  local msg="$1"
   PASS=$((PASS + 1))
-  printf '  PASS  %s\n' "$1"
+  printf '  PASS  %s\n' "${msg}"
+  return 0
 }
 
 fail() {
+  local msg="$1"
   FAIL=$((FAIL + 1))
-  FAILURES+=("$1")
-  printf '  FAIL  %s\n' "$1" >&2
+  FAILURES+=("${msg}")
+  printf '  FAIL  %s\n' "${msg}" >&2
+  return 0
 }
 
 note() {
-  printf '  ....  %s\n' "$1"
+  local msg="$1"
+  printf '  ....  %s\n' "${msg}"
+  return 0
 }
 
 # All compose invocations pin the project name, project directory, and
@@ -78,14 +84,21 @@ compose() {
     --project-directory "${SUP_DIR}" \
     --env-file "${ENV_FILE}" \
     -f "${COMPOSE_FILE}" "$@"
+  local rc=$?
+  return "${rc}"
 }
 
 psql_c() {
-  docker exec garrison-postgres psql -U supervisor -d garrison -qtA -c "$1"
+  local sql="$1"
+  docker exec garrison-postgres psql -U supervisor -d garrison -qtA -c "${sql}"
+  local rc=$?
+  return "${rc}"
 }
 
 now_utc() {
   date -u +%Y-%m-%dT%H:%M:%SZ
+  local rc=$?
+  return "${rc}"
 }
 
 # sup_log_count <since-ts> <needle1> <needle2> — count supervisor log
@@ -98,6 +111,8 @@ sup_log_count() {
   local since="$1" needle1="$2" needle2="$3"
   docker logs garrison-supervisor --since "${since}" 2>&1 \
     | grep -F -- "${needle1}" | grep -cF -- "${needle2}"
+  local rc=$?
+  return "${rc}"
 }
 
 # wait_supervisor_ready <since-ts> [timeout-s] — the boot sequence ends
@@ -126,6 +141,8 @@ seed_ticket() {
           SELECT id, \$gar\$${objective}\$gar\$, 'in_dev'
             FROM departments WHERE slug = '${dept}'
           RETURNING id;"
+  local rc=$?
+  return "${rc}"
 }
 
 # wait_ticket_instance <ticket-id> <timeout-s> [argv-capture-container]
@@ -166,15 +183,21 @@ wait_ticket_instance() {
 # agent_container_for_role <role-slug> — runbook 03 §3.4 resolution:
 # container names are agent-ID keyed (FR-008); never guess from role.
 agent_container_for_role() {
+  local role="$1"
   psql_c "SELECT 'garrison-agent-' || left(replace(id::text, '-', ''), 8)
-            FROM agents WHERE role_slug = '$1';"
+            FROM agents WHERE role_slug = '${role}';"
+  local rc=$?
+  return "${rc}"
 }
 
 # connect_probe <host> — runbook 03 §3.4's egress probe verbatim: the
 # agent image carries no curl/wget, so CONNECT through the egress proxy
 # with the node runtime it ships. Prints the proxy's status line.
 connect_probe() {
-  docker exec "${AGENT_CONTAINER}" node -e 'const net=require("net");const host=process.argv[1];const s=net.connect(3128,"garrison-egress-proxy",()=>{s.write(`CONNECT ${host}:443 HTTP/1.1\r\nHost: ${host}:443\r\n\r\n`)});s.on("data",d=>{console.log(d.toString().split("\r\n")[0]);s.destroy();process.exit(0)});s.on("error",e=>{console.error("proxy error:",e.message);process.exit(1)});setTimeout(()=>{console.error("timeout");process.exit(1)},5000)' "$1"
+  local probe_host="$1"
+  docker exec "${AGENT_CONTAINER}" node -e 'const net=require("net");const host=process.argv[1];const s=net.connect(3128,"garrison-egress-proxy",()=>{s.write(`CONNECT ${host}:443 HTTP/1.1\r\nHost: ${host}:443\r\n\r\n`)});s.on("data",d=>{console.log(d.toString().split("\r\n")[0]);s.destroy();process.exit(0)});s.on("error",e=>{console.error("proxy error:",e.message);process.exit(1)});setTimeout(()=>{console.error("timeout");process.exit(1)},5000)' "${probe_host}"
+  local rc=$?
+  return "${rc}"
 }
 
 # Restore the stack no matter how the walk exits: egress proxy running,
@@ -189,6 +212,7 @@ restore_stack() {
     wait_supervisor_ready "${ts}" 120 || \
       echo "    WARNING: supervisor not confirmed ready after restore" >&2
   fi
+  return 0
 }
 trap restore_stack EXIT
 
@@ -419,6 +443,7 @@ run_suite() {
   else
     fail "SC-004: ${label} FAILED (see ${WORK_DIR}/${label}.log)"
   fi
+  return 0
 }
 
 run_suite "unit-suite-flag-false" false
