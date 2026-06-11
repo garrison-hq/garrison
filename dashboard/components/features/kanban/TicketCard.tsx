@@ -26,6 +26,12 @@ import type { TicketCardRow } from '@/lib/queries/kanban';
 // Link strictness reports the regression. We use a button that
 // stops the parent-card click + programmatically routes via
 // useRouter.
+//
+// M9 / T015 — when ticket.scheduledOrigin is set (the ticket was
+// fired by a scheduled task's tick loop, FR-201 / US1-AS2), render a
+// scheduled-origin chip linking to the task's detail page at
+// /admin/recurring-jobs/[id]. Same button-not-nested-Link pattern as
+// the parent chip.
 
 export function TicketCard({ ticket }: Readonly<{ ticket: TicketCardRow }>) {
   const router = useRouter();
@@ -34,6 +40,13 @@ export function TicketCard({ ticket }: Readonly<{ ticket: TicketCardRow }>) {
     e.stopPropagation();
     if (ticket.parentTicketId) {
       router.push(`/tickets/${ticket.parentTicketId}`);
+    }
+  };
+  const onScheduledOriginClick = (e: MouseEvent<HTMLButtonElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (ticket.scheduledOrigin) {
+      router.push(`/admin/recurring-jobs/${ticket.scheduledOrigin.taskId}`);
     }
   };
   return (
@@ -55,6 +68,17 @@ export function TicketCard({ ticket }: Readonly<{ ticket: TicketCardRow }>) {
               data-testid="ticket-parent-chip"
             >
               parent: {ticket.parentTicketId.slice(0, 8)}
+            </button>
+          ) : null}
+          {ticket.scheduledOrigin ? (
+            <button
+              type="button"
+              onClick={onScheduledOriginClick}
+              title={`fired by schedule: ${ticket.scheduledOrigin.taskName}`}
+              className="font-mono text-[10.5px] text-text-3 hover:text-text-1 tracking-tight cursor-pointer truncate max-w-[120px]"
+              data-testid="ticket-scheduled-origin-chip"
+            >
+              sched: {ticket.scheduledOrigin.taskName}
             </button>
           ) : null}
         </div>

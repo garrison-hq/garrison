@@ -104,6 +104,8 @@ export async function Sidebar() {
           <NavSubLink href="/admin/invites" label="invites" />
           {/* M8 — MCPJungle MCP-server registry. */}
           <NavSubLink href="/admin/mcp-servers" label="MCP servers" />
+          {/* M9 — scheduled wake-ups (recurring jobs). */}
+          <NavSubLink href="/admin/recurring-jobs" label="Recurring jobs" />
         </NavGroup>
       </nav>
 

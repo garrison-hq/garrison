@@ -1,5 +1,6 @@
 import { sql } from 'drizzle-orm';
 import { appDb } from '@/lib/db/appClient';
+import { getScheduledOriginForTickets, type ScheduledOrigin } from './scheduledTasks';
 
 // Queries for the per-department Kanban surface.
 //
@@ -25,6 +26,13 @@ export interface TicketCardRow {
    *  verb. Null for top-level tickets. The kanban TicketCard
    *  surfaces a small parent chip when this is non-null. */
   parentTicketId: string | null;
+  /** M9 / T015 — originating scheduled task when this ticket was
+   *  fired by the supervisor's tick loop (FR-201 / US1-AS2). Null
+   *  (or absent) for operator-/chat-/agent-created tickets. The
+   *  TicketCard surfaces a scheduled-origin chip linking to the
+   *  task's detail page. Optional so pre-M9 callers and fixtures
+   *  remain valid. */
+  scheduledOrigin?: ScheduledOrigin | null;
 }
 
 export async function fetchDepartmentBySlug(slug: string): Promise<DeptInfo | null> {
@@ -80,6 +88,9 @@ export async function fetchKanban(slug: string): Promise<TicketCardRow[]> {
     WHERE d.slug = ${slug}
     ORDER BY t.created_at DESC
   `);
+  // M9 / T015 — scheduled-origin lookup for the TicketCard chip
+  // (ticket → run → task name; one IN-list query for the board).
+  const origins = await getScheduledOriginForTickets(rows.map((r) => r.id));
   return rows.map((r) => ({
     id: r.id,
     objective: r.objective,
@@ -87,5 +98,6 @@ export async function fetchKanban(slug: string): Promise<TicketCardRow[]> {
     createdAt: r.created_at,
     assignedAgentRoleSlug: r.assigned_agent_role_slug,
     parentTicketId: r.parent_ticket_id,
+    scheduledOrigin: origins[r.id] ?? null,
   }));
 }
