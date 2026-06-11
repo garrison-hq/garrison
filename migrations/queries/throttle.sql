@@ -11,6 +11,13 @@
 -- yet (returns 0 instead of NULL). The throttle gate only fires after
 -- US2 (FR-020) lands honest cost telemetry — until then, the sum reads
 -- low for clean-finalize runs (docs/issues/cost-telemetry-blind-spot.md).
+-- M9 (review #2): company resolution goes through the instance's own
+-- department_id (NOT NULL for every origin) instead of JOINing through
+-- tickets — the tickets join silently dropped oneshot instances
+-- (ticket_id NULL post-M9 origin reshape), making scheduled-wake-up
+-- spend invisible to the M6 budget gate. Instance dept == ticket dept
+-- for ticket-origin rows (spawn prep copies it), so M6 semantics are
+-- unchanged.
 SELECT
   c.id AS company_id,
   c.daily_budget_usd,
@@ -18,8 +25,7 @@ SELECT
   COALESCE(
     (SELECT SUM(ai.total_cost_usd)
        FROM agent_instances ai
-       JOIN tickets t     ON t.id = ai.ticket_id
-       JOIN departments d ON d.id = t.department_id
+       JOIN departments d ON d.id = ai.department_id
       WHERE d.company_id = c.id
         AND ai.started_at >= NOW() - INTERVAL '24 hours'),
     0

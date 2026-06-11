@@ -965,11 +965,15 @@ func mirrorStderrLines(r io.Reader, logger *slog.Logger) {
 // (plan §2 step 5): re-validate the raw finalize_oneshot payload (the
 // ticket-mode posture — the MCP server validated before signalling
 // ok=true, so a failure here is schema drift) and route to
-// WriteFinalizeOneshot's atomic tx. The *Result parameter is unused —
-// the WriteFinalizeOneshot signature carries no cost metadata (plan §2
-// public surface); the oneshot run's completion state reads through
-// the instance join (decision 5).
-func oneshotOnCommit(execCtx context.Context, deps Deps, in oneshotRunInputs, _ *Result, logger *slog.Logger) func(json.RawMessage) error {
+// WriteFinalizeOneshot's atomic tx. result points at the runner's
+// pipeline result variable — the ticket-mode ResultGrace contract
+// (runner.go finalizeOnCommit / FinalizeDeps.ResultGrace) applies:
+// OnCommit fires after the result event lands (or the grace window
+// elapses), so reading TotalCostUSD here captures the spend on the
+// committed terminal row. Cost stays NULL only when the grace window
+// elapsed without a result event (the M6 failure-mode contract,
+// review #2: oneshot spend must be visible to the company budget gate).
+func oneshotOnCommit(execCtx context.Context, deps Deps, in oneshotRunInputs, result *Result, logger *slog.Logger) func(json.RawMessage) error {
 	return func(rawPayload json.RawMessage) error {
 		if deps.Palace == nil {
 			logger.Error("finalize_oneshot onCommit: deps.Palace is nil; skipping atomic write")
@@ -982,7 +986,14 @@ func oneshotOnCommit(execCtx context.Context, deps Deps, in oneshotRunInputs, _ 
 				"field", verr.Field)
 			return fmt.Errorf("finalize_oneshot re-validate: %w", verr)
 		}
-		return WriteFinalizeOneshot(execCtx, deps, in.prep.runID, in.prep.instanceID, *parsed)
+		cost, _ := parseCostToNumeric(result.TotalCostUSD)
+		if !result.ResultSeen {
+			cost = pgtype.Numeric{}
+		}
+		return WriteFinalizeOneshot(execCtx, deps, in.prep.runID, in.prep.instanceID, *parsed, OneshotTerminal{
+			Cost:         cost,
+			WakeUpStatus: string(in.wakeStatus),
+		})
 	}
 }
 
@@ -1059,20 +1070,33 @@ type oneshotWriteFailure struct {
 	err    error
 }
 
+// OneshotTerminal carries the commit-time terminal metadata for the
+// succeeded agent_instances row (review #2): Cost is the spend the
+// pipeline's deferred OnCommit captured from the result event
+// (pgtype.Numeric zero value writes NULL — the grace-window-elapsed
+// failure mode); WakeUpStatus mirrors the ticket-mode column ("" writes
+// NULL). The zero value reproduces the pre-fix write shape, which is
+// what the failure-path tests pass.
+type OneshotTerminal struct {
+	Cost         pgtype.Numeric
+	WakeUpStatus string
+}
+
 // WriteFinalizeOneshot performs the oneshot atomic write (plan §2 step
 // 5): one tx committing UpdateRunStructuredOutcome (full payload + the
 // verification sub-object), the palace diary/KG writes via the existing
-// client path, the terminal agent_instances row, and the event-outbox
-// processed mark. SelectScheduledTaskRunFinalizedState guards double
-// commit (FR-260 analog) — a second commit for an already-finalized run
-// is rejected without touching any row.
+// client path, the terminal agent_instances row (status, exit_reason,
+// cost, wake_up_status), and the event-outbox processed mark.
+// SelectScheduledTaskRunFinalizedState guards double commit (FR-260
+// analog) — a second commit for an already-finalized run is rejected
+// without touching any row.
 //
 // On failure, a separate terminal failed agent_instances row is written
 // outside the rolled-back tx (the ticket-mode WriteFinalize posture);
 // the run row keeps outcome='fired' with the terminal state readable
 // through the run→instance join (decision 5 — UpdateRunOutcome(failed)
 // is reserved for pre-pipeline failures).
-func WriteFinalizeOneshot(parentCtx context.Context, deps Deps, runID pgtype.UUID, instanceID pgtype.UUID, payload finalize.OneshotPayload) error {
+func WriteFinalizeOneshot(parentCtx context.Context, deps Deps, runID pgtype.UUID, instanceID pgtype.UUID, payload finalize.OneshotPayload, term OneshotTerminal) error {
 	start := time.Now()
 	timeout := deps.FinalizeWriteTimeout
 	if timeout == 0 {
@@ -1199,10 +1223,16 @@ func WriteFinalizeOneshot(parentCtx context.Context, deps Deps, runID pgtype.UUI
 	}
 
 	completedReason := ExitCompleted
+	var wakeUpPtr *string
+	if term.WakeUpStatus != "" {
+		wakeUpPtr = &term.WakeUpStatus
+	}
 	if err := q.UpdateInstanceTerminalWithCostAndWakeup(ctx, store.UpdateInstanceTerminalWithCostAndWakeupParams{
-		ID:         instanceID,
-		Status:     "succeeded",
-		ExitReason: &completedReason,
+		ID:           instanceID,
+		Status:       "succeeded",
+		ExitReason:   &completedReason,
+		TotalCostUsd: term.Cost,
+		WakeUpStatus: wakeUpPtr,
 	}); err != nil {
 		return failOneshotWrite(parentCtx, deps, instanceID, oneshotWriteFailure{
 			reason: ExitFinalizePalaceWriteFailed, class: "palace_write", orphan: true,

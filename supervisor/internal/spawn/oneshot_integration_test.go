@@ -452,7 +452,7 @@ func TestWriteFinalizeOneshotCommitsAtomically(t *testing.T) {
 		palaceExec := &m71FakePalaceExec{}
 		deps := oneshotFinalizeDeps(pool, palaceExec)
 
-		if err := WriteFinalizeOneshot(ctx, deps, fx.runID, instanceID, oneshotFinalizePayload()); err != nil {
+		if err := WriteFinalizeOneshot(ctx, deps, fx.runID, instanceID, oneshotFinalizePayload(), OneshotTerminal{}); err != nil {
 			t.Fatalf("WriteFinalizeOneshot err = %v; want nil", err)
 		}
 
@@ -539,7 +539,7 @@ func TestWriteFinalizeOneshotCommitsAtomically(t *testing.T) {
 		instanceID := seedOneshotRunningInstance(t, ctx, pool, fx)
 		deps := oneshotFinalizeDeps(pool, oneshotFailingPalaceExec{})
 
-		err := WriteFinalizeOneshot(ctx, deps, fx.runID, instanceID, oneshotFinalizePayload())
+		err := WriteFinalizeOneshot(ctx, deps, fx.runID, instanceID, oneshotFinalizePayload(), OneshotTerminal{})
 		if err == nil {
 			t.Fatal("WriteFinalizeOneshot err = nil; want palace-write failure")
 		}
@@ -584,6 +584,54 @@ func TestWriteFinalizeOneshotCommitsAtomically(t *testing.T) {
 	})
 }
 
+// TestWriteFinalizeOneshotPersistsCostAndWakeup (M9 review #2): the
+// commit-time OneshotTerminal metadata lands on the succeeded instance
+// row — total_cost_usd (the spend the M6 budget gate sums) and
+// wake_up_status, mirroring the ticket-mode terminal write shape.
+func TestWriteFinalizeOneshotPersistsCostAndWakeup(t *testing.T) {
+	pool := testdb.Start(t)
+	ctx := context.Background()
+	fx := seedOneshot(t, ctx, pool, nil, "fired")
+	instanceID := seedOneshotRunningInstance(t, ctx, pool, fx)
+	palaceExec := &m71FakePalaceExec{}
+	deps := oneshotFinalizeDeps(pool, palaceExec)
+
+	var cost pgtype.Numeric
+	if err := cost.Scan("0.4275"); err != nil {
+		t.Fatalf("cost scan: %v", err)
+	}
+	if err := WriteFinalizeOneshot(ctx, deps, fx.runID, instanceID, oneshotFinalizePayload(), OneshotTerminal{
+		Cost:         cost,
+		WakeUpStatus: "ok",
+	}); err != nil {
+		t.Fatalf("WriteFinalizeOneshot err = %v; want nil", err)
+	}
+
+	var (
+		gotCost   pgtype.Numeric
+		gotWakeup *string
+	)
+	if err := pool.QueryRow(ctx,
+		`SELECT total_cost_usd, wake_up_status FROM agent_instances WHERE id = $1`, instanceID,
+	).Scan(&gotCost, &gotWakeup); err != nil {
+		t.Fatalf("read agent_instances: %v", err)
+	}
+	if !gotCost.Valid {
+		t.Fatal("total_cost_usd is NULL; want the commit-time cost (review #2)")
+	}
+	f, err := gotCost.Float64Value()
+	if err != nil {
+		t.Fatalf("Float64Value: %v", err)
+	}
+	// agent_instances.total_cost_usd is NUMERIC(10,6): 0.4275 roundtrips.
+	if f.Float64 != 0.4275 {
+		t.Errorf("total_cost_usd = %v; want 0.4275", f.Float64)
+	}
+	if gotWakeup == nil || *gotWakeup != "ok" {
+		t.Errorf("wake_up_status = %v; want ok", gotWakeup)
+	}
+}
+
 // TestWriteFinalizeOneshotRejectsDoubleCommit — the FR-260-analog
 // guard: a second commit for an already-finalized run errors without
 // touching the committed state (no extra palace writes, structured
@@ -596,12 +644,12 @@ func TestWriteFinalizeOneshotRejectsDoubleCommit(t *testing.T) {
 	palaceExec := &m71FakePalaceExec{}
 	deps := oneshotFinalizeDeps(pool, palaceExec)
 
-	if err := WriteFinalizeOneshot(ctx, deps, fx.runID, instanceID, oneshotFinalizePayload()); err != nil {
+	if err := WriteFinalizeOneshot(ctx, deps, fx.runID, instanceID, oneshotFinalizePayload(), OneshotTerminal{}); err != nil {
 		t.Fatalf("first WriteFinalizeOneshot err = %v; want nil", err)
 	}
 	committed := readStructuredOutcome(t, ctx, pool, fx.runID)
 
-	err := WriteFinalizeOneshot(ctx, deps, fx.runID, instanceID, oneshotFinalizePayload())
+	err := WriteFinalizeOneshot(ctx, deps, fx.runID, instanceID, oneshotFinalizePayload(), OneshotTerminal{})
 	if err == nil {
 		t.Fatal("second WriteFinalizeOneshot err = nil; want double-commit rejection")
 	}

@@ -175,6 +175,88 @@ func TestSpawnDeferredOnBudgetExceeded(t *testing.T) {
 	}
 }
 
+// TestOneshotSpendCountsTowardBudget (M9 review #2): a committed
+// oneshot-origin agent_instances row (ticket_id NULL,
+// scheduled_task_run_id set) must appear in the rolling-24h cost the
+// company budget gate reads. The pre-fix GetCompanyThrottleState
+// JOINed through tickets, silently dropping every oneshot instance.
+func TestOneshotSpendCountsTowardBudget(t *testing.T) {
+	pool := testdb.Start(t)
+	ctx := context.Background()
+	truncateAll(t, ctx, pool)
+
+	var companyID pgtype.UUID
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO companies (id, name, daily_budget_usd) VALUES (gen_random_uuid(), 'oneshot-co', 1.00) RETURNING id
+	`).Scan(&companyID); err != nil {
+		t.Fatalf("insert company: %v", err)
+	}
+	var deptID pgtype.UUID
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO departments (id, company_id, slug, name, concurrency_cap, workspace_path)
+		VALUES (gen_random_uuid(), $1, 'engineering', 'engineering', 1, '/tmp') RETURNING id
+	`, companyID).Scan(&deptID); err != nil {
+		t.Fatalf("insert department: %v", err)
+	}
+	var taskID pgtype.UUID
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO scheduled_tasks (name, department_id, role_slug, mode, schedule_expr,
+		                             next_fire_at, objective_template, acceptance_criteria_template)
+		VALUES ('probe', $1, 'engineer', 'oneshot', 'every@30m', NOW() + INTERVAL '30 minutes', 'obj', 'acc')
+		RETURNING id
+	`, deptID).Scan(&taskID); err != nil {
+		t.Fatalf("insert scheduled_task: %v", err)
+	}
+	var runID pgtype.UUID
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO scheduled_task_runs (scheduled_task_id, slot_at, outcome)
+		VALUES ($1, NOW() - INTERVAL '1 hour', 'fired') RETURNING id
+	`, taskID).Scan(&runID); err != nil {
+		t.Fatalf("insert scheduled_task_run: %v", err)
+	}
+	// Committed oneshot instance: ticket_id NULL, run-id origin, cost 0.95.
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO agent_instances (id, scheduled_task_run_id, department_id, role_slug, status, started_at, total_cost_usd)
+		VALUES (gen_random_uuid(), $1, $2, 'engineer', 'succeeded', NOW() - INTERVAL '1 hour', 0.95)
+	`, runID, deptID); err != nil {
+		t.Fatalf("preload oneshot agent_instances: %v", err)
+	}
+
+	q := store.New(pool)
+
+	// The 24h state itself carries the oneshot spend.
+	state, err := q.GetCompanyThrottleState(ctx, companyID)
+	if err != nil {
+		t.Fatalf("GetCompanyThrottleState: %v", err)
+	}
+	cost, err := state.Cost24hUsd.Float64Value()
+	if err != nil {
+		t.Fatalf("Cost24hUsd.Float64Value: %v", err)
+	}
+	if cost.Float64 != 0.95 {
+		t.Errorf("cost_24h_usd = %v; want 0.95 (oneshot spend visible)", cost.Float64)
+	}
+
+	// And the budget gate defers exactly as it would for ticket spend.
+	deps := throttle.Deps{
+		Pool:                pool,
+		Logger:              slog.Default(),
+		DefaultSpawnCostUSD: numericFromCents(10), // $0.10
+		RateLimitBackOff:    60 * time.Second,
+		Now:                 time.Now,
+	}
+	d, err := throttle.Check(ctx, deps, q, companyID)
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if d.Allowed {
+		t.Fatalf("expected defer (0.95 + 0.10 > 1.00); got Decision=%+v", d)
+	}
+	if d.Kind != throttle.KindCompanyBudgetExceeded {
+		t.Errorf("Kind = %q; want %q", d.Kind, throttle.KindCompanyBudgetExceeded)
+	}
+}
+
 func TestSpawnAllowedAfterBudgetWindowExpires(t *testing.T) {
 	pool := testdb.Start(t)
 	ctx := context.Background()
