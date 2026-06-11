@@ -63,9 +63,11 @@ Click into the detail page. You should see:
    "
    ```
    Expected rows: `download`, `verify_digest`, `extract`, `mount`, `container_create`, `container_start`. Plus M8's new steps: `mcpjungle_client_create`, `mcpjungle_allowlist_apply`.
-3. **Docker container running**:
+3. **Docker container running** (names are agent-ID keyed since M7.1 — resolve from Postgres, see §3.4):
    ```bash
-   docker ps --filter "name=garrison-agent-seo-writer"
+   AGENT_CONTAINER=$(docker exec garrison-postgres psql -U supervisor -d garrison -tA -c \
+     "SELECT 'garrison-agent-' || left(replace(id::text, '-', ''), 8) FROM agents WHERE role_slug = 'seo-writer'")
+   docker ps --filter "name=$AGENT_CONTAINER"
    ```
    One container Up with the M7 image digest in its `Config.Image` field.
 4. **Agents registry** in dashboard shows the new agent with status=`active`.
@@ -186,7 +188,7 @@ This is the probe-ticket procedure: the ticket rides the normal dispatch → in-
 **See**:
 
 1. `agents.status` flips `active → paused → active`.
-2. `docker ps` for `garrison-agent-seo-writer` — container stays Up the entire time (pause/resume doesn't tear down the container, just gates spawning).
+2. `docker ps` for the agent's `garrison-agent-<short-id>` container (resolve the name as in §3.4) — container stays Up the entire time (pause/resume doesn't tear down the container, just gates spawning).
 3. **M8 FR-311 invariant**: zero MCPJungle DELETE / PATCH /clients/<name>/allowlist requests during the cycle. The McpClient row + vault bearer token should be byte-identical before and after.
 
 Verify:

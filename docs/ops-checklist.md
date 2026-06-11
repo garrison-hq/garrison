@@ -811,7 +811,7 @@ the per-agent containers M7 created: claude runs as a `docker exec`
 in the agent's container, egress is allow-listed through a shared
 squid sidecar, and a boot-time shape reconciler converges the fleet.
 One data-only migration
-(`migrations/20260610000000_m7_1_agent_md_container_wording.sql`,
+(`migrations/20260610000001_m7_1_agent_md_container_wording.sql`,
 idempotent `replace()` — re-words seeded agent_md mempalace guidance);
 no schema change, no drizzle pull.
 
