@@ -97,16 +97,23 @@ func (c *Client) CreateMcpClient(ctx context.Context, params CreateMcpClientPara
 	switch resp.StatusCode {
 	case http.StatusCreated:
 		// Current MCPJungle returns a GORM-shaped body with a numeric
-		// "ID"; json.Number tolerates both that and a string id from
-		// older builds. encoding/json matches "ID" case-insensitively.
+		// "ID"; older builds return a string id. json.Number rejects
+		// JSON strings, so decode the raw value and accept either
+		// shape (T017 acceptance finding — the json.Number-only decode
+		// broke the string-id case the M8 contract pins).
+		// encoding/json matches "ID" case-insensitively.
 		var out struct {
-			ID   json.Number `json:"id"`
-			Name string      `json:"name"`
+			ID   json.RawMessage `json:"id"`
+			Name string          `json:"name"`
 		}
 		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 			return CreateMcpClientResult{}, fmt.Errorf("mcpjungle: parse CreateMcpClient response: %w", err)
 		}
-		return CreateMcpClientResult{ID: out.ID.String(), Name: out.Name}, nil
+		id, err := decodeFlexibleID(out.ID)
+		if err != nil {
+			return CreateMcpClientResult{}, fmt.Errorf("mcpjungle: parse CreateMcpClient response id: %w", err)
+		}
+		return CreateMcpClientResult{ID: id, Name: out.Name}, nil
 	case http.StatusConflict:
 		return CreateMcpClientResult{}, ErrServerRegistrationConflict
 	case http.StatusInternalServerError:
@@ -124,6 +131,21 @@ func (c *Client) CreateMcpClient(ctx context.Context, params CreateMcpClientPara
 	default:
 		return CreateMcpClientResult{}, c.statusErr(resp, "CreateMcpClient")
 	}
+}
+
+// decodeFlexibleID renders an id field that upstream serves as either
+// a JSON string ("client-x", pre-rename builds + the M8 suite's fakes)
+// or a bare number (GORM-shaped current builds) as its string form.
+func decodeFlexibleID(raw json.RawMessage) (string, error) {
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s, nil
+	}
+	var n json.Number
+	if err := json.Unmarshal(raw, &n); err == nil {
+		return n.String(), nil
+	}
+	return "", fmt.Errorf("id is neither string nor number: %s", string(raw))
 }
 
 // DeleteMcpClient issues DELETE /clients/<name>. Returns nil on 204;

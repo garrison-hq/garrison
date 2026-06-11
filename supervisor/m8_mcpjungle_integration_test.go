@@ -35,7 +35,9 @@ func TestM8MCPJungleRegisterAndWorker(t *testing.T) {
 	var registerHits int
 	var mu sync.Mutex
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost && r.URL.Path == "/servers" {
+		// /api/v0 is MCPJungle's management-API mount (client.go
+		// apiPrefix, trued to the current upstream image).
+		if r.Method == http.MethodPost && r.URL.Path == "/api/v0/servers" {
 			mu.Lock()
 			registerHits++
 			mu.Unlock()
