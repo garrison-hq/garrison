@@ -889,6 +889,9 @@ func runOneshotSession(
 			OnCommit:            onCommit,
 			ResultGrace:         deps.FinalizeResultGrace,
 			OnRateLimitRejected: rateLimitHook(deps, sessionParams{Dept: in.prep.dept}, &result, logger),
+			// M9 review #7: this pipeline's finalize tool is the
+			// oneshot one; ticket pipelines keep the default.
+			ToolName: FinalizeToolOneshot,
 		}, onBail)
 		result, pipelineErr = Run(execCtx, t.Stdout, policy, logger)
 	}()

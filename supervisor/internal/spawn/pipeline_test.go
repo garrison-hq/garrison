@@ -730,6 +730,71 @@ func TestFinalizeAttemptCounterIncrementsOnEachToolUse(t *testing.T) {
 	}
 }
 
+// TestTicketPipelineIgnoresHallucinatedFinalizeOneshot (M9 review #7):
+// a finalize_oneshot tool_use/tool_result pair in a TICKET pipeline
+// (default ToolName) is not the pipeline's finalize tool — it must not
+// be tracked, must not tick the 3-attempt counter, and must not mark
+// Attempted. Pre-M9 the matcher only knew finalize_ticket; the widened
+// union matcher regressed this, letting a ticket agent's hallucinated
+// finalize_oneshot call burn attempts toward the SIGTERM cap.
+func TestTicketPipelineIgnoresHallucinatedFinalizeOneshot(t *testing.T) {
+	r, state, _ := finalizeRouter(nil, func(string) {})
+	ctx := context.Background()
+
+	hallucinated := claudeproto.AssistantEvent{
+		ContentBlockCount: 1,
+		ContentTypes:      []string{"tool_use"},
+		ToolUses: []claudeproto.ToolUseBlock{
+			{Name: "finalize_oneshot", ToolUseID: "tu-halluc", InputRaw: []byte(`{"bad":"payload"}`)},
+			{Name: "mcp__finalize__finalize_oneshot", ToolUseID: "tu-halluc-2", InputRaw: []byte(`{"bad":"payload"}`)},
+		},
+	}
+	r.OnAssistant(ctx, hallucinated)
+	r.OnUser(ctx, userWithFinalizeResult("tu-halluc", false, "schema"))
+	r.OnUser(ctx, userWithFinalizeResult("tu-halluc-2", false, "schema"))
+
+	if r.finalize.attempts != 0 {
+		t.Errorf("attempts = %d after hallucinated finalize_oneshot frames; want 0 (review #7)", r.finalize.attempts)
+	}
+	if state.Attempted {
+		t.Error("Attempted = true after hallucinated finalize_oneshot frames; want false")
+	}
+	if state.CapExhausted {
+		t.Error("CapExhausted = true; want false")
+	}
+
+	// The pipeline's own tool still ticks the counter as before.
+	r.OnAssistant(ctx, assistantWithFinalize("tu-real", []byte(`{"bad":"payload"}`)))
+	r.OnUser(ctx, userWithFinalizeResult("tu-real", false, "schema"))
+	if r.finalize.attempts != 1 {
+		t.Errorf("attempts = %d after a real finalize_ticket pair; want 1", r.finalize.attempts)
+	}
+
+	// And an ONESHOT pipeline (ToolName=FinalizeToolOneshot) tracks
+	// finalize_oneshot while ignoring finalize_ticket — the inverse.
+	rOneshot, stateOneshot, _ := finalizeRouter(nil, func(string) {})
+	rOneshot.finalize.toolName = FinalizeToolOneshot
+	rOneshot.OnAssistant(ctx, assistantWithFinalize("tu-ticket-in-oneshot", []byte(`{"bad":"payload"}`)))
+	rOneshot.OnUser(ctx, userWithFinalizeResult("tu-ticket-in-oneshot", false, "schema"))
+	if rOneshot.finalize.attempts != 0 {
+		t.Errorf("oneshot pipeline attempts = %d after finalize_ticket frame; want 0", rOneshot.finalize.attempts)
+	}
+	rOneshot.OnAssistant(ctx, claudeproto.AssistantEvent{
+		ContentBlockCount: 1,
+		ContentTypes:      []string{"tool_use"},
+		ToolUses: []claudeproto.ToolUseBlock{
+			{Name: "mcp__finalize__finalize_oneshot", ToolUseID: "tu-os", InputRaw: []byte(`{"bad":"payload"}`)},
+		},
+	})
+	rOneshot.OnUser(ctx, userWithFinalizeResult("tu-os", false, "schema"))
+	if rOneshot.finalize.attempts != 1 {
+		t.Errorf("oneshot pipeline attempts = %d after finalize_oneshot pair; want 1", rOneshot.finalize.attempts)
+	}
+	if !stateOneshot.Attempted {
+		t.Error("oneshot pipeline Attempted = false; want true")
+	}
+}
+
 // TestFinalizeAttemptCapTriggersSIGTERM — 3rd failed tool_result fires
 // onBail with exit_reason=finalize_invalid.
 func TestFinalizeAttemptCapTriggersSIGTERM(t *testing.T) {

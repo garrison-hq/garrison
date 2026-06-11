@@ -186,6 +186,11 @@ type finalizeHook struct {
 	onBail    func(reason string)
 	onObserve func() // optional: per-tool_use tick for log-assertion tests
 
+	// toolName is this pipeline's expected finalize tool (M9 review
+	// #7). Empty means FinalizeToolTicket — every pre-M9 ticket-mode
+	// construction path. Oneshot sessions set FinalizeToolOneshot.
+	toolName string
+
 	// toolUseInputs maps tool_use_id → raw input JSON so OnUser can
 	// forward the original payload to OnCommit without re-parsing.
 	toolUseInputs map[string][]byte
@@ -237,21 +242,46 @@ type FinalizeDeps struct {
 	// (back-compat shape for existing tests + non-rate-limit-aware
 	// flows).
 	OnRateLimitRejected func(ctx context.Context, e claudeproto.RateLimitEvent)
+	// ToolName is the finalize tool this pipeline expects (M9 review
+	// #7). Empty defaults to FinalizeToolTicket so all existing
+	// ticket-mode call sites are untouched; oneshot sessions pass
+	// FinalizeToolOneshot. The matcher is per-pipeline so a ticket
+	// agent's hallucinated finalize_oneshot frame does NOT tick the
+	// 3-attempt counter (the pre-M9 behavior).
+	ToolName string
 }
 
-// isFinalizeToolName matches either finalize tool — finalize_ticket or
-// its M9 oneshot sibling finalize_oneshot — bare or in Claude's
-// mcp__finalize__ prefix form (parallel to isMempalaceToolName). One
-// matcher serves both pipeline modes: the per-mode finalize MCP server
-// exposes exactly one of the two tools (FR-304), so a ticket spawn can
-// never observe finalize_oneshot frames and vice versa; each session's
-// onCommit hook re-validates against its own mode's schema.
-func isFinalizeToolName(name string) bool {
+// Finalize tool names, one per pipeline mode (FR-304: the per-mode
+// finalize MCP server exposes exactly one of the two).
+const (
+	// FinalizeToolTicket is the M2.2.1 ticket-mode finalize tool and
+	// the default when FinalizeDeps.ToolName is empty — every existing
+	// ticket-mode call site is untouched (M9 review #7).
+	FinalizeToolTicket = "finalize_ticket"
+	// FinalizeToolOneshot is the M9 oneshot finalize tool; oneshot
+	// pipelines pass it explicitly via FinalizeDeps.ToolName.
+	FinalizeToolOneshot = "finalize_oneshot"
+)
+
+// isExpectedFinalizeTool matches the pipeline's OWN finalize tool —
+// bare or in Claude's mcp__finalize__ prefix form (parallel to
+// isMempalaceToolName). M9 review #7: the matcher is per-pipeline, NOT
+// the union of both tools. The per-mode finalize MCP server exposes
+// exactly one tool (FR-304), so a real finalize_oneshot tool_result
+// can't reach a ticket pipeline — but a ticket agent can HALLUCINATE a
+// finalize_oneshot tool_use, and a union matcher would tick the
+// 3-attempt counter for it (pre-M9 it didn't; the widened matcher
+// regressed that).
+func (p *FinalizePolicy) isExpectedFinalizeTool(name string) bool {
 	const prefix = "mcp__finalize__"
 	if len(name) >= len(prefix) && name[:len(prefix)] == prefix {
 		name = name[len(prefix):]
 	}
-	return name == "finalize_ticket" || name == "finalize_oneshot"
+	expected := FinalizeToolTicket
+	if p.finalize != nil && p.finalize.toolName != "" {
+		expected = p.finalize.toolName
+	}
+	return name == expected
 }
 
 // isMempalaceToolName returns true if the tool name belongs to the
@@ -315,7 +345,7 @@ func (p *FinalizePolicy) OnAssistant(_ context.Context, e claudeproto.AssistantE
 		switch {
 		case isMempalaceToolName(tu.Name):
 			p.recordMempalaceToolUse(tu)
-		case isFinalizeToolName(tu.Name) && p.finalize != nil && p.finalize.state != nil:
+		case p.isExpectedFinalizeTool(tu.Name) && p.finalize != nil && p.finalize.state != nil:
 			p.recordFinalizeToolUse(tu)
 		}
 	}
@@ -863,6 +893,7 @@ func NewFinalizePolicy(
 			onCommit:    finalize.OnCommit,
 			onBail:      onBail,
 			resultGrace: finalize.ResultGrace,
+			toolName:    finalize.ToolName,
 		}
 		finalize.State.Expected = true
 	}
