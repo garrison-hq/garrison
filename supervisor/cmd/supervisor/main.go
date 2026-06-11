@@ -1036,6 +1036,9 @@ func buildDashboardAPIServer(
 		SessionValidator: validator,
 		Logger:           logger,
 		CompanyID:        uuidString(cfg.CustomerID()),
+		// M9 review #4: real query set for the full-body
+		// /schedule/validate path (role existence + name uniqueness).
+		Queries: store.New(pool),
 	}
 	srv := dashboardapi.NewServer(cfg, deps)
 	if err := srv.RegisterDefaultRoutes(deps); err != nil {

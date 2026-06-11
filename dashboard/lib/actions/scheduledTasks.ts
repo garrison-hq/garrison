@@ -4,9 +4,13 @@
 // audit-writing CRUD actions for /admin/recurring-jobs. Each action:
 //
 //   1. session check (operator-only surface);
-//   2. expression validation via the supervisor's POST /schedule/validate
+//   2. validation via the supervisor's POST /schedule/validate
 //      (create / edit / resume — decision 10: grammar + next-fire
-//      computation single-source in Go, no TS date-math mirror);
+//      computation single-source in Go, no TS date-math mirror).
+//      Review #4: create/edit send the FULL body so the supervisor runs
+//      schedule.ValidateTask (role existence, duplicate live name,
+//      department existence, templates, mode) and returns typed field
+//      errors; resume keeps the expression-only shape;
 //   3. one drizzle tx writing the row change + the chat_mutation_audit
 //      row (verb from the Go-side ServerActionVerbs registry, chat
 //      anchors NULL, affected_resource_type='scheduled_task').
@@ -31,7 +35,6 @@ import { appDb } from '@/lib/db/appClient';
 import {
   scheduledTasks,
   chatMutationAudit,
-  departments,
 } from '@/drizzle/schema.supervisor';
 import { getSession } from '@/lib/auth/session';
 
@@ -44,7 +47,16 @@ export type ScheduledTaskActionErrorKind =
 
 export type ScheduledTaskActionResult =
   | { ok: true; id: string; auditId: string }
-  | { ok: false; errorKind: ScheduledTaskActionErrorKind; message: string };
+  | {
+      ok: false;
+      errorKind: ScheduledTaskActionErrorKind;
+      message: string;
+      /** Offending field on validation_failed (review #4: the supervisor's
+       *  full-body /schedule/validate returns typed field errors —
+       *  name / department_id / role_slug / mode / schedule_expr /
+       *  objective_template / acceptance_criteria_template). */
+      field?: string;
+    };
 
 export interface CreateScheduledTaskInput {
   name: string;
@@ -75,9 +87,30 @@ const SESSION_COOKIE = 'better-auth.session_token';
 
 type ValidateResult =
   | { ok: true; nextFireAt: string }
-  | { ok: false; errorKind: 'validation_failed' | 'network_error' | 'internal_error'; message: string };
+  | {
+      ok: false;
+      errorKind: 'validation_failed' | 'network_error' | 'internal_error';
+      message: string;
+      field?: string;
+    };
 
-async function validateScheduleExpr(scheduleExpr: string, mode: string): Promise<ValidateResult> {
+/** Full-body request shape for POST /schedule/validate (review #4).
+ *  Expression-only bodies (resume) keep the original grammar +
+ *  min-interval contract; bodies carrying any task-identity field run
+ *  the supervisor's full schedule.ValidateTask — the single FR-105
+ *  validator shared with the chat verb — so create/edit catch unknown
+ *  roles and duplicate live names before the write tx. */
+interface ValidateRequestBody {
+  schedule_expr: string;
+  mode: string;
+  name?: string;
+  department_id?: string;
+  role_slug?: string;
+  objective_template?: string;
+  acceptance_criteria_template?: string;
+}
+
+async function validateSchedule(reqBody: ValidateRequestBody): Promise<ValidateResult> {
   const base = process.env.DASHBOARD_SUPERVISOR_API_URL;
   if (!base) {
     return {
@@ -99,7 +132,7 @@ async function validateScheduleExpr(scheduleExpr: string, mode: string): Promise
         'Content-Type': 'application/json',
         ...(cookieHeader ? { Cookie: cookieHeader } : {}),
       },
-      body: JSON.stringify({ schedule_expr: scheduleExpr, mode }),
+      body: JSON.stringify(reqBody),
       cache: 'no-store',
     });
   } catch {
@@ -129,12 +162,19 @@ async function validateScheduleExpr(scheduleExpr: string, mode: string): Promise
     return { ok: true, nextFireAt };
   }
 
-  const errBody = (body as { error?: string; message?: string } | null) ?? {};
+  const errBody = (body as { error?: string; message?: string; field?: string } | null) ?? {};
   if (res.status === 422 && errBody.error === 'validation_failed') {
+    // Friendly mapping for unique-name violations (review #4 / U2):
+    // the operator-facing wording beats the Go validator's detail.
+    const message =
+      errBody.field === 'name' && reqBody.name
+        ? `A scheduled task named "${reqBody.name}" already exists. Choose a different name.`
+        : (errBody.message ?? 'schedule expression rejected');
     return {
       ok: false,
       errorKind: 'validation_failed',
-      message: errBody.message ?? 'schedule expression rejected',
+      message,
+      ...(errBody.field ? { field: errBody.field } : {}),
     };
   }
   return {
@@ -151,8 +191,17 @@ async function validateScheduleExpr(scheduleExpr: string, mode: string): Promise
 function fail(
   errorKind: ScheduledTaskActionErrorKind,
   message: string,
+  field?: string,
 ): ScheduledTaskActionResult {
-  return { ok: false, errorKind, message };
+  return { ok: false, errorKind, message, ...(field ? { field } : {}) };
+}
+
+/** failFromValidate maps a ValidateResult failure (typed field error
+ *  included) onto the action result shape. */
+function failFromValidate(
+  v: Extract<ValidateResult, { ok: false }>,
+): ScheduledTaskActionResult {
+  return fail(v.errorKind, v.message, v.field);
 }
 
 async function requireSession(): Promise<ScheduledTaskActionResult | null> {
@@ -244,17 +293,21 @@ export async function createScheduledTask(
     return fail('validation_failed', 'acceptance_criteria_template must be non-empty');
   }
 
-  const validated = await validateScheduleExpr(scheduleExpr, mode);
-  if (!validated.ok) return fail(validated.errorKind, validated.message);
-
-  const dept = await appDb
-    .select({ id: departments.id })
-    .from(departments)
-    .where(eq(departments.id, input.departmentId))
-    .limit(1);
-  if (dept.length === 0) {
-    return fail('validation_failed', `department ${input.departmentId} not found`);
-  }
+  // Review #4: full-body validation — the supervisor runs the complete
+  // FR-105 set (grammar, min-interval, mode, templates, name uniqueness
+  // among live tasks, department + role existence) and returns typed
+  // field errors. This replaces the earlier ad-hoc departments SELECT:
+  // department existence is part of the shared validator now.
+  const validated = await validateSchedule({
+    schedule_expr: scheduleExpr,
+    mode,
+    name,
+    department_id: input.departmentId,
+    role_slug: roleSlug,
+    objective_template: objectiveTemplate,
+    acceptance_criteria_template: acceptanceCriteriaTemplate,
+  });
+  if (!validated.ok) return failFromValidate(validated);
 
   try {
     return await appDb.transaction(async (tx) => {
@@ -340,22 +393,37 @@ export async function editScheduledTask(
   }
 
   try {
-    // Pre-read outside the validate call so the expression is checked
-    // against the task's mode; the tx re-reads for the diff snapshot.
-    let nextFireAt: string | null = null;
-    if (patch.scheduleExpr !== undefined) {
-      const current = await appDb
-        .select({ mode: scheduledTasks.mode })
-        .from(scheduledTasks)
-        .where(and(eq(scheduledTasks.id, id), isNull(scheduledTasks.deletedAt)))
-        .limit(1);
-      if (current.length === 0) {
-        return fail('not_found', `scheduled task ${id} not found`);
-      }
-      const validated = await validateScheduleExpr(patch.scheduleExpr, current[0].mode);
-      if (!validated.ok) return fail(validated.errorKind, validated.message);
-      nextFireAt = validated.nextFireAt;
+    // Pre-read outside the validate call so the merged body carries the
+    // task's mode/department and the unchanged fields; the tx re-reads
+    // for the diff snapshot. Review #4: the full-body validate runs on
+    // EVERY edit (not just expression changes) so a role change to a
+    // non-existent role or a rename onto a live name rejects with the
+    // typed field error before the write tx. The name rides the body
+    // only when it actually changes — the live-name uniqueness check
+    // would otherwise collide with the task's own row.
+    const current = await appDb
+      .select()
+      .from(scheduledTasks)
+      .where(and(eq(scheduledTasks.id, id), isNull(scheduledTasks.deletedAt)))
+      .limit(1);
+    if (current.length === 0) {
+      return fail('not_found', `scheduled task ${id} not found`);
     }
+    const cur = current[0];
+
+    const validated = await validateSchedule({
+      schedule_expr: patch.scheduleExpr ?? cur.scheduleExpr,
+      mode: cur.mode,
+      ...(patch.name !== undefined && patch.name !== cur.name ? { name: patch.name } : {}),
+      department_id: cur.departmentId,
+      role_slug: patch.roleSlug ?? cur.roleSlug,
+      objective_template: patch.objectiveTemplate ?? cur.objectiveTemplate,
+      acceptance_criteria_template:
+        patch.acceptanceCriteriaTemplate ?? cur.acceptanceCriteriaTemplate,
+    });
+    if (!validated.ok) return failFromValidate(validated);
+    const nextFireAt: string | null =
+      patch.scheduleExpr !== undefined ? validated.nextFireAt : null;
 
     return await appDb.transaction(async (tx) => {
       const prior = await selectLiveTask(tx, id);
@@ -464,8 +532,11 @@ export async function resumeScheduledTask(id: string): Promise<ScheduledTaskActi
       return fail('validation_failed', 'task is not paused');
     }
 
-    const validated = await validateScheduleExpr(current[0].scheduleExpr, current[0].mode);
-    if (!validated.ok) return fail(validated.errorKind, validated.message);
+    const validated = await validateSchedule({
+      schedule_expr: current[0].scheduleExpr,
+      mode: current[0].mode,
+    });
+    if (!validated.ok) return failFromValidate(validated);
 
     return await appDb.transaction(async (tx) => {
       const prior = await selectLiveTask(tx, id);

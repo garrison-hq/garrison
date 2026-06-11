@@ -27,7 +27,7 @@ func scheduleValidatePOST(t *testing.T, h http.Handler, body string) *httptest.R
 // the Go-computed next slot (decision 10: the dashboard never computes
 // a fire time).
 func TestScheduleValidateAcceptsGrammar(t *testing.T) {
-	h := newScheduleValidateHandler(15*time.Minute, func() time.Time { return fixedNow }, nil)
+	h := newScheduleValidateHandler(nil, 15*time.Minute, func() time.Time { return fixedNow }, nil)
 
 	cases := []struct {
 		expr     string
@@ -69,7 +69,7 @@ func TestScheduleValidateAcceptsGrammar(t *testing.T) {
 // "validation_failed" and the *ParseError / *ValidationError detail as
 // the message (plan §6 / decision 13).
 func TestScheduleValidateRejects422WithDetail(t *testing.T) {
-	h := newScheduleValidateHandler(15*time.Minute, func() time.Time { return fixedNow }, nil)
+	h := newScheduleValidateHandler(nil, 15*time.Minute, func() time.Time { return fixedNow }, nil)
 
 	cases := []struct {
 		name       string
@@ -118,7 +118,7 @@ func TestScheduleValidateRejects422WithDetail(t *testing.T) {
 // AuthExpired, and the validation handler never runs.
 func TestScheduleValidateRequiresAuth(t *testing.T) {
 	mw := newAuthMiddleware(fakeValidator{err: ErrAuthExpired}, nil)
-	h := mw(newScheduleValidateHandler(15*time.Minute, func() time.Time { return fixedNow }, nil))
+	h := mw(newScheduleValidateHandler(nil, 15*time.Minute, func() time.Time { return fixedNow }, nil))
 
 	t.Run("no cookie", func(t *testing.T) {
 		rec := scheduleValidatePOST(t, h, `{"schedule_expr":"daily@06:00"}`)
@@ -147,7 +147,7 @@ func TestScheduleValidateRequiresAuth(t *testing.T) {
 // TestScheduleValidateMethodNotAllowed — non-POST methods are refused
 // with 405 + an Allow header (same posture as objstore_handler.go).
 func TestScheduleValidateMethodNotAllowed(t *testing.T) {
-	h := newScheduleValidateHandler(15*time.Minute, func() time.Time { return fixedNow }, nil)
+	h := newScheduleValidateHandler(nil, 15*time.Minute, func() time.Time { return fixedNow }, nil)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/schedule/validate", nil)
 	h.ServeHTTP(rec, req)
@@ -163,7 +163,7 @@ func TestScheduleValidateMethodNotAllowed(t *testing.T) {
 // 400 BadRequest, not a 422 validation rejection (the body never
 // reached the grammar).
 func TestScheduleValidateRejectsMalformedJSON(t *testing.T) {
-	h := newScheduleValidateHandler(15*time.Minute, func() time.Time { return fixedNow }, nil)
+	h := newScheduleValidateHandler(nil, 15*time.Minute, func() time.Time { return fixedNow }, nil)
 	rec := scheduleValidatePOST(t, h, `{"schedule_expr": "daily@09:00"`)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d; want 400; body=%s", rec.Code, rec.Body.String())
@@ -173,10 +173,25 @@ func TestScheduleValidateRejectsMalformedJSON(t *testing.T) {
 	}
 }
 
+// TestScheduleValidateFullBodyRequiresQueries (M9 review #4): a body
+// carrying task-identity fields needs the wired *store.Queries for the
+// ValidateTask path; the nil-queries construction (this unit suite's
+// shape) 500s rather than silently downgrading to expression-only
+// validation. Expression-only bodies keep working with nil queries —
+// every other test in this file pins that.
+func TestScheduleValidateFullBodyRequiresQueries(t *testing.T) {
+	h := newScheduleValidateHandler(nil, 15*time.Minute, func() time.Time { return fixedNow }, nil)
+	rec := scheduleValidatePOST(t, h,
+		`{"schedule_expr":"daily@06:00","mode":"ticket","name":"digest","department_id":"00000000-0000-0000-0000-000000000001","role_slug":"engineer","objective_template":"o","acceptance_criteria_template":"a"}`)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d; want 500 (full body without queries); body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 // TestScheduleValidateDefaultsNowFunc — a nil `now` falls back to
 // time.Now; the computed next_fire_at is strictly future.
 func TestScheduleValidateDefaultsNowFunc(t *testing.T) {
-	h := newScheduleValidateHandler(15*time.Minute, nil, nil)
+	h := newScheduleValidateHandler(nil, 15*time.Minute, nil, nil)
 	before := time.Now().UTC()
 	rec := scheduleValidatePOST(t, h, `{"schedule_expr":"every@30m"}`)
 	if rec.Code != http.StatusOK {
