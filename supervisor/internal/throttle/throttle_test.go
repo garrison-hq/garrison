@@ -1,14 +1,91 @@
 package throttle
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"math/big"
 	"testing"
 	"time"
 
 	"github.com/garrison-hq/garrison/supervisor/internal/store"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 )
+
+// ---------------------------------------------------------------------------
+// Minimal store.DBTX fake — used by FireIngressRateCap unit tests below.
+// ---------------------------------------------------------------------------
+
+// throttleFakeRow implements pgx.Row for a pre-canned scan result.
+type throttleFakeRow struct {
+	vals []any
+	err  error
+}
+
+func (r *throttleFakeRow) Scan(dest ...any) error {
+	if r.err != nil {
+		return r.err
+	}
+	for i, d := range dest {
+		if i >= len(r.vals) {
+			break
+		}
+		switch dd := d.(type) {
+		case *pgtype.UUID:
+			if v, ok := r.vals[i].(pgtype.UUID); ok {
+				*dd = v
+			}
+		case *string:
+			if v, ok := r.vals[i].(string); ok {
+				*dd = v
+			}
+		case *pgtype.Timestamptz:
+			if v, ok := r.vals[i].(pgtype.Timestamptz); ok {
+				*dd = v
+			}
+		case *[]byte:
+			if v, ok := r.vals[i].([]byte); ok {
+				*dd = v
+			}
+		}
+	}
+	return nil
+}
+
+// throttleFakeRows implements pgx.Rows (Query return; never used by the
+// throttle write path but required by the DBTX interface).
+type throttleFakeRows struct{}
+
+func (r *throttleFakeRows) Close()                                       {}
+func (r *throttleFakeRows) Err() error                                   { return nil }
+func (r *throttleFakeRows) CommandTag() pgconn.CommandTag                { return pgconn.CommandTag{} }
+func (r *throttleFakeRows) FieldDescriptions() []pgconn.FieldDescription { return nil }
+func (r *throttleFakeRows) Next() bool                                   { return false }
+func (r *throttleFakeRows) Scan(_ ...any) error                          { return nil }
+func (r *throttleFakeRows) Values() ([]any, error)                       { return nil, nil }
+func (r *throttleFakeRows) RawValues() [][]byte                          { return nil }
+func (r *throttleFakeRows) Conn() *pgx.Conn                              { return nil }
+
+// throttleFakeDbtx implements store.DBTX with controlled QueryRow/Exec behaviour.
+type throttleFakeDbtx struct {
+	queryRowVals []any
+	queryRowErr  error
+	execErr      error
+}
+
+func (f *throttleFakeDbtx) Exec(_ context.Context, _ string, _ ...interface{}) (pgconn.CommandTag, error) {
+	return pgconn.CommandTag{}, f.execErr
+}
+
+func (f *throttleFakeDbtx) Query(_ context.Context, _ string, _ ...interface{}) (pgx.Rows, error) {
+	return &throttleFakeRows{}, nil
+}
+
+func (f *throttleFakeDbtx) QueryRow(_ context.Context, _ string, _ ...interface{}) pgx.Row {
+	return &throttleFakeRow{vals: f.queryRowVals, err: f.queryRowErr}
+}
 
 // numericFromFloat builds a pgtype.Numeric carrying the supplied float
 // at NUMERIC(10,2) precision. Mirrors how spawn.parseCostToNumeric
@@ -289,5 +366,73 @@ func TestNotifyPayloadShape(t *testing.T) {
 		if _, ok := decoded[key]; !ok {
 			t.Errorf("missing key %q in notify payload", key)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// FireIngressRateCap unit tests — cover internal/throttle/ingress.go without
+// a real Postgres. The fake DBTX above serves the InsertThrottleEvent QueryRow
+// and the NotifyThrottleEvent Exec in-process.
+// ---------------------------------------------------------------------------
+
+// TestFireIngressRateCap_SuccessPath — happy path: fake DB returns a valid
+// ThrottleEvent row; FireIngressRateCap returns nil.
+func TestFireIngressRateCap_SuccessPath(t *testing.T) {
+	eventID := pgtype.UUID{Bytes: [16]byte{0x01}, Valid: true}
+	companyID := pgtype.UUID{Bytes: [16]byte{0x02}, Valid: true}
+	firedAt := pgtype.Timestamptz{Time: time.Now(), Valid: true}
+
+	db := &throttleFakeDbtx{
+		// InsertThrottleEvent RETURNING id, company_id, kind, fired_at, payload
+		queryRowVals: []any{eventID, companyID, KindIngressRateCapExceeded, firedAt, []byte(`{}`)},
+	}
+	q := store.New(db)
+
+	err := FireIngressRateCap(context.Background(), q, companyID, "github-test", 60, 30)
+	if err != nil {
+		t.Errorf("FireIngressRateCap returned err: %v; want nil", err)
+	}
+}
+
+// TestFireIngressRateCap_InsertError — InsertThrottleEvent fails;
+// FireIngressRateCap wraps and returns the error.
+func TestFireIngressRateCap_InsertError(t *testing.T) {
+	companyID := pgtype.UUID{Bytes: [16]byte{0x03}, Valid: true}
+	dbErr := errors.New("insert failed")
+
+	db := &throttleFakeDbtx{
+		queryRowErr: dbErr,
+	}
+	q := store.New(db)
+
+	err := FireIngressRateCap(context.Background(), q, companyID, "github-test", 60, 30)
+	if err == nil {
+		t.Fatal("FireIngressRateCap returned nil; want wrapped insert error")
+	}
+	if !errors.Is(err, dbErr) {
+		t.Errorf("err = %v; want to contain %v", err, dbErr)
+	}
+}
+
+// TestFireIngressRateCap_NotifyError — InsertThrottleEvent succeeds but
+// NotifyThrottleEvent Exec fails; FireIngressRateCap returns the wrapped error.
+func TestFireIngressRateCap_NotifyError(t *testing.T) {
+	eventID := pgtype.UUID{Bytes: [16]byte{0x04}, Valid: true}
+	companyID := pgtype.UUID{Bytes: [16]byte{0x05}, Valid: true}
+	firedAt := pgtype.Timestamptz{Time: time.Now(), Valid: true}
+	execErr := errors.New("pg_notify failed")
+
+	db := &throttleFakeDbtx{
+		queryRowVals: []any{eventID, companyID, KindIngressRateCapExceeded, firedAt, []byte(`{}`)},
+		execErr:      execErr,
+	}
+	q := store.New(db)
+
+	err := FireIngressRateCap(context.Background(), q, companyID, "github-test", 60, 30)
+	if err == nil {
+		t.Fatal("FireIngressRateCap returned nil; want wrapped notify error")
+	}
+	if !errors.Is(err, execErr) {
+		t.Errorf("err = %v; want to contain %v", err, execErr)
 	}
 }

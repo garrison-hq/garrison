@@ -398,6 +398,29 @@ func calledSQL(called []string, needle string) bool {
 // Tests
 // ---------------------------------------------------------------------------
 
+// TestHandler_MissingEventTypeHeader_200 — absent X-GitHub-Event header → 200,
+// no DB calls (handler step 2: EventType returns ok=false → discard).
+func TestHandler_MissingEventTypeHeader_200(t *testing.T) {
+	body := issuePayload()
+	deps := HandlerDeps{
+		Connector: testGitHubConnector(),
+		Logger:    nil,
+	}
+	handler := newWebhookHandler(deps)
+
+	// X-GitHub-Event deliberately absent.
+	req := newRequest(body, map[string]string{
+		"X-GitHub-Delivery":   testDeliveryID,
+		"X-Hub-Signature-256": computeSig(body),
+	})
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if got := rec.Code; got != http.StatusOK {
+		t.Errorf("status = %d; want 200 when X-GitHub-Event header is absent", got)
+	}
+}
+
 // TestHandler_UnsubscribedEventType_200 — X-GitHub-Event: push → 200, no
 // insert call (SR6 step 1, FR-401). push is not in the subscribed set
 // {issues, pull_request, ping} so the handler returns 200 before touching the
