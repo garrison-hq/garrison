@@ -126,7 +126,7 @@ T008–T009 are the unit test suites covering the verb handler and the dispatche
     Prior M8/M9/M10 chaos suites pass unchanged (regression). `gofmt -l` + `go vet` clean.
   - **Out of scope for this task**: integration tests (T011); dashboard (T012).
 
-- [ ] **T011** Integration test suite — `internal/actionbroker/integration_test.go` (golden-path milestone smoke tests)
+- [x] **T011** Integration test suite — `internal/actionbroker/integration_test.go` (golden-path milestone smoke tests)
   - **Depends on**: T007, T010.
   - **Files**: `supervisor/internal/actionbroker/integration_test.go` (new, `-tags=integration`, testcontainers-go Postgres + `httptest` GitHub stand-in).
   - **Completion condition**: the following tests pass:
