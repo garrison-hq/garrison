@@ -84,6 +84,14 @@ type Deps struct {
 	PollInterval time.Duration
 	// Now is a test seam for the current time. Defaults to time.Now when nil.
 	Now func() time.Time
+	// ClaimFn is an optional test seam that overrides the default
+	// ClaimDispatchablePendingAction call in Handle. When non-nil, Handle
+	// calls this function instead of q.ClaimDispatchablePendingAction so
+	// tests can inject rows that the real claim query's filter would exclude
+	// (e.g. human_only rows — the defence-in-depth path). Never set in
+	// production code. Authorised by tasks.md T009, analogous to the
+	// RegisterTestPolicyEntry seam in policy.go (T008).
+	ClaimFn func(ctx context.Context, q *store.Queries) (store.PendingAction, error)
 }
 
 // Worker is the per-channel handle registered with the M1 dispatcher.
@@ -170,7 +178,17 @@ func (w *Worker) Handle(ctx context.Context, eventID pgtype.UUID) error {
 	// Claim one dispatchable row. FOR UPDATE SKIP LOCKED guarantees
 	// at most one claimant per row across concurrent dispatchers
 	// (SC-006). Returns pgx.ErrNoRows when nothing is claimable.
-	row, err := q.ClaimDispatchablePendingAction(ctx)
+	//
+	// If deps.ClaimFn is set (test seam only), it overrides the real
+	// claim query so tests can inject rows the filter would exclude
+	// (e.g. human_only rows — the defence-in-depth path; T009).
+	claimFn := func(ctx context.Context, q *store.Queries) (store.PendingAction, error) {
+		return q.ClaimDispatchablePendingAction(ctx)
+	}
+	if w.deps.ClaimFn != nil {
+		claimFn = w.deps.ClaimFn
+	}
+	row, err := claimFn(ctx, q)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			// Nothing to dispatch — normal idle state.

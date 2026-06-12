@@ -96,9 +96,9 @@ T008–T009 are the unit test suites covering the verb handler and the dispatche
   - **Seam note (policy.go amendment)**: `TestRequestExternalActionAutoTierEmitsDispatchNotify` requires `actionbroker.Classify` to return `TierAuto` for a hypothetical action type. Go's `_test.go` mechanism cannot expose a package-private var to an external test package — `export_test.go` with `package actionbroker` is compiled only into the `actionbroker` test binary, not into the package as imported by `garrisonmutate`. The only mechanism that lets `garrisonmutate`'s tests inject a policy entry is an exported function in a production file. `RegisterTestPolicyEntry` is therefore added to `policy.go` with this contract amendment as the authorizing document. It does not affect the deploy-time `policy` map contents; it only provides a test-callable setter/restorer.
   - **Out of scope for this task**: policy tests (covered by T004's `policy_test.go`); dispatcher tests (T009); integration tests (T011).
 
-- [ ] **T009** Unit tests — `internal/actionbroker/dispatcher_test.go` + `internal/actionbroker/github_test.go`
+- [x] **T009** Unit tests — `internal/actionbroker/dispatcher_test.go` + `internal/actionbroker/github_test.go`
   - **Depends on**: T006.
-  - **Files**: `supervisor/internal/actionbroker/dispatcher_test.go` (new); `supervisor/internal/actionbroker/github_test.go` (new).
+  - **Files**: `supervisor/internal/actionbroker/dispatcher_test.go` (new); `supervisor/internal/actionbroker/github_test.go` (new); `supervisor/internal/actionbroker/dispatcher.go` (amend — add `ClaimFn func(ctx context.Context, q *store.Queries) (store.PendingAction, error)` test seam to `Deps`; see seam note below).
   - **Completion condition**: the following tests pass:
     - `TestHandleApprovedActionPostsAndRecordsExecuted` — an `approved` `approve`-tier row; fake `GitHubPoster.PostComment` returns a URL; asserts status→`executed`, `dispatched_at` set, one `executed` outcome row with `structured_outcome.comment_url`, fake called exactly once — US2 #2 / SC-007.
     - `TestHandleNeverExecutesPendingApprove` — an `approve`-tier row still at `status='pending'` (not yet approved); `Handle` claims nothing (predicate requires `approved` for `approve`-tier), no `PostComment` call — US4 #3.
@@ -110,6 +110,7 @@ T008–T009 are the unit test suites covering the verb handler and the dispatche
     - `TestPostCommentBuildsCorrectRequest` (github_test.go, `httptest.Server`) — asserts URL path, `Authorization: token <PAT>` header, `Accept: application/vnd.github+json`, JSON body `{"body":"<text>"}`, `201`→URL extraction; `404`/`422`→terminal error; `429`/`5xx`→`ErrRecoverable` — FR-020.
     - `TestPostCommentNeverLogsPAT` — captures `slog` output during a `PostComment` call and asserts the PAT string never appears — SC-005.
     All pass. `gofmt -l` + `go vet` clean.
+  - **Seam note (dispatcher.go amendment)**: `TestHandleNeverExecutesHumanOnly` is a defence-in-depth test — it asserts the in-Handle `human_only` guard fires even when a `human_only` row reaches `Handle` directly. The production claim query (`ClaimDispatchablePendingAction`) already filters `tier <> 'human_only'`, so such a row can never be returned through the normal LISTEN path. The only mechanism that lets the test inject a `human_only` row into `Handle` without rewriting the claim query is an injectable `ClaimFn` field on `Deps`. `ClaimFn` is therefore added to `dispatcher.go` as an exported field with this contract amendment as the authorising document. It is nil-gated: when nil, `Handle` uses `q.ClaimDispatchablePendingAction` as before; no production caller sets it. The field is documented "Never set in production code" in the source. This is analogous to the `RegisterTestPolicyEntry` seam added to `policy.go` in T008.
   - **Out of scope for this task**: chaos tests (T010); integration tests (T011).
 
 ---
