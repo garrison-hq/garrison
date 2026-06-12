@@ -141,7 +141,7 @@ T009–T012 are the unit test suites covering signature, render, GitHub connecto
     All pass. `gofmt -l` + `go vet` clean.
   - **Out of scope for this task**: integration tests against a real Postgres (T013).
 
-- [ ] **T012** Unit tests — `internal/ingress/ratecap_test.go` + `internal/throttle/ingress_test.go`
+- [x] **T012** Unit tests — `internal/ingress/ratecap_test.go` + `internal/throttle/ingress_test.go`
   - **Depends on**: T007.
   - **Files**: `supervisor/internal/ingress/ratecap_test.go` (new); `supervisor/internal/throttle/ingress_test.go` (new).
   - **Completion condition**: the following tests pass:
