@@ -371,6 +371,17 @@ export const agentInstallJournal = pgTable("agent_install_journal", {
 	check("agent_install_journal_step_check", sql`step = ANY (ARRAY['download'::text, 'verify_digest'::text, 'extract'::text, 'mount'::text, 'container_create'::text, 'container_start'::text, 'mcpjungle_client_create'::text, 'mcpjungle_allowlist_apply'::text])`),
 ]);
 
+export const companies = pgTable("companies", {
+	id: uuid().defaultRandom().primaryKey().notNull(),
+	name: text().notNull(),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	dailyBudgetUsd: numeric("daily_budget_usd", { precision: 10, scale:  2 }),
+	pauseUntil: timestamp("pause_until", { withTimezone: true, mode: 'string' }),
+	customerSlug: text("customer_slug").default('garrison').notNull(),
+}, (table) => [
+	unique("companies_customer_slug_unique").on(table.customerSlug),
+]);
+
 export const chatMutationAudit = pgTable("chat_mutation_audit", {
 	id: uuid().defaultRandom().primaryKey().notNull(),
 	chatSessionId: uuid("chat_session_id"),
@@ -405,20 +416,9 @@ export const chatMutationAudit = pgTable("chat_mutation_audit", {
 	// declaration Drizzle's inference can't unwind. Joins from the
 	// dashboard side use the column reference directly.
 	check("chat_mutation_audit_reversibility_class_check", sql`reversibility_class = ANY (ARRAY[1, 2, 3])`),
-	check("chat_mutation_audit_verb_check", sql`verb = ANY (ARRAY['create_ticket'::text, 'edit_ticket'::text, 'transition_ticket'::text, 'pause_agent'::text, 'resume_agent'::text, 'spawn_agent'::text, 'edit_agent_config'::text, 'propose_hire'::text, 'propose_skill_change'::text, 'bump_skill_version'::text, 'approve_hire'::text, 'reject_hire'::text, 'approve_skill_change'::text, 'reject_skill_change'::text, 'approve_version_bump'::text, 'reject_version_bump'::text, 'update_agent_md'::text, 'grandfathered_at_m7'::text, 'register_mcp_server'::text, 'create_scheduled_task'::text, 'edit_scheduled_task'::text, 'pause_scheduled_task'::text, 'resume_scheduled_task'::text, 'delete_scheduled_task'::text])`),
 	check("chat_mutation_audit_outcome_check", sql`outcome = ANY (ARRAY['success'::text, 'validation_failed'::text, 'leak_scan_failed'::text, 'ticket_state_changed'::text, 'concurrency_cap_full'::text, 'invalid_transition'::text, 'resource_not_found'::text, 'tool_call_ceiling_reached'::text, 'dept_weekly_ticket_budget_exceeded'::text, 'failed'::text, 'scheduled_task_creation_ceiling_reached'::text])`),
-	check("chat_mutation_audit_affected_resource_type_check", sql`(affected_resource_type IS NULL) OR (affected_resource_type = ANY (ARRAY['ticket'::text, 'agent_role'::text, 'hiring_proposal'::text, 'mcp_server'::text, 'scheduled_task'::text]))`),
-]);
-
-export const companies = pgTable("companies", {
-	id: uuid().defaultRandom().primaryKey().notNull(),
-	name: text().notNull(),
-	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-	dailyBudgetUsd: numeric("daily_budget_usd", { precision: 10, scale:  2 }),
-	pauseUntil: timestamp("pause_until", { withTimezone: true, mode: 'string' }),
-	customerSlug: text("customer_slug").default('garrison').notNull(),
-}, (table) => [
-	unique("companies_customer_slug_unique").on(table.customerSlug),
+	check("chat_mutation_audit_verb_check", sql`verb = ANY (ARRAY['create_ticket'::text, 'edit_ticket'::text, 'transition_ticket'::text, 'pause_agent'::text, 'resume_agent'::text, 'spawn_agent'::text, 'edit_agent_config'::text, 'propose_hire'::text, 'propose_skill_change'::text, 'bump_skill_version'::text, 'approve_hire'::text, 'reject_hire'::text, 'approve_skill_change'::text, 'reject_skill_change'::text, 'approve_version_bump'::text, 'reject_version_bump'::text, 'update_agent_md'::text, 'grandfathered_at_m7'::text, 'register_mcp_server'::text, 'create_scheduled_task'::text, 'edit_scheduled_task'::text, 'pause_scheduled_task'::text, 'resume_scheduled_task'::text, 'delete_scheduled_task'::text, 'request_external_action'::text, 'approve_action'::text, 'reject_action'::text, 'mark_action_done'::text])`),
+	check("chat_mutation_audit_affected_resource_type_check", sql`(affected_resource_type IS NULL) OR (affected_resource_type = ANY (ARRAY['ticket'::text, 'agent_role'::text, 'hiring_proposal'::text, 'mcp_server'::text, 'scheduled_task'::text, 'pending_action'::text]))`),
 ]);
 
 export const mcpServers = pgTable("mcp_servers", {
@@ -444,6 +444,37 @@ export const mcpServers = pgTable("mcp_servers", {
 	unique("mcp_servers_customer_slug_name_key").on(table.customerSlug, table.name),
 	check("mcp_servers_transport_check", sql`transport = ANY (ARRAY['http'::text, 'stdio'::text, 'sse'::text])`),
 	check("mcp_servers_status_check", sql`status = ANY (ARRAY['pending'::text, 'registered'::text, 'failed'::text, 'deregistered'::text])`),
+]);
+
+export const pendingActions = pgTable("pending_actions", {
+	id: uuid().defaultRandom().primaryKey().notNull(),
+	actionType: text("action_type").notNull(),
+	target: jsonb().notNull(),
+	renderedPayload: text("rendered_payload").notNull(),
+	agentInstanceId: uuid("agent_instance_id").notNull(),
+	ticketId: uuid("ticket_id"),
+	tier: text().notNull(),
+	tierReason: text("tier_reason").notNull(),
+	status: text().default('pending').notNull(),
+	approvedBy: text("approved_by"),
+	dispatchedAt: timestamp("dispatched_at", { withTimezone: true, mode: 'string' }),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+}, (table) => [
+	index("idx_pending_actions_dispatchable").using("btree", table.createdAt.asc().nullsLast().op("timestamptz_ops")).where(sql`((status = ANY (ARRAY['pending'::text, 'approved'::text])) AND (tier <> 'human_only'::text))`),
+	foreignKey({
+			columns: [table.agentInstanceId],
+			foreignColumns: [agentInstances.id],
+			name: "pending_actions_agent_instance_id_fkey"
+		}),
+	foreignKey({
+			columns: [table.ticketId],
+			foreignColumns: [tickets.id],
+			name: "pending_actions_ticket_id_fkey"
+		}),
+	check("pending_actions_tier_check", sql`tier = ANY (ARRAY['auto'::text, 'notify'::text, 'approve'::text, 'human_only'::text])`),
+	check("pending_actions_status_check", sql`status = ANY (ARRAY['pending'::text, 'approved'::text, 'rejected'::text, 'executed'::text, 'failed'::text, 'done'::text])`),
+	check("pending_actions_rendered_payload_check", sql`length(rendered_payload) > 0`),
+	check("pending_actions_floor_is_approve", sql`(action_type <> 'github_issue_comment'::text) OR (tier = 'approve'::text)`),
 ]);
 
 export const scheduledTasks = pgTable("scheduled_tasks", {
@@ -504,6 +535,29 @@ export const scheduledTaskRuns = pgTable("scheduled_task_runs", {
 	// chat_mutation_audit ↔ agent_instances cycle above. Joins from the
 	// dashboard side use the column reference directly.
 	check("scheduled_task_runs_outcome_check", sql`outcome = ANY (ARRAY['fired'::text, 'skipped_overlap'::text, 'gate_deferred'::text, 'failed'::text])`),
+]);
+
+export const pendingActionOutcomes = pgTable("pending_action_outcomes", {
+	id: uuid().defaultRandom().primaryKey().notNull(),
+	pendingActionId: uuid("pending_action_id").notNull(),
+	agentInstanceId: uuid("agent_instance_id").notNull(),
+	outcome: text().notNull(),
+	detail: text(),
+	structuredOutcome: jsonb("structured_outcome"),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+}, (table) => [
+	index("idx_pending_action_outcomes_action").using("btree", table.pendingActionId.asc().nullsLast().op("timestamptz_ops"), table.createdAt.asc().nullsLast().op("timestamptz_ops")),
+	foreignKey({
+			columns: [table.pendingActionId],
+			foreignColumns: [pendingActions.id],
+			name: "pending_action_outcomes_pending_action_id_fkey"
+		}),
+	foreignKey({
+			columns: [table.agentInstanceId],
+			foreignColumns: [agentInstances.id],
+			name: "pending_action_outcomes_agent_instance_id_fkey"
+		}),
+	check("pending_action_outcomes_outcome_check", sql`outcome = ANY (ARRAY['requested'::text, 'approved'::text, 'rejected'::text, 'executed'::text, 'failed'::text, 'notified'::text, 'done'::text, 'skipped_human_only'::text])`),
 ]);
 
 export const ingressDeliveries = pgTable("ingress_deliveries", {
