@@ -333,6 +333,14 @@ services:
       # dir creation.
       - ${GARRISON_AGENT_WORKSPACE_FS:-/var/lib/garrison/workspaces}:${GARRISON_AGENT_WORKSPACE_FS:-/var/lib/garrison/workspaces}
       - ${GARRISON_AGENT_SKILLS_FS:-/var/lib/garrison/skills}:${GARRISON_AGENT_SKILLS_FS:-/var/lib/garrison/skills}
+    # M10 — publish the public webhook port so GitHub can reach it. The port
+    # is only reachable when GARRISON_INGRESS_GITHUB_ENABLED=true is set in
+    # the supervisor environment and a webhook secret is stored in vault at
+    # ingress/github/webhook_secret (see docs/ops-checklist.md M10 section).
+    # GARRISON_INGRESS_PORT overrides the default 8082 on both sides if the
+    # default port is occupied.
+    ports:
+      - "${GARRISON_INGRESS_PORT:-8082}:${GARRISON_INGRESS_PORT:-8082}"
     restart: unless-stopped
 
   # M3 — operator dashboard (Next.js 16 + React 19; standalone build).

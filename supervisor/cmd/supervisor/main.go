@@ -19,6 +19,7 @@ import (
 	"github.com/garrison-hq/garrison/supervisor/internal/events"
 	"github.com/garrison-hq/garrison/supervisor/internal/health"
 	"github.com/garrison-hq/garrison/supervisor/internal/hygiene"
+	"github.com/garrison-hq/garrison/supervisor/internal/ingress"
 	"github.com/garrison-hq/garrison/supervisor/internal/mcpjungle"
 	"github.com/garrison-hq/garrison/supervisor/internal/mcpserverwork"
 	"github.com/garrison-hq/garrison/supervisor/internal/mempalace"
@@ -316,6 +317,18 @@ func runDaemon() int {
 	}
 	dashboardAPIServer := buildDashboardAPIServer(cfg, pool, objstoreClient, sharedPalaceClient, logger)
 
+	// M10 T008 — ingress server. Built here, after vault + pool are ready
+	// and the single-company CustomerID is resolved in cfg. Skipped when
+	// GARRISON_INGRESS_GITHUB_ENABLED=false (the default) or when vault is
+	// unavailable (fake-agent / no Infisical address), mirroring the
+	// buildDashboardAPIServer pattern. Fail-closed: if enabled but vault is
+	// unreachable, buildIngressServer returns ExitFailure.
+	var ingressRejectionCounter atomic.Int64
+	ingressServer, exitCode := buildIngressServer(ctx, cfg, pool, queries, vaultClient, &ingressRejectionCounter, logger)
+	if exitCode != ExitOK {
+		return exitCode
+	}
+
 	// M8 T011 — MCPJungle client + reconciler + reactive worker.
 	// MCPJungleURL empty in fake-agent mode and the M2.x chaos suites;
 	// the supervisor skips the whole subsystem in that case.
@@ -377,6 +390,7 @@ func runDaemon() int {
 	})
 
 	startDashboardAPIServerIfWired(g, gctx, dashboardAPIServer, cfg, logger)
+	startIngressServerIfWired(g, gctx, ingressServer, cfg, logger)
 
 	// M4 — agents.changed cache invalidator (T014 / FR-100), extended
 	// 2026-06-10: agents.changed now also fires from a DB trigger on
@@ -895,6 +909,69 @@ func startDashboardAPIServerIfWired(
 	}
 	g.Go(func() error {
 		logger.Info("dashboardapi server listening", "addr", fmt.Sprintf("0.0.0.0:%d", cfg.DashboardAPIPort))
+		return srv.Serve(gctx)
+	})
+}
+
+// buildIngressServer constructs the M10 ingress.Server from env config +
+// vault-fetched webhook secret. Returns (nil, ExitOK) when:
+//   - GARRISON_INGRESS_GITHUB_ENABLED is false (the default), or
+//   - vault is unavailable (fake-agent mode or no Infisical address).
+//
+// Returns (nil, ExitFailure) when GitHub ingress is enabled but vault fetch
+// fails — the supervisor must not start signature-blind (FR-302, plan decision
+// 12). This mirrors the buildObjstoreClient fail-closed boot posture.
+func buildIngressServer(
+	ctx context.Context,
+	cfg *config.Config,
+	pool *pgxpool.Pool,
+	queries *store.Queries,
+	vaultClient vault.Fetcher,
+	rejectionCounter *atomic.Int64,
+	logger *slog.Logger,
+) (*ingress.Server, int) {
+	if !cfg.IngressGitHubEnabled {
+		logger.Info("ingress: GARRISON_INGRESS_GITHUB_ENABLED=false; ingress server disabled")
+		return nil, ExitOK
+	}
+	if vaultClient == nil {
+		// Vault unavailable in fake-agent mode or when Infisical is unconfigured.
+		// The config.Load validation already rejects IngressGitHubEnabled=true +
+		// no Infisical addr in production; this guard covers fake-agent test runs.
+		logger.Warn("ingress: vault unavailable; skipping ingress server (fake-agent or no Infisical address)")
+		return nil, ExitOK
+	}
+
+	deps := ingress.Deps{
+		Pool:             pool,
+		Queries:          queries,
+		VaultClient:      vaultClient,
+		CustomerID:       cfg.CustomerID(),
+		RejectionCounter: rejectionCounter,
+	}
+	srv, err := ingress.NewServer(ctx, cfg, deps, logger)
+	if err != nil {
+		logger.Error("ingress: NewServer failed; aborting startup", "err", err)
+		return nil, ExitFailure
+	}
+	return srv, ExitOK
+}
+
+// startIngressServerIfWired registers the ingress server's Serve goroutine on
+// the errgroup when buildIngressServer produced a non-nil server. Mirrors
+// startDashboardAPIServerIfWired (Sonar cognitive-complexity pattern).
+func startIngressServerIfWired(
+	g *errgroup.Group,
+	gctx context.Context,
+	srv *ingress.Server,
+	cfg *config.Config,
+	logger *slog.Logger,
+) {
+	if srv == nil {
+		return
+	}
+	g.Go(func() error {
+		logger.Info("ingress server listening", "addr", fmt.Sprintf("0.0.0.0:%d", cfg.IngressPort))
 		return srv.Serve(gctx)
 	})
 }
