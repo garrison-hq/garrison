@@ -47,7 +47,7 @@ T009–T012 are the unit test suites covering signature, render, GitHub connecto
 
 ## Phase 1 — Framework foundations
 
-- [ ] **T003** `internal/config/` — ingress env vars
+- [x] **T003** `internal/config/` — ingress env vars
   - **Depends on**: T002.
   - **Files**: `supervisor/internal/config/config.go` (extend — `IngressPort`, `IngressGitHubEnabled`, `IngressGitHubConnectorID`, `IngressGitHubDepartment`, `IngressGitHubRatePerMin`, `IngressGitHubBurst`); `supervisor/internal/config/config_test.go` (extend).
   - **Completion condition**: `GARRISON_INGRESS_PORT` (int, default `8082`, reject `< 1`), `GARRISON_INGRESS_GITHUB_ENABLED` (bool, default `false`), `GARRISON_INGRESS_GITHUB_CONNECTOR_ID` (string, default `"github-sortie"`), `GARRISON_INGRESS_GITHUB_DEPARTMENT` (string, required when enabled, reject empty), `GARRISON_INGRESS_GITHUB_RATE_PER_MIN` (int, default `60`, reject `< 1`), `GARRISON_INGRESS_GITHUB_BURST` (int, default `30`, reject `< 1`) parse per the existing env-var patterns. Webhook secret is NOT an env var (vault-fetched at boot, T008). Tests pass: `TestConfigIngressDefaults`, `TestConfigIngressOverrides`, `TestConfigIngressRejectsZeroPort`, `TestConfigIngressRejectsEmptyDepartmentWhenEnabled`. `gofmt -l` + `go vet` clean.

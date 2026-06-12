@@ -194,6 +194,17 @@ type Config struct {
 	SchedTickInterval        time.Duration // GARRISON_SCHED_TICK_INTERVAL, default 30s, reject < 1s
 	SchedMinInterval         time.Duration // GARRISON_SCHED_MIN_INTERVAL, default 15m, reject <= 0
 	MaxScheduledTasksPerTurn int           // GARRISON_CHAT_MAX_SCHEDULED_TASKS_PER_TURN, default 3, reject < 1
+
+	// M10 fields. Ingress connector framework: port for the public webhook
+	// listener (separate from health 8080 and dashboardapi 8081) and the
+	// GitHub connector configuration. The webhook secret is NOT stored here —
+	// it is vault-fetched at boot by ingress.Server (T008, FR-302, decision 12).
+	IngressPort              int    // GARRISON_INGRESS_PORT, default 8082, reject < 1
+	IngressGitHubEnabled     bool   // GARRISON_INGRESS_GITHUB_ENABLED, default false
+	IngressGitHubConnectorID string // GARRISON_INGRESS_GITHUB_CONNECTOR_ID, default "github-sortie"
+	IngressGitHubDepartment  string // GARRISON_INGRESS_GITHUB_DEPARTMENT, required when enabled, reject empty
+	IngressGitHubRatePerMin  int    // GARRISON_INGRESS_GITHUB_RATE_PER_MIN, default 60, reject < 1
+	IngressGitHubBurst       int    // GARRISON_INGRESS_GITHUB_BURST, default 30, reject < 1
 }
 
 // DefaultMinIOBucket per M5.4 spec FR-620.
@@ -203,6 +214,26 @@ const DefaultMinIOBucket = "garrison-company"
 // GARRISON_HEALTH_PORT (8080) so the auth-required /api/* endpoints
 // are isolated from the auth-free /health endpoint.
 const DefaultDashboardAPIPort uint16 = 8081
+
+// M10 ingress connector defaults (plan.md §Configuration + vault, decision 6/9).
+const (
+	// DefaultIngressPort is the public webhook listener port (separate from
+	// health 8080 and dashboardapi 8081; decision 6, R5). Override via
+	// GARRISON_INGRESS_PORT.
+	DefaultIngressPort = 8082
+	// DefaultIngressGitHubConnectorID is the stable identity string recorded
+	// in ingress_deliveries.connector_id and tickets.metadata.ingress_connector
+	// for the alpha GitHub connector (decision 9). Override via
+	// GARRISON_INGRESS_GITHUB_CONNECTOR_ID.
+	DefaultIngressGitHubConnectorID = "github-sortie"
+	// DefaultIngressGitHubRatePerMin is the token-bucket refill rate for the
+	// GitHub connector (decision 8). Override via GARRISON_INGRESS_GITHUB_RATE_PER_MIN.
+	DefaultIngressGitHubRatePerMin = 60
+	// DefaultIngressGitHubBurst is the token-bucket capacity (initial tokens
+	// available) for the GitHub connector (decision 8). Override via
+	// GARRISON_INGRESS_GITHUB_BURST.
+	DefaultIngressGitHubBurst = 30
+)
 
 // AgentMempalaceDSN returns the SELECT-only DSN the hygiene checker uses.
 // Derived from DatabaseURL with userinfo replaced by
@@ -315,6 +346,14 @@ func Load() (*Config, error) {
 		SchedTickInterval:        30 * time.Second,
 		SchedMinInterval:         15 * time.Minute,
 		MaxScheduledTasksPerTurn: 3,
+
+		// M10 defaults.
+		IngressPort:              DefaultIngressPort,
+		IngressGitHubEnabled:     false,
+		IngressGitHubConnectorID: DefaultIngressGitHubConnectorID,
+		IngressGitHubDepartment:  "",
+		IngressGitHubRatePerMin:  DefaultIngressGitHubRatePerMin,
+		IngressGitHubBurst:       DefaultIngressGitHubBurst,
 	}
 
 	// M5.1 env overrides — all optional; defaults above are used
@@ -493,6 +532,60 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("config: GARRISON_CHAT_MAX_SCHEDULED_TASKS_PER_TURN must be >= 1; got %d", n)
 		}
 		cfg.MaxScheduledTasksPerTurn = n
+	}
+
+	// M10 env overrides — ingress connector framework (plan.md §Configuration + vault, decision 9).
+	if v := os.Getenv("GARRISON_INGRESS_PORT"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return nil, fmt.Errorf("config: GARRISON_INGRESS_PORT %q is not parseable as int: %w", v, err)
+		}
+		if n < 1 {
+			return nil, fmt.Errorf("config: GARRISON_INGRESS_PORT must be >= 1; got %d", n)
+		}
+		cfg.IngressPort = n
+	}
+	if v := os.Getenv("GARRISON_INGRESS_GITHUB_ENABLED"); v != "" {
+		switch v {
+		case "true", "1", "yes":
+			cfg.IngressGitHubEnabled = true
+		case "false", "0", "no":
+			cfg.IngressGitHubEnabled = false
+		default:
+			return nil, fmt.Errorf("config: GARRISON_INGRESS_GITHUB_ENABLED must be true/false/1/0/yes/no; got %q", v)
+		}
+	}
+	if v := os.Getenv("GARRISON_INGRESS_GITHUB_CONNECTOR_ID"); v != "" {
+		cfg.IngressGitHubConnectorID = v
+	}
+	if v := os.Getenv("GARRISON_INGRESS_GITHUB_DEPARTMENT"); v != "" {
+		cfg.IngressGitHubDepartment = v
+	}
+	if v := os.Getenv("GARRISON_INGRESS_GITHUB_RATE_PER_MIN"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return nil, fmt.Errorf("config: GARRISON_INGRESS_GITHUB_RATE_PER_MIN %q is not parseable as int: %w", v, err)
+		}
+		if n < 1 {
+			return nil, fmt.Errorf("config: GARRISON_INGRESS_GITHUB_RATE_PER_MIN must be >= 1; got %d", n)
+		}
+		cfg.IngressGitHubRatePerMin = n
+	}
+	if v := os.Getenv("GARRISON_INGRESS_GITHUB_BURST"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return nil, fmt.Errorf("config: GARRISON_INGRESS_GITHUB_BURST %q is not parseable as int: %w", v, err)
+		}
+		if n < 1 {
+			return nil, fmt.Errorf("config: GARRISON_INGRESS_GITHUB_BURST must be >= 1; got %d", n)
+		}
+		cfg.IngressGitHubBurst = n
+	}
+	// Validate: GARRISON_INGRESS_GITHUB_DEPARTMENT is required when the GitHub
+	// connector is enabled (fail-closed at Load time so the supervisor never
+	// starts with an incomplete ingress configuration, FR-302 posture).
+	if cfg.IngressGitHubEnabled && cfg.IngressGitHubDepartment == "" {
+		return nil, fmt.Errorf("config: GARRISON_INGRESS_GITHUB_DEPARTMENT is required when GARRISON_INGRESS_GITHUB_ENABLED is true")
 	}
 
 	dbURL := os.Getenv("GARRISON_DATABASE_URL")
