@@ -106,7 +106,7 @@ T009–T012 are the unit test suites covering signature, render, GitHub connecto
     All pass. `gofmt -l` + `go vet` clean.
   - **Out of scope for this task**: GitHub connector tests (T010); handler tests (T011).
 
-- [ ] **T010** Unit tests — `internal/ingress/github_test.go`
+- [x] **T010** Unit tests — `internal/ingress/github_test.go`
   - **Depends on**: T005.
   - **Files**: `supervisor/internal/ingress/github_test.go` (new).
   - **Completion condition**: the following tests pass:
