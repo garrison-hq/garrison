@@ -285,7 +285,7 @@ export const throttleEvents = pgTable("throttle_events", {
 			foreignColumns: [companies.id],
 			name: "throttle_events_company_id_fkey"
 		}),
-	check("throttle_events_kind_check", sql`kind = ANY (ARRAY['company_budget_exceeded'::text, 'rate_limit_pause'::text, 'dept_weekly_ticket_budget_exceeded'::text])`),
+	check("throttle_events_kind_check", sql`kind = ANY (ARRAY['company_budget_exceeded'::text, 'rate_limit_pause'::text, 'dept_weekly_ticket_budget_exceeded'::text, 'ingress_rate_cap_exceeded'::text])`),
 ]);
 
 export const hiringProposals = pgTable("hiring_proposals", {
@@ -504,6 +504,22 @@ export const scheduledTaskRuns = pgTable("scheduled_task_runs", {
 	// chat_mutation_audit ↔ agent_instances cycle above. Joins from the
 	// dashboard side use the column reference directly.
 	check("scheduled_task_runs_outcome_check", sql`outcome = ANY (ARRAY['fired'::text, 'skipped_overlap'::text, 'gate_deferred'::text, 'failed'::text])`),
+]);
+
+export const ingressDeliveries = pgTable("ingress_deliveries", {
+	id: uuid().defaultRandom().primaryKey().notNull(),
+	connectorId: text("connector_id").notNull(),
+	externalDeliveryId: text("external_delivery_id").notNull(),
+	ticketId: uuid("ticket_id"),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+}, (table) => [
+	index("idx_ingress_deliveries_connector_created").using("btree", table.connectorId.asc().nullsLast().op("text_ops"), table.createdAt.desc().nullsFirst().op("timestamptz_ops")),
+	foreignKey({
+			columns: [table.ticketId],
+			foreignColumns: [tickets.id],
+			name: "ingress_deliveries_ticket_id_fkey"
+		}),
+	unique("ingress_deliveries_connector_id_external_delivery_id_key").on(table.connectorId, table.externalDeliveryId),
 ]);
 
 export const secretMetadata = pgTable("secret_metadata", {
