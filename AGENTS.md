@@ -27,7 +27,7 @@ Garrison is being built milestone-by-milestone (M1 through M9). Each milestone s
 - **M5.3** — chat-driven mutations under autonomous-execution posture. **Active.**
 - **M6** through **M9** — see `ARCHITECTURE.md`.
 
-Current milestone: **M5.3 — chat-driven mutations**.
+Current milestone: **M11 — Action Broker**.
 
 Per-milestone domain knowledge (the "activate before writing code" detail) lives in [`docs/agents/milestone-context.md`](docs/agents/milestone-context.md) so it's not in every-session context.
 
@@ -41,7 +41,7 @@ These documents govern this project. Read the ones relevant to your current task
 |---|---|---|
 | Rationale | `RATIONALE.md` | 13 architectural decisions with alternatives considered and trade-offs accepted. Do not re-litigate decisions here. |
 | Architecture | `ARCHITECTURE.md` | System components, data model, event flow, build plan, dashboard surfaces. |
-| Active milestone context | `specs/_context/m{N}-context.md` (latest shipped: M8 — `specs/_context/m8-context.md`; next planned: M9 scheduled wake-ups) | Binding constraints for the active milestone. The active milestone's context file is always the most operationally relevant document for code work. |
+| Active milestone context | `specs/_context/m{N}-context.md` (active: M11 — `specs/_context/m11-context.md`; latest shipped through M10) | Binding constraints for the active milestone. The active milestone's context file is always the most operationally relevant document for code work. |
 | Per-milestone agent context | `docs/agents/milestone-context.md` | The "activate before writing code" detail per milestone (M1 → M8 shipped). Read the entries for the current milestone plus all prior milestones whose code remains in the codebase. |
 | Repository layout | `docs/agents/repository-layout.md` | Annotated file tree. Read on first session in the repo or when uncertain where a file belongs. |
 | Constitution | `.specify/memory/constitution.md` | Spec-kit's constitution file. Populated via `/speckit.constitution`. |
@@ -152,7 +152,8 @@ Standing out-of-scope for any non-named milestone:
 - ~~**MCP-server registry**~~ — **shipped in M8 (2026-05-11)** via MCPJungle sidecar. Sealed; per-agent McpClient names follow `<customer_slug>.<role>.<short-id>`; bearer tokens land at vault `mcpjungle/agents/<agent-id>`.
 - **Cost-telemetry blind-spot fix** — see `docs/issues/cost-telemetry-blind-spot.md`. Successful finalize runs read `$0.00` for `total_cost_usd`; surface the caveat in any cost UI but do not fix the supervisor signal-handling here.
 - **Mutating sealed M2/M2.3/M7/M8 surfaces** — supervisor spawn semantics, finalize tool schema (the finalize surface is extended by the M9 context — `specs/_context/m9-context.md` §Scope extensions — with the sibling tool `finalize_oneshot` for scheduled oneshot runs; `finalize_ticket`'s own schema and semantics are unchanged), vault rules, `garrison_agent_*` Postgres roles, MemPalace MCP wiring, per-agent container model, MCPJungle naming convention. These are sealed unless the active milestone's context file explicitly amends them.
-- Future-milestone surfaces — M9 sessions don't carry M10+ work; etc.
+- ~~**Action Broker outbound surface**~~ — **shipped in M11 (2026-06-12)**. Sealed; the `request_external_action` verb (12th in the `Verbs` registry, agent-callers only, ReversibilityClass 3), the `work.pending_actions` and `work.pending_action_outcomes` tables, the `internal/actionbroker` dispatcher worker (channel `work.action.dispatch_requested`), the `internal/actionbroker/policy.go` tier policy + permanent-Approve floor (compile-time constant, not lowerable), and the `/admin/outbox` dashboard surface are binding. Future milestones adding action providers or operator tier-editors must amend `docs/security/action-broker-threat-model.md` before code lands. The squid egress allow-list (`supervisor/egress/squid.conf`) remains `api.anthropic.com`-only; the dispatcher is supervisor-side and does not route through squid.
+- Future-milestone surfaces — M11 sessions don't carry M12+ work; etc.
 
 When tempted to broaden scope because "we'll need it later," stop. Note it as an open question in the spec or the retro. Do not implement it.
 
