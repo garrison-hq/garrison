@@ -62,6 +62,13 @@ var allEnvVars = []string{
 	"GARRISON_SCHED_TICK_INTERVAL",
 	"GARRISON_SCHED_MIN_INTERVAL",
 	"GARRISON_CHAT_MAX_SCHEDULED_TASKS_PER_TURN",
+	// M10 additions
+	"GARRISON_INGRESS_PORT",
+	"GARRISON_INGRESS_GITHUB_ENABLED",
+	"GARRISON_INGRESS_GITHUB_CONNECTOR_ID",
+	"GARRISON_INGRESS_GITHUB_DEPARTMENT",
+	"GARRISON_INGRESS_GITHUB_RATE_PER_MIN",
+	"GARRISON_INGRESS_GITHUB_BURST",
 }
 
 // clearAll unsets every GARRISON_* env var the config package reads, so a test
@@ -1094,6 +1101,119 @@ func TestConfigSchedRejectsZeroTick(t *testing.T) {
 				t.Errorf("expected error for tick interval %q", v)
 			}
 		})
+	}
+}
+
+// -------- M10 T003 ingress env-var tests ------------------------------------
+
+// TestConfigIngressDefaults — with no M10 env vars set, the config carries the
+// documented defaults: port 8082, GitHub connector disabled, connector ID
+// "github-sortie", rate 60/min, burst 30 (plan.md §Configuration + vault,
+// decision 9; tasks.md T003 completion condition).
+func TestConfigIngressDefaults(t *testing.T) {
+	clearAll(t)
+	t.Setenv("GARRISON_DATABASE_URL", validDBURL)
+	t.Setenv("GARRISON_FAKE_AGENT_CMD", validFakeCmd)
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.IngressPort != config.DefaultIngressPort {
+		t.Errorf("IngressPort = %d; want %d", cfg.IngressPort, config.DefaultIngressPort)
+	}
+	if cfg.IngressGitHubEnabled {
+		t.Error("IngressGitHubEnabled = true; want false (disabled by default)")
+	}
+	if cfg.IngressGitHubConnectorID != config.DefaultIngressGitHubConnectorID {
+		t.Errorf("IngressGitHubConnectorID = %q; want %q", cfg.IngressGitHubConnectorID, config.DefaultIngressGitHubConnectorID)
+	}
+	if cfg.IngressGitHubDepartment != "" {
+		t.Errorf("IngressGitHubDepartment = %q; want empty (unset by default)", cfg.IngressGitHubDepartment)
+	}
+	if cfg.IngressGitHubRatePerMin != config.DefaultIngressGitHubRatePerMin {
+		t.Errorf("IngressGitHubRatePerMin = %d; want %d", cfg.IngressGitHubRatePerMin, config.DefaultIngressGitHubRatePerMin)
+	}
+	if cfg.IngressGitHubBurst != config.DefaultIngressGitHubBurst {
+		t.Errorf("IngressGitHubBurst = %d; want %d", cfg.IngressGitHubBurst, config.DefaultIngressGitHubBurst)
+	}
+}
+
+// TestConfigIngressOverrides — every M10 ingress env var is honoured when set
+// to a valid value (tasks.md T003 completion condition).
+func TestConfigIngressOverrides(t *testing.T) {
+	clearAll(t)
+	t.Setenv("GARRISON_DATABASE_URL", validDBURL)
+	t.Setenv("GARRISON_FAKE_AGENT_CMD", validFakeCmd)
+	t.Setenv("GARRISON_INGRESS_PORT", "9082")
+	t.Setenv("GARRISON_INGRESS_GITHUB_ENABLED", "true")
+	t.Setenv("GARRISON_INGRESS_GITHUB_CONNECTOR_ID", "github-myorg")
+	t.Setenv("GARRISON_INGRESS_GITHUB_DEPARTMENT", "engineering")
+	t.Setenv("GARRISON_INGRESS_GITHUB_RATE_PER_MIN", "120")
+	t.Setenv("GARRISON_INGRESS_GITHUB_BURST", "60")
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.IngressPort != 9082 {
+		t.Errorf("IngressPort = %d; want 9082", cfg.IngressPort)
+	}
+	if !cfg.IngressGitHubEnabled {
+		t.Error("IngressGitHubEnabled = false; want true")
+	}
+	if cfg.IngressGitHubConnectorID != "github-myorg" {
+		t.Errorf("IngressGitHubConnectorID = %q; want github-myorg", cfg.IngressGitHubConnectorID)
+	}
+	if cfg.IngressGitHubDepartment != "engineering" {
+		t.Errorf("IngressGitHubDepartment = %q; want engineering", cfg.IngressGitHubDepartment)
+	}
+	if cfg.IngressGitHubRatePerMin != 120 {
+		t.Errorf("IngressGitHubRatePerMin = %d; want 120", cfg.IngressGitHubRatePerMin)
+	}
+	if cfg.IngressGitHubBurst != 60 {
+		t.Errorf("IngressGitHubBurst = %d; want 60", cfg.IngressGitHubBurst)
+	}
+}
+
+// TestConfigIngressRejectsZeroPort — GARRISON_INGRESS_PORT=0 is rejected at
+// startup (tasks.md T003 completion condition; FR-302 posture).
+func TestConfigIngressRejectsZeroPort(t *testing.T) {
+	for _, v := range []string{"0", "-1", "-8082"} {
+		t.Run("port="+v, func(t *testing.T) {
+			clearAll(t)
+			t.Setenv("GARRISON_DATABASE_URL", validDBURL)
+			t.Setenv("GARRISON_FAKE_AGENT_CMD", validFakeCmd)
+			t.Setenv("GARRISON_INGRESS_PORT", v)
+
+			_, err := config.Load()
+			if err == nil {
+				t.Fatalf("Load(%q): want error for invalid port, got nil", v)
+			}
+			if !strings.Contains(err.Error(), "GARRISON_INGRESS_PORT") {
+				t.Errorf("error = %v; want it to name GARRISON_INGRESS_PORT", err)
+			}
+		})
+	}
+}
+
+// TestConfigIngressRejectsEmptyDepartmentWhenEnabled — when
+// GARRISON_INGRESS_GITHUB_ENABLED=true but GARRISON_INGRESS_GITHUB_DEPARTMENT
+// is unset/empty, Load returns an error (required field; tasks.md T003
+// completion condition; fail-closed per FR-302 posture).
+func TestConfigIngressRejectsEmptyDepartmentWhenEnabled(t *testing.T) {
+	clearAll(t)
+	t.Setenv("GARRISON_DATABASE_URL", validDBURL)
+	t.Setenv("GARRISON_FAKE_AGENT_CMD", validFakeCmd)
+	t.Setenv("GARRISON_INGRESS_GITHUB_ENABLED", "true")
+	// GARRISON_INGRESS_GITHUB_DEPARTMENT intentionally left unset.
+
+	_, err := config.Load()
+	if err == nil {
+		t.Fatal("Load(): want error when GARRISON_INGRESS_GITHUB_ENABLED=true without DEPARTMENT, got nil")
+	}
+	if !strings.Contains(err.Error(), "GARRISON_INGRESS_GITHUB_DEPARTMENT") {
+		t.Errorf("error = %v; want it to name GARRISON_INGRESS_GITHUB_DEPARTMENT", err)
 	}
 }
 

@@ -6,7 +6,7 @@
 // CompanyMDEditor.tsx; this component wires Server Actions
 // (lib/actions/companyMD.ts) to the editor.
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import Link from 'next/link';
 import {
   getCompanyMD,
@@ -105,6 +105,38 @@ export function CompanyMDTab() {
 
   const isEmpty = loaded === '' && etag === null && !loadError;
 
+  let body: ReactNode;
+  if (isEmpty && mode === 'view') {
+    body = (
+      <p className="text-text-3 text-[13px]">
+        No Company.md yet — click Edit to create one.
+      </p>
+    );
+  } else if (mode === 'view') {
+    // View mode renders the markdown content as styled prose
+    // matching the chat's AssistantMarkdown component. The
+    // CodeMirror editor's oneDark theme highlights headings in
+    // saturated red, which clashes with the muted-token surface;
+    // the rendered preview reads as a calm document instead of a
+    // syntax-highlighted source listing.
+    body = (
+      <article
+        className="text-[13px] leading-[1.55] text-text-1"
+        data-testid="company-md-preview"
+      >
+        <AssistantMarkdown content={loaded} />
+      </article>
+    );
+  } else {
+    body = (
+      <CompanyMDEditor
+        value={buffer}
+        onChange={setBuffer}
+        readOnly={false}
+      />
+    );
+  }
+
   return (
     <section
       className="flex flex-col h-full"
@@ -164,30 +196,7 @@ export function CompanyMDTab() {
           />
         ) : null}
 
-        {isEmpty && mode === 'view' ? (
-          <p className="text-text-3 text-[13px]">
-            No Company.md yet — click Edit to create one.
-          </p>
-        ) : mode === 'view' ? (
-          // View mode renders the markdown content as styled prose
-          // matching the chat's AssistantMarkdown component. The
-          // CodeMirror editor's oneDark theme highlights headings in
-          // saturated red, which clashes with the muted-token surface;
-          // the rendered preview reads as a calm document instead of a
-          // syntax-highlighted source listing.
-          <article
-            className="text-[13px] leading-[1.55] text-text-1"
-            data-testid="company-md-preview"
-          >
-            <AssistantMarkdown content={loaded} />
-          </article>
-        ) : (
-          <CompanyMDEditor
-            value={buffer}
-            onChange={setBuffer}
-            readOnly={false}
-          />
-        )}
+        {body}
 
         {confirmingCancel ? (
           <dialog

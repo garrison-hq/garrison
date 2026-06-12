@@ -300,7 +300,7 @@ export async function editSecret(params: EditSecretParams): Promise<EditSecretRe
           accepted: false as const,
           conflict: true as const,
           serverState: lockResult.serverState
-            ? snapshotFrom(lockResult.serverState as Record<string, unknown>)
+            ? snapshotFrom(lockResult.serverState)
             : null,
         };
       }

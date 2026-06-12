@@ -24,8 +24,10 @@ import (
 // the new agent_instances_exactly_one_origin CHECK is validated against
 // genuinely pre-existing data (not a fresh empty table).
 const (
-	preM9Version = 20260610000001
-	m9Version    = 20260610000002
+	preM9Version  = 20260610000001
+	m9Version     = 20260610000002
+	preM10Version = 20260610000002
+	m10Version    = 20260612000000
 )
 
 // TestM9MigrationRoundtrip — T001 completion gate.
@@ -194,6 +196,241 @@ func assertLegacyRowsSatisfyOriginCheck(ctx context.Context, t *testing.T, db *s
 	if !validated {
 		t.Fatal("agent_instances_exactly_one_origin landed NOT VALID; pre-existing rows were not checked")
 	}
+}
+
+// TestM10MigrationRoundtrip — T002 completion gate.
+//
+//  1. Boot a fresh postgres:17 container (NOT the shared testdb harness:
+//     this test seeds rows before the M10 migration applies so the
+//     throttle_events_kind_check extension is validated against real data).
+//  2. goose up-to the pre-M10 version (M9 head); seed throttle_events rows
+//     using the three M8/M9 kinds {company_budget_exceeded, rate_limit_pause,
+//     dept_weekly_ticket_budget_exceeded} to prove pre-existing rows satisfy
+//     the extended CHECK after M10 lands.
+//  3. goose up to head → the M10 Up applies; the CHECK extension validates
+//     existing rows, so success here proves pre-M9 rows satisfy the new
+//     four-value CHECK.
+//  4. Fingerprint the schema, goose down past M10, goose up again,
+//     fingerprint again: apply → rollback → apply must be byte-for-byte stable.
+func TestM10MigrationRoundtrip(t *testing.T) {
+	ctx := context.Background()
+
+	pgC, err := postgres.Run(ctx, "postgres:17",
+		postgres.WithDatabase("m10roundtrip"),
+		postgres.WithUsername("test"),
+		postgres.WithPassword("test"),
+		testcontainers.WithWaitStrategy(
+			wait.ForLog("database system is ready to accept connections").
+				WithOccurrence(2).
+				WithStartupTimeout(60*time.Second),
+		),
+	)
+	if err != nil {
+		t.Fatalf("run postgres container: %v", err)
+	}
+	t.Cleanup(func() { _ = pgC.Terminate(context.Background()) })
+
+	url, err := pgC.ConnectionString(ctx, "sslmode=disable")
+	if err != nil {
+		t.Fatalf("connection string: %v", err)
+	}
+	db, err := sql.Open("pgx", url)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	migrationsDir := repoMigrationsDir(t)
+	if err := goose.SetDialect("postgres"); err != nil {
+		t.Fatalf("goose.SetDialect: %v", err)
+	}
+
+	// (2) Migrate to M9 head, then seed throttle_events rows using the
+	// three pre-M10 kinds so we can prove the extended CHECK still accepts them.
+	if err := goose.UpToContext(ctx, db, migrationsDir, preM10Version); err != nil {
+		t.Fatalf("goose up-to %d (pre-M10): %v", preM10Version, err)
+	}
+	seedPreM10ThrottleEvents(ctx, t, db)
+
+	// (3) Apply M10 on top of the seeded data. The CHECK extension validates
+	// all existing rows, so an error here means pre-M10 rows violate the
+	// extended four-value CHECK.
+	if err := goose.UpContext(ctx, db, migrationsDir); err != nil {
+		t.Fatalf("goose up (M10 apply over legacy rows): %v", err)
+	}
+	assertPreM10ThrottleEventsSatisfyExtendedCheck(ctx, t, db)
+
+	// Assert ingress_deliveries table exists with the expected columns.
+	assertIngressDeliveriesTable(ctx, t, db)
+
+	fpFirst := m10SchemaFingerprint(ctx, t, db)
+
+	// (4) Roundtrip: down past M10, back up, fingerprint must not move.
+	if err := goose.DownToContext(ctx, db, migrationsDir, preM10Version); err != nil {
+		t.Fatalf("goose down-to %d (M10 rollback): %v", preM10Version, err)
+	}
+
+	// Post-rollback sanity: ingress_deliveries is gone.
+	var tableCount int
+	if err := db.QueryRowContext(ctx,
+		`SELECT count(*) FROM information_schema.tables
+		  WHERE table_schema = 'public'
+		    AND table_name = 'ingress_deliveries'`,
+	).Scan(&tableCount); err != nil {
+		t.Fatalf("post-rollback table probe: %v", err)
+	}
+	if tableCount != 0 {
+		t.Fatalf("ingress_deliveries survived M10 rollback")
+	}
+
+	if err := goose.UpContext(ctx, db, migrationsDir); err != nil {
+		t.Fatalf("goose up (M10 re-apply): %v", err)
+	}
+	fpSecond := m10SchemaFingerprint(ctx, t, db)
+
+	if fpFirst != fpSecond {
+		t.Fatalf("M10 schema fingerprint changed across apply → rollback → apply:\n--- first ---\n%s\n--- second ---\n%s", fpFirst, fpSecond)
+	}
+}
+
+// seedPreM10ThrottleEvents inserts throttle_events rows using the three
+// pre-M10 kinds so the M10 migration's CHECK extension is validated against
+// real data. Requires a company row (seeded here) since throttle_events has
+// a company_id FK.
+func seedPreM10ThrottleEvents(ctx context.Context, t *testing.T, db *sql.DB) {
+	t.Helper()
+	var companyID string
+	if err := db.QueryRowContext(ctx,
+		`SELECT id FROM companies LIMIT 1`,
+	).Scan(&companyID); err != nil {
+		// No company row exists; insert one.
+		if err := db.QueryRowContext(ctx, `
+			INSERT INTO companies (name, daily_budget_usd)
+			VALUES ('M10 roundtrip', 1.00)
+			RETURNING id`,
+		).Scan(&companyID); err != nil {
+			t.Fatalf("seed company: %v", err)
+		}
+	}
+	for _, kind := range []string{
+		"company_budget_exceeded",
+		"rate_limit_pause",
+		"dept_weekly_ticket_budget_exceeded",
+	} {
+		if _, err := db.ExecContext(ctx, `
+			INSERT INTO throttle_events (company_id, kind, payload)
+			VALUES ($1, $2, '{}')`,
+			companyID, kind,
+		); err != nil {
+			t.Fatalf("seed throttle_event kind=%s: %v", kind, err)
+		}
+	}
+}
+
+// assertPreM10ThrottleEventsSatisfyExtendedCheck verifies every pre-M10
+// throttle_events row satisfies the new four-value CHECK after M10 lands.
+func assertPreM10ThrottleEventsSatisfyExtendedCheck(ctx context.Context, t *testing.T, db *sql.DB) {
+	t.Helper()
+	var total, satisfying int
+	if err := db.QueryRowContext(ctx, `
+		SELECT count(*),
+		       count(*) FILTER (WHERE kind IN (
+		           'company_budget_exceeded',
+		           'rate_limit_pause',
+		           'dept_weekly_ticket_budget_exceeded',
+		           'ingress_rate_cap_exceeded'))
+		  FROM throttle_events`,
+	).Scan(&total, &satisfying); err != nil {
+		t.Fatalf("throttle_events CHECK probe: %v", err)
+	}
+	if total == 0 {
+		t.Fatal("expected at least one pre-existing throttle_events row")
+	}
+	if satisfying != total {
+		t.Fatalf("%d of %d pre-existing throttle_events rows would violate the extended M10 CHECK", total-satisfying, total)
+	}
+}
+
+// assertIngressDeliveriesTable verifies the ingress_deliveries table exists
+// with the expected column set after the M10 Up migration applies.
+func assertIngressDeliveriesTable(ctx context.Context, t *testing.T, db *sql.DB) {
+	t.Helper()
+	const q = `
+		SELECT column_name FROM information_schema.columns
+		 WHERE table_schema = 'public'
+		   AND table_name = 'ingress_deliveries'
+		 ORDER BY column_name`
+	rows, err := db.QueryContext(ctx, q)
+	if err != nil {
+		t.Fatalf("ingress_deliveries columns probe: %v", err)
+	}
+	defer rows.Close()
+	var got []string
+	for rows.Next() {
+		var col string
+		if err := rows.Scan(&col); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		got = append(got, col)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows: %v", err)
+	}
+	want := []string{"connector_id", "created_at", "external_delivery_id", "id", "ticket_id"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("ingress_deliveries columns: got %v, want %v", got, want)
+	}
+}
+
+// m10SchemaFingerprint renders a deterministic, sorted text dump of the
+// columns, indexes, constraints, and grants for ingress_deliveries and
+// throttle_events — the tables M10 touches. Two equal fingerprints mean
+// apply → rollback → apply reproduced the schema exactly.
+func m10SchemaFingerprint(ctx context.Context, t *testing.T, db *sql.DB) string {
+	t.Helper()
+	const q = `
+SELECT 'column: ' || table_name || '.' || column_name
+       || ' type=' || data_type
+       || ' nullable=' || is_nullable
+       || ' default=' || COALESCE(column_default, '<none>') AS line
+  FROM information_schema.columns
+ WHERE table_schema = 'public'
+   AND table_name IN ('ingress_deliveries', 'throttle_events')
+UNION ALL
+SELECT 'index: ' || indexname || ' def=' || indexdef
+  FROM pg_indexes
+ WHERE schemaname = 'public'
+   AND tablename IN ('ingress_deliveries', 'throttle_events')
+UNION ALL
+SELECT 'constraint: ' || conrelid::regclass::text || '.' || conname
+       || ' def=' || pg_get_constraintdef(oid)
+  FROM pg_constraint
+ WHERE conrelid <> 0
+   AND conrelid::regclass::text IN ('ingress_deliveries', 'throttle_events')
+UNION ALL
+SELECT 'grant: ' || grantee || ' ' || privilege_type || ' ON ' || table_name
+  FROM information_schema.role_table_grants
+ WHERE table_schema = 'public'
+   AND grantee = 'garrison_dashboard_app'
+   AND table_name = 'ingress_deliveries'
+ORDER BY 1`
+	rows, err := db.QueryContext(ctx, q)
+	if err != nil {
+		t.Fatalf("m10 fingerprint query: %v", err)
+	}
+	defer rows.Close()
+	var lines []string
+	for rows.Next() {
+		var line string
+		if err := rows.Scan(&line); err != nil {
+			t.Fatalf("m10 fingerprint scan: %v", err)
+		}
+		lines = append(lines, line)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("m10 fingerprint rows: %v", err)
+	}
+	return strings.Join(lines, "\n")
 }
 
 // schemaFingerprint renders a deterministic, sorted text dump of the

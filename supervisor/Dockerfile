@@ -107,4 +107,8 @@ RUN addgroup -S garrison \
                 /var/lib/garrison/workspaces \
                 /var/lib/garrison/skills
 USER garrison
+# M10 — expose the public webhook port (8082). The health port (8080) and
+# dashboardapi port (8081) are not EXPOSE'd here because their exposure is
+# managed by the compose / runbook layer; 8082 is added per T008 spec.
+EXPOSE 8082
 ENTRYPOINT ["/supervisor"]

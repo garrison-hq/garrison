@@ -78,9 +78,16 @@ export function ToolCallChip({ entry }: Readonly<Props>) {
   const result = pickResultLabel({ entry, isFailure, isPreCall });
   const url = !isFailure && !isPreCall ? affectedResourceURL(entry.result?.payload) : null;
 
+  let role: 'alert' | 'status' | undefined;
+  if (isFailure) {
+    role = 'alert';
+  } else if (isPreCall) {
+    role = 'status';
+  }
+
   const chipBody = (
     <span
-      role={isFailure ? 'alert' : isPreCall ? 'status' : undefined}
+      role={role}
       aria-live={isPreCall ? 'polite' : undefined}
       aria-busy={isPreCall ? true : undefined}
       className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full border text-[11px] font-mono ${BG_TONE[tone]} ${BORDER_TONE[tone]}`}

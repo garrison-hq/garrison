@@ -19,6 +19,7 @@ import (
 	"github.com/garrison-hq/garrison/supervisor/internal/events"
 	"github.com/garrison-hq/garrison/supervisor/internal/health"
 	"github.com/garrison-hq/garrison/supervisor/internal/hygiene"
+	"github.com/garrison-hq/garrison/supervisor/internal/ingress"
 	"github.com/garrison-hq/garrison/supervisor/internal/mcpjungle"
 	"github.com/garrison-hq/garrison/supervisor/internal/mcpserverwork"
 	"github.com/garrison-hq/garrison/supervisor/internal/mempalace"
@@ -57,6 +58,10 @@ const (
 // registers a second channel for the qa-engineer. Kept here as a const
 // for any test harness that still references it.
 const EngineeringTicketChannel = "work.ticket.created.engineering.todo"
+
+// listenAddrFmt is the bind-address format shared by the health,
+// dashboard-api, and ingress listeners' startup log lines.
+const listenAddrFmt = "0.0.0.0:%d"
 
 // M2.2 channel constants — the supervisor registers these handlers
 // per Session 2026-04-23 and FR-227/FR-228. The two `transitioned.*.in_dev`
@@ -314,7 +319,26 @@ func runDaemon() int {
 	if exitCode != ExitOK {
 		return exitCode
 	}
-	dashboardAPIServer := buildDashboardAPIServer(cfg, pool, objstoreClient, sharedPalaceClient, logger)
+
+	// M10 T015 — the ingress rejection counter is allocated here, before
+	// both buildDashboardAPIServer and buildIngressServer, so it can be
+	// shared: the ingress server increments it on bad-signature rejections
+	// (FR-301) and the dashboardapi server exposes it via GET /ingress/status
+	// (FR-702, plan R3). A single *atomic.Int64 owned by the caller is
+	// passed by pointer to both; no copying occurs.
+	var ingressRejectionCounter atomic.Int64
+	dashboardAPIServer := buildDashboardAPIServer(cfg, pool, objstoreClient, sharedPalaceClient, &ingressRejectionCounter, logger)
+
+	// M10 T008 — ingress server. Built here, after vault + pool are ready
+	// and the single-company CustomerID is resolved in cfg. Skipped when
+	// GARRISON_INGRESS_GITHUB_ENABLED=false (the default) or when vault is
+	// unavailable (fake-agent / no Infisical address), mirroring the
+	// buildDashboardAPIServer pattern. Fail-closed: if enabled but vault is
+	// unreachable, buildIngressServer returns ExitFailure.
+	ingressServer, exitCode := buildIngressServer(ctx, cfg, pool, queries, vaultClient, &ingressRejectionCounter, logger)
+	if exitCode != ExitOK {
+		return exitCode
+	}
 
 	// M8 T011 — MCPJungle client + reconciler + reactive worker.
 	// MCPJungleURL empty in fake-agent mode and the M2.x chaos suites;
@@ -372,11 +396,12 @@ func runDaemon() int {
 	})
 
 	g.Go(func() error {
-		logger.Info("health server listening", "addr", fmt.Sprintf("0.0.0.0:%d", cfg.HealthPort))
+		logger.Info("health server listening", "addr", fmt.Sprintf(listenAddrFmt, cfg.HealthPort))
 		return healthServer.Serve(gctx)
 	})
 
 	startDashboardAPIServerIfWired(g, gctx, dashboardAPIServer, cfg, logger)
+	startIngressServerIfWired(g, gctx, ingressServer, cfg, logger)
 
 	// M4 — agents.changed cache invalidator (T014 / FR-100), extended
 	// 2026-06-10: agents.changed now also fires from a DB trigger on
@@ -894,7 +919,70 @@ func startDashboardAPIServerIfWired(
 		return
 	}
 	g.Go(func() error {
-		logger.Info("dashboardapi server listening", "addr", fmt.Sprintf("0.0.0.0:%d", cfg.DashboardAPIPort))
+		logger.Info("dashboardapi server listening", "addr", fmt.Sprintf(listenAddrFmt, cfg.DashboardAPIPort))
+		return srv.Serve(gctx)
+	})
+}
+
+// buildIngressServer constructs the M10 ingress.Server from env config +
+// vault-fetched webhook secret. Returns (nil, ExitOK) when:
+//   - GARRISON_INGRESS_GITHUB_ENABLED is false (the default), or
+//   - vault is unavailable (fake-agent mode or no Infisical address).
+//
+// Returns (nil, ExitFailure) when GitHub ingress is enabled but vault fetch
+// fails — the supervisor must not start signature-blind (FR-302, plan decision
+// 12). This mirrors the buildObjstoreClient fail-closed boot posture.
+func buildIngressServer(
+	ctx context.Context,
+	cfg *config.Config,
+	pool *pgxpool.Pool,
+	queries *store.Queries,
+	vaultClient vault.Fetcher,
+	rejectionCounter *atomic.Int64,
+	logger *slog.Logger,
+) (*ingress.Server, int) {
+	if !cfg.IngressGitHubEnabled {
+		logger.Info("ingress: GARRISON_INGRESS_GITHUB_ENABLED=false; ingress server disabled")
+		return nil, ExitOK
+	}
+	if vaultClient == nil {
+		// Vault unavailable in fake-agent mode or when Infisical is unconfigured.
+		// The config.Load validation already rejects IngressGitHubEnabled=true +
+		// no Infisical addr in production; this guard covers fake-agent test runs.
+		logger.Warn("ingress: vault unavailable; skipping ingress server (fake-agent or no Infisical address)")
+		return nil, ExitOK
+	}
+
+	deps := ingress.Deps{
+		Pool:             pool,
+		Queries:          queries,
+		VaultClient:      vaultClient,
+		CustomerID:       cfg.CustomerID(),
+		RejectionCounter: rejectionCounter,
+	}
+	srv, err := ingress.NewServer(ctx, cfg, deps, logger)
+	if err != nil {
+		logger.Error("ingress: NewServer failed; aborting startup", "err", err)
+		return nil, ExitFailure
+	}
+	return srv, ExitOK
+}
+
+// startIngressServerIfWired registers the ingress server's Serve goroutine on
+// the errgroup when buildIngressServer produced a non-nil server. Mirrors
+// startDashboardAPIServerIfWired (Sonar cognitive-complexity pattern).
+func startIngressServerIfWired(
+	g *errgroup.Group,
+	gctx context.Context,
+	srv *ingress.Server,
+	cfg *config.Config,
+	logger *slog.Logger,
+) {
+	if srv == nil {
+		return
+	}
+	g.Go(func() error {
+		logger.Info("ingress server listening", "addr", fmt.Sprintf(listenAddrFmt, cfg.IngressPort))
 		return srv.Serve(gctx)
 	})
 }
@@ -985,11 +1073,16 @@ func buildObjstoreClient(ctx context.Context, cfg *config.Config, vaultClient va
 // buildDashboardAPIServer wires the dashboardapi.Server with the route
 // set + auth middleware. Returns nil when objstore wiring was skipped
 // (M2.1/M2.2 chaos test path) — runDaemon's caller adapts.
+//
+// rejectionCounter is the M10 ingress bad-signature rejection atomic shared
+// with the ingress server (T015). May be nil; the GET /ingress/status handler
+// returns 0 when nil (ingress disabled).
 func buildDashboardAPIServer(
 	cfg *config.Config,
 	pool *pgxpool.Pool,
 	objstoreClient *objstore.Client,
 	sharedPalaceClient *mempalace.Client,
+	rejectionCounter *atomic.Int64,
 	logger *slog.Logger,
 ) *dashboardapi.Server {
 	if objstoreClient == nil {
@@ -1042,6 +1135,9 @@ func buildDashboardAPIServer(
 		// M9 review #4: real query set for the full-body
 		// /schedule/validate path (role existence + name uniqueness).
 		Queries: store.New(pool),
+		// M10 T015: in-process ingress bad-signature rejection counter
+		// shared with the ingress.Server; nil when ingress is disabled.
+		IngressRejectionCounter: rejectionCounter,
 	}
 	srv := dashboardapi.NewServer(cfg, deps)
 	if err := srv.RegisterDefaultRoutes(deps); err != nil {

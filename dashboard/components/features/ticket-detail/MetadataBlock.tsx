@@ -1,3 +1,4 @@
+import Link from 'next/link';
 import { Chip } from '@/components/ui/Chip';
 import { columnTone } from '@/lib/format/columnTone';
 import { formatShortDateTime, formatIsoFull } from '@/lib/format/relativeTime';
@@ -40,6 +41,25 @@ export function MetadataBlock({
         />
         <Field label="origin" value={metadata.origin} />
       </dl>
+      {/* M10 / T015 — external source link for ingress-origin tickets
+          (origin = 'ingress', FR-702). Shown only when the ticket has a
+          non-null externalUrl in its metadata provenance keys. */}
+      {metadata.origin === 'ingress' && metadata.externalUrl ? (
+        <div className="space-y-1">
+          <div className="text-text-3 text-[10.5px] uppercase tracking-[0.08em] font-medium">
+            external source
+          </div>
+          <Link
+            href={metadata.externalUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-text-2 text-[13px] hover:text-text-1 underline underline-offset-2 break-all"
+            data-testid="ticket-external-source-link"
+          >
+            {metadata.externalUrl}
+          </Link>
+        </div>
+      ) : null}
       {metadata.acceptanceCriteria ? (
         <div>
           <div className="text-text-3 text-[10.5px] uppercase tracking-[0.08em] font-medium mb-1.5">

@@ -106,6 +106,8 @@ export async function Sidebar() {
           <NavSubLink href="/admin/mcp-servers" label="MCP servers" />
           {/* M9 — scheduled wake-ups (recurring jobs). */}
           <NavSubLink href="/admin/recurring-jobs" label="Recurring jobs" />
+          {/* M10 — inbound connector status. */}
+          <NavSubLink href="/admin/connectors" label="Connectors" />
         </NavGroup>
       </nav>
 

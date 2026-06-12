@@ -178,6 +178,14 @@ type HiringProposal struct {
 	RejectedReason          *string
 }
 
+type IngressDelivery struct {
+	ID                 pgtype.UUID
+	ConnectorID        string
+	ExternalDeliveryID string
+	TicketID           pgtype.UUID
+	CreatedAt          pgtype.Timestamptz
+}
+
 type McpServer struct {
 	ID              pgtype.UUID
 	CustomerSlug    string

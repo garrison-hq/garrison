@@ -4,10 +4,13 @@ import (
 	"context"
 	"net"
 	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/garrison-hq/garrison/supervisor/internal/config"
+	"github.com/garrison-hq/garrison/supervisor/internal/objstore"
 )
 
 // findFreePort returns an OS-allocated TCP port that should be free
@@ -80,6 +83,81 @@ func TestServerLifecycle_ServeAndShutdown(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Serve did not return after ctx cancel")
+	}
+}
+
+// TestRegisterDefaultRoutes_IngressStatus — RegisterDefaultRoutes wires the
+// M10 /ingress/status endpoint behind cookie-auth. This test exercises the
+// new route registration lines in server.go (the M10 diff adds these lines)
+// and confirms that:
+//
+//	a. An unauthenticated GET /ingress/status returns 401 (cookie-auth gate).
+//	b. An authenticated GET /ingress/status returns 200 with JSON.
+//
+// This also covers the IngressRejectionCounter Deps field path.
+func TestRegisterDefaultRoutes_IngressStatus(t *testing.T) {
+	port := findFreePort(t)
+	cfg := &config.Config{
+		DashboardAPIPort: port,
+		ShutdownGrace:    200 * time.Millisecond,
+	}
+
+	var counter atomic.Int64
+	counter.Add(3)
+
+	// Build a minimal *objstore.Client. minio.New is lazy — it does NOT connect
+	// at construction, only on actual requests. RegisterDefaultRoutes only
+	// requires deps.Objstore != nil; the handler never executes in this test.
+	objstoreClient, err := objstore.New(objstore.Config{
+		Endpoint:  "127.0.0.1:9000", // unreachable; never dialed in this test
+		AccessKey: "test-access-key",
+		SecretKey: "test-secret-key",
+		Bucket:    "test-bucket",
+		CompanyID: "test-company-id",
+	}, nil)
+	if err != nil {
+		t.Fatalf("objstore.New: %v", err)
+	}
+
+	srv := NewServer(cfg, Deps{
+		SessionValidator:        fakeValidator{userID: "test-uid"},
+		IngressRejectionCounter: &counter,
+		Objstore:                objstoreClient,
+	})
+	if err := srv.RegisterDefaultRoutes(Deps{
+		SessionValidator:        fakeValidator{userID: "test-uid"},
+		IngressRejectionCounter: &counter,
+		Objstore:                objstoreClient,
+	}); err != nil {
+		t.Fatalf("RegisterDefaultRoutes: %v", err)
+	}
+
+	// Use httptest.Server directly against srv.Mux() to avoid port conflicts.
+	ts := httptest.NewServer(srv.Mux())
+	t.Cleanup(ts.Close)
+
+	// a. Unauthenticated GET → 401.
+	reqUnauth, _ := http.NewRequest(http.MethodGet, ts.URL+"/ingress/status", nil)
+	respUnauth, err := http.DefaultClient.Do(reqUnauth)
+	if err != nil {
+		t.Fatalf("GET /ingress/status (unauth): %v", err)
+	}
+	respUnauth.Body.Close()
+	if respUnauth.StatusCode != http.StatusUnauthorized {
+		t.Errorf("unauthenticated status = %d; want 401", respUnauth.StatusCode)
+	}
+
+	// b. Authenticated GET → 200 with JSON body.
+	reqAuth, _ := http.NewRequest(http.MethodGet, ts.URL+"/ingress/status", nil)
+	// The fakeValidator validates any "session-token" cookie value when userID != "".
+	reqAuth.AddCookie(&http.Cookie{Name: "better-auth.session_token", Value: "test-session"})
+	respAuth, err := http.DefaultClient.Do(reqAuth)
+	if err != nil {
+		t.Fatalf("GET /ingress/status (auth): %v", err)
+	}
+	respAuth.Body.Close()
+	if respAuth.StatusCode != http.StatusOK {
+		t.Errorf("authenticated status = %d; want 200", respAuth.StatusCode)
 	}
 }
 

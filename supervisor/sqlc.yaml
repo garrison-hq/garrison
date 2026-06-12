@@ -19,6 +19,7 @@ sql:
       - ../migrations/20260504000000_m7_hiring_runtime_preamble.sql
       - ../migrations/20260510000000_m8_zero_human_loop.sql
       - ../migrations/20260610000002_m9_scheduled_wakeups.sql
+      - ../migrations/20260612000000_m10_ingress_connectors.sql
     gen:
       go:
         package: store
