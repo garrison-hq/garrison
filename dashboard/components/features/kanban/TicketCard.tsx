@@ -5,6 +5,9 @@ import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { relativeTime, formatIsoFull } from '@/lib/format/relativeTime';
 import type { TicketCardRow } from '@/lib/queries/kanban';
+// Note: no next/link nested inside the outer Link; the ingress-origin
+// chip uses a button + window.open (like the parent chip uses useRouter)
+// to avoid the "a inside a" nesting violation (React 19 / M6 T017 note).
 
 // Read-only ticket card. Per FR-042 there is NO drag handle, NO
 // inline edit affordance — the card is a clickable summary that
@@ -32,6 +35,12 @@ import type { TicketCardRow } from '@/lib/queries/kanban';
 // scheduled-origin chip linking to the task's detail page at
 // /admin/recurring-jobs/[id]. Same button-not-nested-Link pattern as
 // the parent chip.
+//
+// M10 / T015 — when ticket.ingressOrigin is set (the ticket was created
+// by an external connector, FR-702), render an ingress-origin chip
+// showing `gh: <connectorId>` that opens the external GitHub URL in a
+// new tab. Uses the same button-not-nested-Link pattern (cannot nest
+// <a> inside the outer <Link>).
 
 export function TicketCard({ ticket }: Readonly<{ ticket: TicketCardRow }>) {
   const router = useRouter();
@@ -47,6 +56,13 @@ export function TicketCard({ ticket }: Readonly<{ ticket: TicketCardRow }>) {
     e.stopPropagation();
     if (ticket.scheduledOrigin) {
       router.push(`/admin/recurring-jobs/${ticket.scheduledOrigin.taskId}`);
+    }
+  };
+  const onIngressOriginClick = (e: MouseEvent<HTMLButtonElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (ticket.ingressOrigin?.externalUrl) {
+      window.open(ticket.ingressOrigin.externalUrl, '_blank', 'noopener,noreferrer');
     }
   };
   return (
@@ -79,6 +95,17 @@ export function TicketCard({ ticket }: Readonly<{ ticket: TicketCardRow }>) {
               data-testid="ticket-scheduled-origin-chip"
             >
               sched: {ticket.scheduledOrigin.taskName}
+            </button>
+          ) : null}
+          {ticket.ingressOrigin ? (
+            <button
+              type="button"
+              onClick={onIngressOriginClick}
+              title={`external source: ${ticket.ingressOrigin.externalUrl}`}
+              className="font-mono text-[10.5px] text-text-3 hover:text-text-1 tracking-tight cursor-pointer truncate max-w-[120px]"
+              data-testid="ticket-ingress-origin-chip"
+            >
+              gh: {ticket.ingressOrigin.connectorId}
             </button>
           ) : null}
         </div>

@@ -315,7 +315,15 @@ func runDaemon() int {
 	if exitCode != ExitOK {
 		return exitCode
 	}
-	dashboardAPIServer := buildDashboardAPIServer(cfg, pool, objstoreClient, sharedPalaceClient, logger)
+
+	// M10 T015 — the ingress rejection counter is allocated here, before
+	// both buildDashboardAPIServer and buildIngressServer, so it can be
+	// shared: the ingress server increments it on bad-signature rejections
+	// (FR-301) and the dashboardapi server exposes it via GET /ingress/status
+	// (FR-702, plan R3). A single *atomic.Int64 owned by the caller is
+	// passed by pointer to both; no copying occurs.
+	var ingressRejectionCounter atomic.Int64
+	dashboardAPIServer := buildDashboardAPIServer(cfg, pool, objstoreClient, sharedPalaceClient, &ingressRejectionCounter, logger)
 
 	// M10 T008 — ingress server. Built here, after vault + pool are ready
 	// and the single-company CustomerID is resolved in cfg. Skipped when
@@ -323,7 +331,6 @@ func runDaemon() int {
 	// unavailable (fake-agent / no Infisical address), mirroring the
 	// buildDashboardAPIServer pattern. Fail-closed: if enabled but vault is
 	// unreachable, buildIngressServer returns ExitFailure.
-	var ingressRejectionCounter atomic.Int64
 	ingressServer, exitCode := buildIngressServer(ctx, cfg, pool, queries, vaultClient, &ingressRejectionCounter, logger)
 	if exitCode != ExitOK {
 		return exitCode
@@ -1062,11 +1069,16 @@ func buildObjstoreClient(ctx context.Context, cfg *config.Config, vaultClient va
 // buildDashboardAPIServer wires the dashboardapi.Server with the route
 // set + auth middleware. Returns nil when objstore wiring was skipped
 // (M2.1/M2.2 chaos test path) — runDaemon's caller adapts.
+//
+// rejectionCounter is the M10 ingress bad-signature rejection atomic shared
+// with the ingress server (T015). May be nil; the GET /ingress/status handler
+// returns 0 when nil (ingress disabled).
 func buildDashboardAPIServer(
 	cfg *config.Config,
 	pool *pgxpool.Pool,
 	objstoreClient *objstore.Client,
 	sharedPalaceClient *mempalace.Client,
+	rejectionCounter *atomic.Int64,
 	logger *slog.Logger,
 ) *dashboardapi.Server {
 	if objstoreClient == nil {
@@ -1119,6 +1131,9 @@ func buildDashboardAPIServer(
 		// M9 review #4: real query set for the full-body
 		// /schedule/validate path (role existence + name uniqueness).
 		Queries: store.New(pool),
+		// M10 T015: in-process ingress bad-signature rejection counter
+		// shared with the ingress.Server; nil when ingress is disabled.
+		IngressRejectionCounter: rejectionCounter,
 	}
 	srv := dashboardapi.NewServer(cfg, deps)
 	if err := srv.RegisterDefaultRoutes(deps); err != nil {

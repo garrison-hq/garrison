@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/garrison-hq/garrison/supervisor/internal/config"
@@ -31,6 +32,13 @@ type Deps struct {
 	// remaining for /garrison-tasks": pre-resolve at boot and pass
 	// through to handlers, rather than per-request Postgres lookups.
 	CompanyID string
+	// IngressRejectionCounter is the M10 ingress bad-signature rejection
+	// counter (FR-301, FR-702, plan resolution R3). The atomic is owned
+	// by the ingress.Server and shared here so the GET /ingress/status
+	// handler can expose it over the cookie-auth dashboard-api port (8081)
+	// without database writes for each rejection. May be nil when ingress
+	// is disabled; the handler returns 0 in that case.
+	IngressRejectionCounter *atomic.Int64
 }
 
 // Server is the HTTP server lifecycle wrapper. Mirrors internal/health.
@@ -122,6 +130,14 @@ func (s *Server) RegisterDefaultRoutes(deps Deps) error {
 		s.mux.Handle("/api/mempalace/recent-kg",
 			auth(newRecentKGHandler(deps.Mempalace, s.logger)))
 	}
+
+	// M10 T015 — GET /ingress/status: per-connector bad-signature rejection
+	// count from the in-process atomic counter (FR-702, plan resolution R3).
+	// Cookie-auth gated like all other dashboardapi routes; 401 on
+	// unauthenticated requests.
+	s.mux.Handle("/ingress/status",
+		auth(newIngressStatusHandler(deps.IngressRejectionCounter, s.logger)))
+
 	return nil
 }
 

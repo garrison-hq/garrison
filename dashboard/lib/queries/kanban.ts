@@ -2,6 +2,15 @@ import { sql } from 'drizzle-orm';
 import { appDb } from '@/lib/db/appClient';
 import { getScheduledOriginForTickets, type ScheduledOrigin } from './scheduledTasks';
 
+/** M10 / T015 — ingress provenance for the kanban TicketCard's ingress-origin
+ *  chip (FR-702). Present only when the ticket was created via an external
+ *  connector (origin = 'ingress'). The chip renders `gh: <connectorId>` and
+ *  links to the external URL (GitHub issue / PR). */
+export interface IngressOrigin {
+  connectorId: string;
+  externalUrl: string;
+}
+
 // Queries for the per-department Kanban surface.
 //
 // Per spec FR-040 → FR-043, the surface renders four columns of
@@ -33,6 +42,12 @@ export interface TicketCardRow {
    *  task's detail page. Optional so pre-M9 callers and fixtures
    *  remain valid. */
   scheduledOrigin?: ScheduledOrigin | null;
+  /** M10 / T015 — ingress provenance when this ticket was created by
+   *  an external connector (origin = 'ingress', FR-702). Null for
+   *  operator-/chat-/agent-/schedule-created tickets. The TicketCard
+   *  renders `gh: <connectorId>` linking to the external URL.
+   *  Optional so pre-M10 callers and fixtures remain valid. */
+  ingressOrigin?: IngressOrigin | null;
 }
 
 export async function fetchDepartmentBySlug(slug: string): Promise<DeptInfo | null> {
@@ -72,6 +87,9 @@ export async function fetchKanban(slug: string): Promise<TicketCardRow[]> {
     created_at: Date;
     assigned_agent_role_slug: string | null;
     parent_ticket_id: string | null;
+    origin: string;
+    ingress_connector: string | null;
+    external_url: string | null;
   }>(sql`
     SELECT
       t.id,
@@ -79,6 +97,9 @@ export async function fetchKanban(slug: string): Promise<TicketCardRow[]> {
       t.column_slug,
       t.created_at,
       t.parent_ticket_id,
+      t.origin,
+      t.metadata->>'ingress_connector' AS ingress_connector,
+      t.metadata->>'external_url'      AS external_url,
       (SELECT ai.role_slug
          FROM agent_instances ai
         WHERE ai.ticket_id = t.id AND ai.status = 'running'
@@ -91,13 +112,22 @@ export async function fetchKanban(slug: string): Promise<TicketCardRow[]> {
   // M9 / T015 — scheduled-origin lookup for the TicketCard chip
   // (ticket → run → task name; one IN-list query for the board).
   const origins = await getScheduledOriginForTickets(rows.map((r) => r.id));
-  return rows.map((r) => ({
-    id: r.id,
-    objective: r.objective,
-    columnSlug: r.column_slug,
-    createdAt: r.created_at,
-    assignedAgentRoleSlug: r.assigned_agent_role_slug,
-    parentTicketId: r.parent_ticket_id,
-    scheduledOrigin: origins[r.id] ?? null,
-  }));
+  return rows.map((r) => {
+    // M10 / T015 — ingress origin chip: set only when origin='ingress' and
+    // provenance keys are present in tickets.metadata (FR-702).
+    const ingressOrigin: IngressOrigin | null =
+      r.origin === 'ingress' && r.ingress_connector && r.external_url
+        ? { connectorId: r.ingress_connector, externalUrl: r.external_url }
+        : null;
+    return {
+      id: r.id,
+      objective: r.objective,
+      columnSlug: r.column_slug,
+      createdAt: r.created_at,
+      assignedAgentRoleSlug: r.assigned_agent_role_slug,
+      parentTicketId: r.parent_ticket_id,
+      scheduledOrigin: origins[r.id] ?? null,
+      ingressOrigin,
+    };
+  });
 }

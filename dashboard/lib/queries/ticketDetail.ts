@@ -23,6 +23,10 @@ export interface TicketDetailMetadata {
   createdAt: Date;
   acceptanceCriteria: string | null;
   origin: string;
+  /** M10 / T015 — external source link for ingress-origin tickets
+   *  (origin = 'ingress'). Null for tickets not created by an external
+   *  connector. Shown as a clickable link in ticket detail (FR-702). */
+  externalUrl: string | null;
 }
 
 export interface TransitionRow {
@@ -77,6 +81,7 @@ export async function fetchTicketDetail(ticketId: string): Promise<TicketDetail 
     created_at: Date;
     acceptance_criteria: string | null;
     origin: string;
+    external_url: string | null;
     department_slug: string;
     department_name: string;
   }>(sql`
@@ -87,6 +92,7 @@ export async function fetchTicketDetail(ticketId: string): Promise<TicketDetail 
       t.created_at,
       t.acceptance_criteria,
       t.origin,
+      CASE WHEN t.origin = 'ingress' THEN t.metadata->>'external_url' ELSE NULL END AS external_url,
       d.slug AS department_slug,
       d.name AS department_name
     FROM tickets t
@@ -168,6 +174,7 @@ export async function fetchTicketDetail(ticketId: string): Promise<TicketDetail 
       createdAt: meta.created_at,
       acceptanceCriteria: meta.acceptance_criteria,
       origin: meta.origin,
+      externalUrl: meta.external_url ?? null,
     },
     history,
     instances,
