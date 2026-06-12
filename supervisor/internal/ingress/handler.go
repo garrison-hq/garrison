@@ -10,9 +10,16 @@ import (
 
 	"github.com/garrison-hq/garrison/supervisor/internal/store"
 	"github.com/garrison-hq/garrison/supervisor/internal/throttle"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// txBeginner is the minimal pool interface the handler needs: open a
+// transaction. *pgxpool.Pool satisfies it. The unexported interface
+// makes HandlerDeps.Pool testable without importing pgxpool in the test.
+type txBeginner interface {
+	Begin(ctx context.Context) (pgx.Tx, error)
+}
 
 // maxBodyBytes is the LimitReader cap applied to every incoming webhook
 // body (GitHub's hard cap is 25 MB; we add 1 MB of slack). A body over
@@ -26,7 +33,9 @@ const maxBodyBytes = 26_214_400 // 26 MB
 // compiles independently of server.go / config.go (T008).
 type HandlerDeps struct {
 	// Pool is the pgxpool used to Begin each webhook transaction.
-	Pool *pgxpool.Pool
+	// In production this is *pgxpool.Pool; in unit tests it is a
+	// fake that implements txBeginner (the unexported interface above).
+	Pool txBeginner
 	// Queries is the supervisor sqlc query set, used with Queries.WithTx
 	// inside the per-request transaction and directly for throttle writes
 	// (throttle events are NOT inside the delivery tx — the cap fires before
@@ -203,7 +212,7 @@ func newWebhookHandler(deps HandlerDeps) http.HandlerFunc {
 // signal). Any other error is returned as-is; the caller maps it to 500.
 func runIngressTx(
 	ctx context.Context,
-	pool *pgxpool.Pool,
+	pool txBeginner,
 	queries *store.Queries,
 	connID, deliveryID string,
 	draft TicketDraft,

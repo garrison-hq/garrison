@@ -123,7 +123,7 @@ T009–T012 are the unit test suites covering signature, render, GitHub connecto
     All pass. `gofmt -l` + `go vet` clean.
   - **Out of scope for this task**: handler tests (T011); integration tests (T013).
 
-- [ ] **T011** Unit tests — `internal/ingress/handler_test.go` (httptest, mocked store seam)
+- [x] **T011** Unit tests — `internal/ingress/handler_test.go` (httptest, mocked store seam)
   - **Depends on**: T006, T007.
   - **Files**: `supervisor/internal/ingress/handler_test.go` (new).
   - **Completion condition**: the following tests pass using `net/http/httptest` and a minimal stub/mock of the `*store.Queries` seam (or interface):
