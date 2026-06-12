@@ -83,9 +83,9 @@ T008–T009 are the unit test suites covering the verb handler and the dispatche
 
 ## Phase 2 — Unit test suites
 
-- [ ] **T008** Unit tests — `internal/garrisonmutate/verbs_actions_test.go`
+- [x] **T008** Unit tests — `internal/garrisonmutate/verbs_actions_test.go`
   - **Depends on**: T005.
-  - **Files**: `supervisor/internal/garrisonmutate/verbs_actions_test.go` (new).
+  - **Files**: `supervisor/internal/garrisonmutate/verbs_actions_test.go` (new); `supervisor/internal/actionbroker/policy.go` (amend — add exported `RegisterTestPolicyEntry(actionType string, tier Tier) func()` test seam; see note below).
   - **Completion condition**: the following tests pass:
     - `TestRequestExternalActionWritesExactlyOnePendingRow` — agent caller, `github_issue_comment`; asserts one `work.pending_actions` row anchored on the calling `agent_instance_id`, status `pending`, tier `approve` (from the policy table — not from any agent-supplied field), one `requested` outcome row, one `chat_mutation_audit` row; no external call (verb has no HTTP client) — SC-001 / US1 #1.
     - `TestRequestExternalActionReturnsQueuedResult` — asserts the `Result.Message` says "queued at the approve tier", `AffectedResourceURL` is `"/admin/outbox"`, `Success` is true, and the message never implies the action was performed — FR-004 / US1 #2.
@@ -93,6 +93,7 @@ T008–T009 are the unit test suites covering the verb handler and the dispatche
     - `TestRequestExternalActionRejectsChatCaller` — `AgentInstanceID` is invalid (zero UUID, not set); asserts `validation_failed` result with message "callable only by agents" — D7 / Q-D.
     - `TestRequestExternalActionAutoTierEmitsDispatchNotify` — a hypothetical `auto`-tier action type (not in the floor): verb emits `work.action.dispatch_requested` notify post-commit. An `approve`-tier action does NOT emit the notify (the approve Server Action handles that) — D18.
     All pass. `gofmt -l` + `go vet` clean.
+  - **Seam note (policy.go amendment)**: `TestRequestExternalActionAutoTierEmitsDispatchNotify` requires `actionbroker.Classify` to return `TierAuto` for a hypothetical action type. Go's `_test.go` mechanism cannot expose a package-private var to an external test package — `export_test.go` with `package actionbroker` is compiled only into the `actionbroker` test binary, not into the package as imported by `garrisonmutate`. The only mechanism that lets `garrisonmutate`'s tests inject a policy entry is an exported function in a production file. `RegisterTestPolicyEntry` is therefore added to `policy.go` with this contract amendment as the authorizing document. It does not affect the deploy-time `policy` map contents; it only provides a test-callable setter/restorer.
   - **Out of scope for this task**: policy tests (covered by T004's `policy_test.go`); dispatcher tests (T009); integration tests (T011).
 
 - [ ] **T009** Unit tests — `internal/actionbroker/dispatcher_test.go` + `internal/actionbroker/github_test.go`

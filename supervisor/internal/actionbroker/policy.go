@@ -64,6 +64,36 @@ var policy = map[string]Tier{
 	"github_issue_comment": TierApprove,
 }
 
+// RegisterTestPolicyEntry temporarily registers an action type → tier
+// mapping in the deploy-time policy map. This is a cross-package test
+// seam: because Go _test.go files with package actionbroker are only
+// compiled into the actionbroker test binary (not into the compiled
+// package imported by other packages), there is no _test.go mechanism
+// that lets garrisonmutate's integration tests invoke actionbroker's
+// private policy map. This exported function is therefore a production-
+// file seam, authorized by tasks.md T008 amendment: Files list includes
+// supervisor/internal/actionbroker/policy.go with this seam called out.
+//
+// Usage: the garrisonmutate verb-handler integration tests (T008) use
+// this to inject a hypothetical auto-tier action type so that
+// TestRequestExternalActionAutoTierEmitsDispatchNotify can exercise the
+// D18 dispatch-notify emission path without adding an auto-tier type to
+// the production policy.
+//
+// Returns a cleanup function that restores the original state; callers
+// MUST defer it. Not safe for parallel tests (mutates shared state).
+func RegisterTestPolicyEntry(actionType string, tier Tier) func() {
+	original, existed := policy[actionType]
+	policy[actionType] = tier
+	return func() {
+		if existed {
+			policy[actionType] = original
+		} else {
+			delete(policy, actionType)
+		}
+	}
+}
+
 // FloorActionTypes returns the slice of action types on the permanent-
 // Approve floor. Exported so TestFloorCheckMatchesPolicy (policy_test.go)
 // can assert the floor matches the migration's CHECK constraint without
