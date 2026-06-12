@@ -157,7 +157,7 @@ T009–T012 are the unit test suites covering signature, render, GitHub connecto
 
 ## Phase 4 — Integration + chaos suites
 
-- [ ] **T013** Integration test suite — `internal/ingress/integration_test.go` (the milestone smoke tests)
+- [x] **T013** Integration test suite — `internal/ingress/integration_test.go` (the milestone smoke tests)
   - **Depends on**: T008.
   - **Files**: `supervisor/internal/ingress/integration_test.go` (new, `-tags=integration`, testcontainers-go Postgres).
   - **Completion condition**: the following tests pass:
