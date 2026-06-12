@@ -172,7 +172,7 @@ T009–T012 are the unit test suites covering signature, render, GitHub connecto
     All pass. `gofmt -l` + `go vet` clean.
   - **Out of scope for this task**: concurrent-redelivery race (T014); burst cap test (T014); dashboard (T015).
 
-- [ ] **T014** Chaos test suite — `internal/ingress/chaos_test.go` (concurrent-redelivery race + burst cap)
+- [x] **T014** Chaos test suite — `internal/ingress/chaos_test.go` (concurrent-redelivery race + burst cap)
   - **Depends on**: T013.
   - **Files**: `supervisor/internal/ingress/chaos_test.go` (new, `-tags=chaos`, testcontainers-go Postgres).
   - **Completion condition**: the following tests pass:
