@@ -1,7 +1,7 @@
 import { notFound } from 'next/navigation';
 import { fetchSecretForEdit } from '@/lib/queries/vault';
 import { SecretEditForm } from '@/components/features/vault-secret-form/SecretEditForm';
-import type { SecretProvenance, RotationProvider } from '@/lib/actions/vault';
+import type { SecretProvenance } from '@/lib/actions/vault';
 
 // Vault secret edit route. Catch-all `[...path]` captures the
 // multi-segment secret_path (e.g.
@@ -40,7 +40,7 @@ export default async function VaultEditPage({ params }: Readonly<RouteParams>) {
           secretPath: snapshot.secretPath,
           provenance: snapshot.provenance as SecretProvenance,
           rotationCadence: snapshot.rotationCadence,
-          rotationProvider: snapshot.rotationProvider as RotationProvider,
+          rotationProvider: snapshot.rotationProvider,
           updatedAt: snapshot.updatedAt,
         }}
       />

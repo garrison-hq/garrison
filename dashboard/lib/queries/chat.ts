@@ -179,7 +179,7 @@ function parseSuccessfulMempalaceCallTimestamp(
   const events = extractStreamEvents(envelope);
   const toolUses = collectToolUseNames(events);
   if (!hasSuccessfulMempalaceResult(events, toolUses)) return null;
-  return fallbackAt ? new Date(fallbackAt as string | number | Date).getTime() : Date.now();
+  return fallbackAt ? new Date(fallbackAt).getTime() : Date.now();
 }
 
 // Pass 1: build tool_use_id → name from assistant.tool_use blocks.
