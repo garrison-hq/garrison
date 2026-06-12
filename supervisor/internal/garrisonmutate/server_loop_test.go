@@ -79,8 +79,10 @@ func TestServe_RejectsBothCallerAnchors(t *testing.T) {
 }
 
 func TestServe_AgentMode_ListsOnlyAgentVerbs(t *testing.T) {
-	// M8 FR-005: agent-anchored servers advertise create_ticket only;
-	// the operator-anchored verbs stay chat-side.
+	// M8 FR-005 / M11 FR-002: agent-anchored servers advertise the
+	// agent-caller surface only; the operator-anchored verbs stay
+	// chat-side. As of M11 the agent surface is [create_ticket,
+	// request_external_action] (plan D7, agentVerbNames widening).
 	deps := validDeps()
 	deps.ChatSessionID = pgtype.UUID{Valid: false}
 	deps.ChatMessageID = pgtype.UUID{Valid: false}
@@ -96,12 +98,23 @@ func TestServe_AgentMode_ListsOnlyAgentVerbs(t *testing.T) {
 	if err := json.Unmarshal(out.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(resp.Result.Tools) != 1 || resp.Result.Tools[0].Name != "create_ticket" {
+	wantNames := []string{"create_ticket", "request_external_action"}
+	if len(resp.Result.Tools) != len(wantNames) {
 		names := make([]string, 0, len(resp.Result.Tools))
 		for _, td := range resp.Result.Tools {
 			names = append(names, td.Name)
 		}
-		t.Errorf("agent-mode tools/list = %v, want [create_ticket]", names)
+		t.Fatalf("agent-mode tools/list = %v, want %v", names, wantNames)
+	}
+	// Check both verbs are present (order may vary per Verbs slice order).
+	nameSet := make(map[string]bool, len(resp.Result.Tools))
+	for _, td := range resp.Result.Tools {
+		nameSet[td.Name] = true
+	}
+	for _, want := range wantNames {
+		if !nameSet[want] {
+			t.Errorf("agent-mode tools/list missing %q; got %v", want, resp.Result.Tools)
+		}
 	}
 }
 

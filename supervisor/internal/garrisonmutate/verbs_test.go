@@ -13,9 +13,10 @@ import (
 
 // TestVerbsRegistryMatchesEnumeration is the sealed-allow-list test
 // per chat-threat-model.md Rule 1 + spec FR-411 + plan §1.1 (M5.3) +
-// FR-103 (M7) + FR-600 (M9). The Verbs slice MUST contain exactly the
-// enumerated chat-side verb set (11 as of M9). Adding a verb without
-// updating the threat-model amendment + this test fails CI.
+// FR-103 (M7) + FR-600 (M9) + FR-001 (M11). The Verbs slice MUST
+// contain exactly the enumerated chat-side verb set (12 as of M11).
+// Adding a verb without updating the threat-model amendment + this
+// test fails CI.
 func TestVerbsRegistryMatchesEnumeration(t *testing.T) {
 	want := []string{
 		"create_ticket",
@@ -31,6 +32,8 @@ func TestVerbsRegistryMatchesEnumeration(t *testing.T) {
 		"bump_skill_version",
 		// M9 FR-600 addition (eleventh verb, Tier 3):
 		"create_scheduled_task",
+		// M11 FR-001 addition (twelfth verb, Tier 3, agent-callers only):
+		"request_external_action",
 	}
 	got := VerbNames()
 	sort.Strings(got)
@@ -74,11 +77,15 @@ func TestVerbsRegistryReversibilityClassesValid(t *testing.T) {
 
 // TestVerbsRegistryAffectedResourceTypes verifies every verb declares a
 // supported affected_resource_type matching the audit table's CHECK.
+// M11 adds "pending_action" for request_external_action (FR-001).
 func TestVerbsRegistryAffectedResourceTypes(t *testing.T) {
-	allowed := map[string]struct{}{"ticket": {}, "agent_role": {}, "hiring_proposal": {}, "scheduled_task": {}}
+	allowed := map[string]struct{}{
+		"ticket": {}, "agent_role": {}, "hiring_proposal": {},
+		"scheduled_task": {}, "pending_action": {},
+	}
 	for _, v := range Verbs {
 		if _, ok := allowed[v.AffectedResourceType]; !ok {
-			t.Errorf("verb %q has affected_resource_type=%q; want one of {ticket, agent_role, hiring_proposal, scheduled_task}",
+			t.Errorf("verb %q has affected_resource_type=%q; want one of {ticket, agent_role, hiring_proposal, scheduled_task, pending_action}",
 				v.Name, v.AffectedResourceType)
 		}
 	}
@@ -130,10 +137,11 @@ func TestVerbsSlicesDisjoint(t *testing.T) {
 
 // TestServerActionVerbsTierTable pins the ServerActionVerbs registry to
 // the tier table in chat-threat-model.md §5 (Server-Action verb
-// registry): the M8 entry plus the four M9 scheduled-task entries, each
-// with its amended reversibility class and resource type. Adding or
-// re-tiering an entry without amending the threat model + this test
-// fails CI (Rule 1 applies to the Server-Action slice too).
+// registry): the M8 entry plus the four M9 scheduled-task entries plus
+// the three M11 outbox-action entries, each with its amended
+// reversibility class and resource type. Adding or re-tiering an entry
+// without amending the threat model + this test fails CI (Rule 1 applies
+// to the Server-Action slice too).
 func TestServerActionVerbsTierTable(t *testing.T) {
 	want := map[string]struct {
 		class        int
@@ -145,6 +153,10 @@ func TestServerActionVerbsTierTable(t *testing.T) {
 		"pause_scheduled_task":  {1, "scheduled_task"},
 		"resume_scheduled_task": {1, "scheduled_task"},
 		"delete_scheduled_task": {3, "scheduled_task"},
+		// M11 FR-026/FR-027 additions (Outbox approval surface):
+		"approve_action":   {1, "pending_action"},
+		"reject_action":    {1, "pending_action"},
+		"mark_action_done": {1, "pending_action"},
 	}
 	if len(ServerActionVerbs) != len(want) {
 		t.Fatalf("ServerActionVerbs has %d entries; want %d (%v)", len(ServerActionVerbs), len(want), want)
