@@ -1056,10 +1056,68 @@ The M10 migration adds `ingress_deliveries` and extends the
 `throttle_events.kind` CHECK. The `GRANT SELECT ON ingress_deliveries TO
 garrison_dashboard_app` in the migration body takes effect automatically.
 
+## M11 — Action Broker (outbound external actions)
+
+M11 ships a supervisor-side action broker that lets agents request external actions (GitHub comment-back as the first action type) through a policy-gated approval queue. No new containers or compose services. One schema migration (`migrations/20260612000001_m11_action_broker.sql`) applies through the normal goose flow at supervisor boot — it adds `work.pending_actions`, `work.pending_action_outcomes`, and extends the `chat_mutation_audit` verb/resource-type CHECKs.
+
+**1. Goose migration**
+
+Run `goose up` before bringing the new binary up:
+
+```sh
+# from the supervisor directory
+goose -dir ../migrations postgres "${SUPERVISOR_DSN}" up
+```
+
+The M11 migration adds `work.pending_actions` (with the `CONSTRAINT pending_actions_floor_is_approve` structural CHECK that makes `github_issue_comment` permanently Approve-tier) and `work.pending_action_outcomes`. The `GRANT SELECT, UPDATE ON work.pending_actions TO garrison_dashboard_app` and `GRANT SELECT, INSERT ON work.pending_action_outcomes TO garrison_dashboard_app` in the migration body take effect automatically.
+
+**2. Provision the GitHub PAT in Infisical before enabling the dispatcher**
+
+The dispatcher fetches the GitHub Personal Access Token from the vault at every dispatch. A missing or incorrect PAT causes per-row dispatch failure (the row is marked `failed` with detail "vault unavailable" and the action surfaces to the operator in the Outbox for manual re-request) — the supervisor starts normally either way. Provision the PAT before any `approve`-tier action row is expected to execute.
+
+```bash
+# Using the M4 dashboard: /vault/new
+# path (suffix — the /<customer_id>/ prefix is composed by the supervisor):
+#   actions/GITHUB_PAT
+# value: a GitHub PAT with `repo:write` scope on the target repo(s)
+```
+
+The PAT must have at minimum `issues:write` permission on the repositories whose issues the dispatcher will comment on. If the token lacks permission on a target repo, the comment-create call returns `403` (terminal failure) and the action row reaches `failed` status — the token scope is the first thing to verify when a dispatched action fails.
+
+**3. Set the action-broker supervisor env vars**
+
+Both env vars are optional with sensible defaults; override in Coolify (or the equivalent prod env-var surface) only when needed:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `GARRISON_ACTION_GITHUB_PAT_PATH` | `actions/GITHUB_PAT` | Infisical vault path suffix for the GitHub PAT. Must not be empty. |
+| `GARRISON_ACTION_POLL_INTERVAL` | `30s` | Fallback poll cadence for the dispatcher when `pg_notify` fires are missed across reconnects. Rejected below `1s`. |
+
+Set these in your deployment environment before deploying the M11 supervisor binary.
+
+**4. Verify end-to-end: request → Outbox → Approve → executed**
+
+On a live stack with an active agent and a seeded ticket reachable via M10 GitHub webhook:
+
+1. Trigger an agent to call `request_external_action` with `action_type = "github_issue_comment"`. The verb returns a queued-at-approve-tier result to the agent; nothing has reached GitHub yet.
+2. Navigate to `/admin/outbox` in the dashboard. The pending action appears in the approval queue, showing: action type, target (`<owner>/<repo>#<issue_number>`), full rendered payload, the requesting agent instance, the serving ticket, tier `approve`, and tier reason `permanent-Approve floor (public-facing)`.
+3. Click **Approve**. The approve Server Action transitions the row to `approved` and emits `work.action.dispatch_requested` — the dispatcher wakes within one `GARRISON_ACTION_POLL_INTERVAL` tick.
+4. Watch the supervisor logs for `actionbroker: dispatched` with `status=executed`. The GitHub issue now has the comment.
+5. Reload `/admin/outbox` — the row shows status `executed` and the `executed` outcome entry in the action's history, anchored to the originating `agent_instance_id`.
+
+**5. Note: permanent-Approve floor cannot be downgraded**
+
+`github_issue_comment` is on the permanent-Approve floor, enforced at three layers: (a) `actionbroker.Classify` consults the `floor` map before the `policy` map — no policy-table override can lower it; (b) `CONSTRAINT pending_actions_floor_is_approve` in the DB CHECKs that any row with `action_type = 'github_issue_comment'` has `tier = 'approve'` — a mismatch is rejected at INSERT time; (c) `TestFloorCannotBeLowered` in the test suite pins this at build time. Any future action type that is public-facing must be added to the floor set in `internal/actionbroker/policy.go` before the migration that introduces its action type ships — see `docs/security/action-broker-threat-model.md` §4 for the rationale.
+
+**6. Outbox route**
+
+The Outbox is the operator's approval queue for all pending outbound actions. Navigate to `/admin/outbox` in the dashboard. Separate sections list: `approve`-tier rows pending operator decision; `human_only` rows the operator marks done by hand (with an optional free-text note capturing what was actually done); and `notify`-tier post-hoc feed items (executed, then surfaced). The Outbox follows the M7 hiring-queue pull pattern — it re-fetches on navigation and on Server Action completion; there is no SSE live-push in M11.
+
 ---
 
 ## Changelog
 
+- **2026-06-12**: M11 action broker section added (GitHub PAT provisioning at `actions/GITHUB_PAT`, `GARRISON_ACTION_GITHUB_PAT_PATH` + `GARRISON_ACTION_POLL_INTERVAL` env vars, end-to-end verify walkthrough, permanent-Approve floor note, `/admin/outbox` route).
 - **2026-06-12**: M10 ingress connectors section added (GitHub webhook registration, vault secret at `ingress/github/webhook_secret`, `GARRISON_INGRESS_GITHUB_ENABLED` + `GARRISON_INGRESS_GITHUB_DEPARTMENT` required env vars, `EXPOSE 8082` published port, `/admin/connectors` status surface verification).
 - **2026-06-11**: M9 scheduled wake-ups section added (no compose
   changes, one migration, GARRISON_SCHED_TICK_INTERVAL /
