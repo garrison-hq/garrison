@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 
 	"github.com/garrison-hq/garrison/supervisor/internal/store"
+	"github.com/garrison-hq/garrison/supervisor/internal/throttle"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -22,14 +24,13 @@ const maxBodyBytes = 26_214_400 // 26 MB
 // HandlerDeps are the per-request dependencies wired by ingress.Server
 // (T008). They are defined here so handler.go is self-contained and
 // compiles independently of server.go / config.go (T008).
-//
-// T007 will extend this struct to add RateCap; T008 will embed it in
-// the full ingress.Deps struct.
 type HandlerDeps struct {
 	// Pool is the pgxpool used to Begin each webhook transaction.
 	Pool *pgxpool.Pool
 	// Queries is the supervisor sqlc query set, used with Queries.WithTx
-	// inside the per-request transaction.
+	// inside the per-request transaction and directly for throttle writes
+	// (throttle events are NOT inside the delivery tx — the cap fires before
+	// any delivery row is created, FR-602).
 	Queries *store.Queries
 	// Connector is the validated, wired connector for this handler
 	// (e.g. *GitHubConnector). The handler owns the framework spine;
@@ -44,6 +45,21 @@ type HandlerDeps struct {
 	RejectionCounter *atomic.Int64
 	// Logger is the structured logger; defaults to slog.Default() when nil.
 	Logger *slog.Logger
+
+	// RateCap is the per-connector token bucket (T007). nil disables rate
+	// capping (e.g. in unit tests that do not exercise step 7). When non-nil,
+	// the connector ID must have been registered via RateCap.AddConnector
+	// before the handler is invoked.
+	RateCap *RateCap
+	// CompanyID is the company UUID resolved once at supervisor boot via
+	// SELECT id FROM companies LIMIT 1 (the M6 pattern). Required when
+	// RateCap is non-nil — passed to throttle.FireIngressRateCap on a cap
+	// breach so no per-request company query is needed (plan §rate cap, R3).
+	CompanyID pgtype.UUID
+	// RatePerMin and Burst are the connector's configured rate parameters,
+	// forwarded to throttle.FireIngressRateCap for forensic payload clarity.
+	RatePerMin int
+	Burst      int
 }
 
 // newWebhookHandler returns an http.HandlerFunc that implements the SR6
@@ -127,8 +143,20 @@ func newWebhookHandler(deps HandlerDeps) http.HandlerFunc {
 			return
 		}
 
-		// Step 7: rate cap — no-op in T006; wired in T007.
-		// (placeholder — T007 inserts the real cap check here)
+		// Step 7: per-connector rate cap (FR-600, FR-601, FR-602).
+		// The cap fires BEFORE the delivery-row insert so an over-cap delivery
+		// writes no ingress_deliveries row; a later legitimate redelivery of the
+		// same GUID is therefore treated as fresh and dedups correctly (plan R1).
+		if deps.RateCap != nil && !deps.RateCap.Allow(conn.ID()) {
+			// Write M6 evidence (throttle_events row + work.throttle.event notify)
+			// using the pool-level Queries — not inside the (not-yet-opened) tx.
+			if err := throttle.FireIngressRateCap(ctx, deps.Queries, deps.CompanyID, conn.ID(), deps.RatePerMin, deps.Burst); err != nil {
+				logger.Error("ingress: FireIngressRateCap failed", "connector", conn.ID(), "error", err)
+				// Still return 429 — the cap is enforced regardless of evidence-write outcome.
+			}
+			http.Error(w, "rate cap exceeded", http.StatusTooManyRequests)
+			return
+		}
 
 		// Step 8: map event to TicketDraft.
 		draft, mapErr := conn.Map(eventType, rawBody)
