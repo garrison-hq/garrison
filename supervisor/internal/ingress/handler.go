@@ -94,113 +94,152 @@ func newWebhookHandler(deps HandlerDeps) http.HandlerFunc {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	conn := deps.Connector
+	p := &webhookPipeline{deps: deps, logger: logger}
 
 	return func(w http.ResponseWriter, r *http.Request) {
-		ctx := r.Context()
-
-		// Step 1: capture raw body FIRST, before any parse.
-		// LimitReader guards against oversized payloads (FR-800).
-		rawBody, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes))
-		if err != nil {
-			logger.Error("ingress: read body failed", "error", err)
-			http.Error(w, "failed to read body", http.StatusInternalServerError)
+		rawBody, eventType, proceed := p.authenticate(w, r)
+		if !proceed {
 			return
 		}
-
-		// Step 2: extract event type. ok=false → discard 200 (SR6 step 2 prose).
-		eventType, ok := conn.EventType(r)
-		if !ok {
-			w.WriteHeader(http.StatusOK)
+		deliveryID, proceed := p.filterAndCap(w, r, eventType, rawBody)
+		if !proceed {
 			return
 		}
-
-		// Step 3: check subscription BEFORE signature verification (SR6 step 1).
-		// Unsubscribed event types are discarded 200 without spending time on HMAC.
-		if !conn.Subscribed(eventType) {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-
-		// Step 4: signature verification — fail-closed on bad/missing header
-		// (FR-300, SR1). Increments RejectionCounter without writing any row
-		// (FR-301). Uses the raw body captured in step 1 (spike F1.4).
-		if err := conn.VerifySignature(rawBody, r, deps.Secret); err != nil {
-			if deps.RejectionCounter != nil {
-				deps.RejectionCounter.Add(1)
-			}
-			logger.Warn("ingress: signature rejected", "connector", conn.ID(), "event_type", eventType)
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-
-		// Step 5: noise filter (SR6 steps 3–4: bot sender, action subtype, ping).
-		// FilterDiscard → 200, no ticket, no idempotency row.
-		decision, filterErr := conn.Filter(eventType, rawBody)
-		if filterErr != nil {
-			logger.Warn("ingress: filter parse error; discarding", "connector", conn.ID(), "event_type", eventType, "error", filterErr)
-		}
-		if decision == FilterDiscard {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-
-		// Step 6: extract idempotency key. Absent → 400 (ErrMalformedDelivery).
-		deliveryID := conn.DeliveryID(r)
-		if deliveryID == "" {
-			http.Error(w, "missing X-GitHub-Delivery", http.StatusBadRequest)
-			return
-		}
-
-		// Step 7: per-connector rate cap (FR-600, FR-601, FR-602).
-		// The cap fires BEFORE the delivery-row insert so an over-cap delivery
-		// writes no ingress_deliveries row; a later legitimate redelivery of the
-		// same GUID is therefore treated as fresh and dedups correctly (plan R1).
-		if deps.RateCap != nil && !deps.RateCap.Allow(conn.ID()) {
-			// Write M6 evidence (throttle_events row + work.throttle.event notify)
-			// using the pool-level Queries — not inside the (not-yet-opened) tx.
-			if err := throttle.FireIngressRateCap(ctx, deps.Queries, deps.CompanyID, conn.ID(), deps.RatePerMin, deps.Burst); err != nil {
-				logger.Error("ingress: FireIngressRateCap failed", "connector", conn.ID(), "error", err)
-				// Still return 429 — the cap is enforced regardless of evidence-write outcome.
-			}
-			http.Error(w, "rate cap exceeded", http.StatusTooManyRequests)
-			return
-		}
-
-		// Step 8: map event to TicketDraft.
-		draft, mapErr := conn.Map(eventType, rawBody)
-		if mapErr != nil {
-			if errors.Is(mapErr, ErrNoMapping) {
-				// No route configured for this event type → 200 discard.
-				w.WriteHeader(http.StatusOK)
-				return
-			}
-			logger.Error("ingress: map failed", "connector", conn.ID(), "event_type", eventType, "error", mapErr)
-			http.Error(w, "mapping error", http.StatusInternalServerError)
-			return
-		}
-
-		// Step 9: the idempotency-anchored ticket transaction (plan decision 4).
-		//
-		// Transaction order (binding per plan §"Idempotency-vs-ticket transaction order"):
-		//   a. InsertIngressDelivery → 23505 → ROLLBACK, 200 (ErrDuplicateDelivery).
-		//   b. SelectDepartmentIDBySlug → resolve dept UUID.
-		//   c. InsertIngressTicket → emit_ticket_created trigger fires (FR-101).
-		//   d. BackfillIngressDeliveryTicket → link delivery → ticket.
-		//   COMMIT → 202.
-		if err := runIngressTx(ctx, deps.Pool, deps.Queries, conn.ID(), deliveryID, draft, logger); err != nil {
-			if errors.Is(err, ErrDuplicateDelivery) {
-				// Duplicate delivery — already processed; return 200 with no side effects (FR-202).
-				w.WriteHeader(http.StatusOK)
-				return
-			}
-			logger.Error("ingress: transaction failed", "connector", conn.ID(), "delivery_id", deliveryID, "error", err)
-			http.Error(w, "internal error", http.StatusInternalServerError)
-			return
-		}
-
-		w.WriteHeader(http.StatusAccepted) // 202 — delivery accepted and ticket created (FR-104).
+		p.mapAndPersist(r.Context(), w, eventType, rawBody, deliveryID)
 	}
+}
+
+// webhookPipeline groups the handler dependencies so the nine SR6 steps
+// can be split across one method per phase (authenticate → filterAndCap →
+// mapAndPersist). Each method writes the response itself on a terminal
+// outcome and reports proceed=false to stop the pipeline.
+type webhookPipeline struct {
+	deps   HandlerDeps
+	logger *slog.Logger
+}
+
+// authenticate runs steps 1–4: raw-body capture, event-type extraction,
+// subscription check, and signature verification.
+func (p *webhookPipeline) authenticate(w http.ResponseWriter, r *http.Request) (rawBody []byte, eventType string, proceed bool) {
+	conn := p.deps.Connector
+
+	// Step 1: capture raw body FIRST, before any parse.
+	// LimitReader guards against oversized payloads (FR-800).
+	rawBody, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes))
+	if err != nil {
+		p.logger.Error("ingress: read body failed", "error", err)
+		http.Error(w, "failed to read body", http.StatusInternalServerError)
+		return nil, "", false
+	}
+
+	// Step 2: extract event type. ok=false → discard 200 (SR6 step 2 prose).
+	eventType, ok := conn.EventType(r)
+	if !ok {
+		w.WriteHeader(http.StatusOK)
+		return nil, "", false
+	}
+
+	// Step 3: check subscription BEFORE signature verification (SR6 step 1).
+	// Unsubscribed event types are discarded 200 without spending time on HMAC.
+	if !conn.Subscribed(eventType) {
+		w.WriteHeader(http.StatusOK)
+		return nil, "", false
+	}
+
+	// Step 4: signature verification — fail-closed on bad/missing header
+	// (FR-300, SR1). Increments RejectionCounter without writing any row
+	// (FR-301). Uses the raw body captured in step 1 (spike F1.4).
+	if err := conn.VerifySignature(rawBody, r, p.deps.Secret); err != nil {
+		if p.deps.RejectionCounter != nil {
+			p.deps.RejectionCounter.Add(1)
+		}
+		p.logger.Warn("ingress: signature rejected", "connector", conn.ID(), "event_type", eventType)
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return nil, "", false
+	}
+
+	return rawBody, eventType, true
+}
+
+// filterAndCap runs steps 5–7: noise filter, idempotency-key extraction,
+// and the per-connector rate cap.
+func (p *webhookPipeline) filterAndCap(w http.ResponseWriter, r *http.Request, eventType string, rawBody []byte) (deliveryID string, proceed bool) {
+	conn := p.deps.Connector
+
+	// Step 5: noise filter (SR6 steps 3–4: bot sender, action subtype, ping).
+	// FilterDiscard → 200, no ticket, no idempotency row.
+	decision, filterErr := conn.Filter(eventType, rawBody)
+	if filterErr != nil {
+		p.logger.Warn("ingress: filter parse error; discarding", "connector", conn.ID(), "event_type", eventType, "error", filterErr)
+	}
+	if decision == FilterDiscard {
+		w.WriteHeader(http.StatusOK)
+		return "", false
+	}
+
+	// Step 6: extract idempotency key. Absent → 400 (ErrMalformedDelivery).
+	deliveryID = conn.DeliveryID(r)
+	if deliveryID == "" {
+		http.Error(w, "missing X-GitHub-Delivery", http.StatusBadRequest)
+		return "", false
+	}
+
+	// Step 7: per-connector rate cap (FR-600, FR-601, FR-602).
+	// The cap fires BEFORE the delivery-row insert so an over-cap delivery
+	// writes no ingress_deliveries row; a later legitimate redelivery of the
+	// same GUID is therefore treated as fresh and dedups correctly (plan R1).
+	if p.deps.RateCap != nil && !p.deps.RateCap.Allow(conn.ID()) {
+		// Write M6 evidence (throttle_events row + work.throttle.event notify)
+		// using the pool-level Queries — not inside the (not-yet-opened) tx.
+		if err := throttle.FireIngressRateCap(r.Context(), p.deps.Queries, p.deps.CompanyID, conn.ID(), p.deps.RatePerMin, p.deps.Burst); err != nil {
+			p.logger.Error("ingress: FireIngressRateCap failed", "connector", conn.ID(), "error", err)
+			// Still return 429 — the cap is enforced regardless of evidence-write outcome.
+		}
+		http.Error(w, "rate cap exceeded", http.StatusTooManyRequests)
+		return "", false
+	}
+
+	return deliveryID, true
+}
+
+// mapAndPersist runs steps 8–9: event-to-draft mapping and the
+// idempotency-anchored ticket transaction.
+func (p *webhookPipeline) mapAndPersist(ctx context.Context, w http.ResponseWriter, eventType string, rawBody []byte, deliveryID string) {
+	conn := p.deps.Connector
+
+	// Step 8: map event to TicketDraft.
+	draft, mapErr := conn.Map(eventType, rawBody)
+	if mapErr != nil {
+		if errors.Is(mapErr, ErrNoMapping) {
+			// No route configured for this event type → 200 discard.
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		p.logger.Error("ingress: map failed", "connector", conn.ID(), "event_type", eventType, "error", mapErr)
+		http.Error(w, "mapping error", http.StatusInternalServerError)
+		return
+	}
+
+	// Step 9: the idempotency-anchored ticket transaction (plan decision 4).
+	//
+	// Transaction order (binding per plan §"Idempotency-vs-ticket transaction order"):
+	//   a. InsertIngressDelivery → 23505 → ROLLBACK, 200 (ErrDuplicateDelivery).
+	//   b. SelectDepartmentIDBySlug → resolve dept UUID.
+	//   c. InsertIngressTicket → emit_ticket_created trigger fires (FR-101).
+	//   d. BackfillIngressDeliveryTicket → link delivery → ticket.
+	//   COMMIT → 202.
+	if err := runIngressTx(ctx, p.deps.Pool, p.deps.Queries, conn.ID(), deliveryID, draft, p.logger); err != nil {
+		if errors.Is(err, ErrDuplicateDelivery) {
+			// Duplicate delivery — already processed; return 200 with no side effects (FR-202).
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		p.logger.Error("ingress: transaction failed", "connector", conn.ID(), "delivery_id", deliveryID, "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusAccepted) // 202 — delivery accepted and ticket created (FR-104).
 }
 
 // runIngressTx opens a transaction, inserts the idempotency row, resolves

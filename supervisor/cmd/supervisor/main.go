@@ -59,6 +59,10 @@ const (
 // for any test harness that still references it.
 const EngineeringTicketChannel = "work.ticket.created.engineering.todo"
 
+// listenAddrFmt is the bind-address format shared by the health,
+// dashboard-api, and ingress listeners' startup log lines.
+const listenAddrFmt = "0.0.0.0:%d"
+
 // M2.2 channel constants — the supervisor registers these handlers
 // per Session 2026-04-23 and FR-227/FR-228. The two `transitioned.*.in_dev`
 // channels were added during M5.4 retro after dropping the M1/M2.1 back-compat
@@ -392,7 +396,7 @@ func runDaemon() int {
 	})
 
 	g.Go(func() error {
-		logger.Info("health server listening", "addr", fmt.Sprintf("0.0.0.0:%d", cfg.HealthPort))
+		logger.Info("health server listening", "addr", fmt.Sprintf(listenAddrFmt, cfg.HealthPort))
 		return healthServer.Serve(gctx)
 	})
 
@@ -915,7 +919,7 @@ func startDashboardAPIServerIfWired(
 		return
 	}
 	g.Go(func() error {
-		logger.Info("dashboardapi server listening", "addr", fmt.Sprintf("0.0.0.0:%d", cfg.DashboardAPIPort))
+		logger.Info("dashboardapi server listening", "addr", fmt.Sprintf(listenAddrFmt, cfg.DashboardAPIPort))
 		return srv.Serve(gctx)
 	})
 }
@@ -978,7 +982,7 @@ func startIngressServerIfWired(
 		return
 	}
 	g.Go(func() error {
-		logger.Info("ingress server listening", "addr", fmt.Sprintf("0.0.0.0:%d", cfg.IngressPort))
+		logger.Info("ingress server listening", "addr", fmt.Sprintf(listenAddrFmt, cfg.IngressPort))
 		return srv.Serve(gctx)
 	})
 }
