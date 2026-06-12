@@ -175,3 +175,45 @@ describe('ARCHITECTURE.md M9 amendment', () => {
     expect(source).toContain('20260610000002_m9_scheduled_wakeups.sql');
   });
 });
+
+describe('ARCHITECTURE.md M10 amendment', () => {
+  // Pins the M10 substrings per T016 (M9 T019 pattern). The M10 entry is
+  // annotated with shipped status + retro link, references the
+  // ingress-threat-model, names the implementation packages, and carries
+  // the migration version.
+  it('M10 paragraph annotated with shipped status', () => {
+    const path = resolve(import.meta.dirname, '..', '..', 'ARCHITECTURE.md');
+    const source = readFileSync(path, 'utf-8');
+    expect(source).toContain('**M10 — Ingress connectors');
+    expect(source).toContain('Shipped 2026-06-12');
+    expect(source).toContain('docs/retros/m10.md');
+  });
+
+  it('M10 entry references the ingress threat model', () => {
+    const path = resolve(import.meta.dirname, '..', '..', 'ARCHITECTURE.md');
+    const source = readFileSync(path, 'utf-8');
+    expect(source).toContain('docs/security/ingress-threat-model.md');
+  });
+
+  it('M10 entry names the ingress package and migration', () => {
+    const path = resolve(import.meta.dirname, '..', '..', 'ARCHITECTURE.md');
+    const source = readFileSync(path, 'utf-8');
+    expect(source).toContain('supervisor/internal/ingress/');
+    expect(source).toContain('20260612000000_m10_ingress_connectors.sql');
+  });
+
+  it('M10 entry names the connector-status dashboard surface and dashboardapi endpoint', () => {
+    const path = resolve(import.meta.dirname, '..', '..', 'ARCHITECTURE.md');
+    const source = readFileSync(path, 'utf-8');
+    expect(source).toContain('/admin/connectors');
+    expect(source).toContain('GET /ingress/status');
+  });
+
+  it('M10 entry carries the provenance storage key names', () => {
+    const path = resolve(import.meta.dirname, '..', '..', 'ARCHITECTURE.md');
+    const source = readFileSync(path, 'utf-8');
+    expect(source).toContain('ingress_connector');
+    expect(source).toContain('external_id');
+    expect(source).toContain('external_url');
+  });
+});

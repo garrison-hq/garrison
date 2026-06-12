@@ -959,10 +959,108 @@ Pause/resume and delete live on the detail page. Delete is soft — run
 history and audit rows survive; the name becomes reusable. Resume
 never backfills: `next_fire_at` recomputes forward from now.
 
+## M10 — Ingress connectors (GitHub webhook)
+
+M10 ships a supervisor-side ingress subsystem on a dedicated port (8082).
+No new containers or compose services. One schema migration
+(`migrations/20260612000000_m10_ingress_connectors.sql`) applies through
+the normal goose flow at supervisor boot — it adds `ingress_deliveries`
+and extends the `throttle_events.kind` CHECK with
+`'ingress_rate_cap_exceeded'`.
+
+**1. Register the GitHub repo/org webhook**
+
+In the GitHub repository (or organization) settings → Webhooks → Add webhook:
+
+- **Payload URL**: `https://<your-host>:8082/webhook/github`
+- **Content type**: `application/json`
+- **Secret**: the value at `ingress/github/webhook_secret` in your Infisical vault
+  (see step 2 for how to seed it)
+- **Events**: select **Issues** and **Pull requests**; deselect everything else
+
+GitHub sends a `ping` event immediately on registration. The connector
+returns 200 on `ping` — no ticket, no side effects. If registration fails,
+the connector endpoint is unreachable (check `GARRISON_INGRESS_PORT` + the
+published port in compose / firewall rules).
+
+**2. Seed the webhook secret into the vault**
+
+The webhook secret is a randomly-generated string you choose; GitHub will
+use it to sign every delivery. Seed it into Infisical at the fixed path
+`ingress/github/webhook_secret` using the M4 vault create flow or the
+`infisical` CLI:
+
+```bash
+# Using the M4 dashboard: /vault/new
+# path (suffix): ingress/github/webhook_secret
+# value: <the same random string you gave GitHub in step 1>
+```
+
+The supervisor reads this path at boot. If the path is absent or vault is
+unreachable, the ingress server refuses to start (`ExitFailure`, FR-302).
+
+**Secret rotation** = update the value in Infisical + update the webhook
+secret in GitHub settings + restart the supervisor. There is no rolling
+rotation (the supervisor fetches the secret once at boot).
+
+**3. Set the required supervisor env vars**
+
+| Variable | Required? | Default | Purpose |
+|---|---|---|---|
+| `GARRISON_INGRESS_GITHUB_ENABLED` | Yes (to enable) | `false` | Set `true` to build the ingress server |
+| `GARRISON_INGRESS_GITHUB_DEPARTMENT` | Yes (when enabled) | — | Department slug that receives inbound tickets (e.g. `engineering`) |
+| `GARRISON_INGRESS_PORT` | No | `8082` | Dedicated webhook listener port |
+| `GARRISON_INGRESS_GITHUB_CONNECTOR_ID` | No | `github-sortie` | Connector ID in `ingress_deliveries.connector_id`; human-readable label |
+| `GARRISON_INGRESS_GITHUB_RATE_PER_MIN` | No | `60` | Sustained inbound delivery cap (tokens/minute); reject excess with 429 |
+| `GARRISON_INGRESS_GITHUB_BURST` | No | `30` | Burst allowance above the sustained rate |
+
+Set these in your deployment environment (Coolify env vars, or compose
+`.env`) before deploying the M10 supervisor binary.
+
+**4. Expose the port**
+
+The Dockerfile gains `EXPOSE 8082`. In `supervisor/docker-compose.yml` the
+`supervisor` service publishes the port:
+
+```yaml
+ports:
+  - "8082:8082"
+```
+
+For production, place a TLS-terminating reverse proxy in front — GitHub
+recommends HTTPS for webhook endpoints.
+
+**5. Verify the first delivery via the connector-status surface**
+
+1. Navigate to `/admin/connectors` in the dashboard.
+2. After the first GitHub event arrives you should see:
+   - **Last delivery received**: a recent timestamp
+   - **Accepted count**: 1 (or more after subsequent events)
+   - **Bad-signature rejection count**: should be 0 (non-zero indicates a
+     secret mismatch — regenerate and re-seed both sides)
+   - **Rate-cap breach count**: should be 0 under normal conditions
+
+The connector-status surface reads `GET /ingress/status` on dashboardapi
+port 8081 (cookie-auth, same session as the dashboard).
+
+**6. Goose migration**
+
+Run `goose up` before bringing the new binary up:
+
+```sh
+# from the supervisor directory
+goose -dir ../migrations postgres "${SUPERVISOR_DSN}" up
+```
+
+The M10 migration adds `ingress_deliveries` and extends the
+`throttle_events.kind` CHECK. The `GRANT SELECT ON ingress_deliveries TO
+garrison_dashboard_app` in the migration body takes effect automatically.
+
 ---
 
 ## Changelog
 
+- **2026-06-12**: M10 ingress connectors section added (GitHub webhook registration, vault secret at `ingress/github/webhook_secret`, `GARRISON_INGRESS_GITHUB_ENABLED` + `GARRISON_INGRESS_GITHUB_DEPARTMENT` required env vars, `EXPOSE 8082` published port, `/admin/connectors` status surface verification).
 - **2026-06-11**: M9 scheduled wake-ups section added (no compose
   changes, one migration, GARRISON_SCHED_TICK_INTERVAL /
   GARRISON_SCHED_MIN_INTERVAL /

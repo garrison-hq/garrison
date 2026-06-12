@@ -195,7 +195,7 @@ T009–T012 are the unit test suites covering signature, render, GitHub connecto
 
 ## Phase 6 — Docs, acceptance, retro
 
-- [ ] **T016** `docs/ops-checklist.md` M10 section + ARCHITECTURE.md §M10 shipped annotation + pin test
+- [x] **T016** `docs/ops-checklist.md` M10 section + ARCHITECTURE.md §M10 shipped annotation + pin test
   - **Depends on**: T013 (the behavior being documented is proven).
   - **Files**: `docs/ops-checklist.md` (extend — M10 section: register the GitHub repo/org webhook (URL → `:8082/webhook/github`, content-type `application/json`, secret = vault value at `ingress/github/webhook_secret`, events = `issues` + `pull_request`); set env vars (`GARRISON_INGRESS_GITHUB_ENABLED=true`, `GARRISON_INGRESS_GITHUB_DEPARTMENT`, optional `GARRISON_INGRESS_PORT`, rate-cap env vars); note that secret rotation = supervisor restart; Dockerfile `EXPOSE 8082` + compose publish-port instruction; verify first delivery via connector-status surface at `/admin/connectors`); `ARCHITECTURE.md` (extend — §M10 paragraph annotated "Shipped" with per-thread implementation pointers: ingress package, GitHub connector, idempotency table, rate cap, dashboard surfaces, migration version); `dashboard/tests/architecture-amendment.test.ts` (extend — substring pin for the M10 "Shipped" annotation, M9 T019 pattern).
   - **Completion condition**: amendment pin test passes; ops-checklist section names every new env var, the webhook registration URL, the vault secret path, and the `/admin/connectors` URL. No code changes.
