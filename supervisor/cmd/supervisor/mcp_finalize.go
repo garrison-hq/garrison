@@ -23,6 +23,12 @@ import (
 //     writer per FR-256 / spec Clarification 2026-04-23 Q4)
 //   - GARRISON_DATABASE_URL (read-only DSN; the handler queries
 //     agent_instances for the already-committed check per FR-260)
+//
+// Optional env (M9 mode switch):
+//   - GARRISON_FINALIZE_MODE ("ticket" default | "oneshot"; selects
+//     which single tool the server exposes per M9 FR-304)
+//   - GARRISON_SCHEDULED_RUN_ID (uuid; required when mode=oneshot —
+//     keys the oneshot double-commit guard, M9 FR-260 analog)
 func runMCPFinalize() int {
 	instanceIDText := os.Getenv("GARRISON_AGENT_INSTANCE_ID")
 	if instanceIDText == "" {
@@ -41,12 +47,36 @@ func runMCPFinalize() int {
 		return ExitUsage
 	}
 
+	mode := os.Getenv("GARRISON_FINALIZE_MODE")
+	if mode == "" {
+		mode = finalize.ModeTicket
+	}
+	var scheduledRunID pgtype.UUID
+	switch mode {
+	case finalize.ModeTicket:
+		// M2.2.1 path; no extra env.
+	case finalize.ModeOneshot:
+		runIDText := os.Getenv("GARRISON_SCHEDULED_RUN_ID")
+		if runIDText == "" {
+			fmt.Fprintln(os.Stderr, "supervisor mcp finalize: GARRISON_SCHEDULED_RUN_ID is required in oneshot mode")
+			return ExitUsage
+		}
+		if err := scheduledRunID.Scan(runIDText); err != nil {
+			fmt.Fprintf(os.Stderr, "supervisor mcp finalize: invalid GARRISON_SCHEDULED_RUN_ID: %v\n", err)
+			return ExitUsage
+		}
+	default:
+		fmt.Fprintf(os.Stderr, "supervisor mcp finalize: invalid GARRISON_FINALIZE_MODE %q (want %q or %q)\n",
+			mode, finalize.ModeTicket, finalize.ModeOneshot)
+		return ExitUsage
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})).
 		With("stream", "finalize")
-	logger.Info("finalize: subcommand starting", "agent_instance_id", instanceIDText)
+	logger.Info("finalize: subcommand starting", "agent_instance_id", instanceIDText, "mode", mode)
 
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
@@ -59,6 +89,8 @@ func runMCPFinalize() int {
 		Pool:            pool,
 		AgentInstanceID: instanceID,
 		Logger:          logger,
+		Mode:            mode,
+		ScheduledRunID:  scheduledRunID,
 	}); err != nil {
 		logger.Error("finalize: Serve returned error", "err", err)
 		return ExitFailure

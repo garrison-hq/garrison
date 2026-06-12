@@ -186,6 +186,14 @@ type Config struct {
 	// HTTPS_PROXY (T011).
 	AgentsNetwork  string // GARRISON_AGENTS_NETWORK, default "garrison-agents"
 	EgressProxyURL string // GARRISON_EGRESS_PROXY_URL, default "http://garrison-egress-proxy:3128"
+
+	// M9 fields (plan.md decision 12, §internal/config). Tick cadence of
+	// the schedule loop, the floor every scheduled-task expression must
+	// respect, and the per-chat-turn create_scheduled_task ceiling
+	// (MaxTicketsPerTurn mirror).
+	SchedTickInterval        time.Duration // GARRISON_SCHED_TICK_INTERVAL, default 30s, reject < 1s
+	SchedMinInterval         time.Duration // GARRISON_SCHED_MIN_INTERVAL, default 15m, reject <= 0
+	MaxScheduledTasksPerTurn int           // GARRISON_CHAT_MAX_SCHEDULED_TASKS_PER_TURN, default 3, reject < 1
 }
 
 // DefaultMinIOBucket per M5.4 spec FR-620.
@@ -302,6 +310,11 @@ func Load() (*Config, error) {
 		// M7.1 defaults.
 		AgentsNetwork:  "garrison-agents",
 		EgressProxyURL: "http://garrison-egress-proxy:3128",
+
+		// M9 defaults.
+		SchedTickInterval:        30 * time.Second,
+		SchedMinInterval:         15 * time.Minute,
+		MaxScheduledTasksPerTurn: 3,
 	}
 
 	// M5.1 env overrides — all optional; defaults above are used
@@ -460,6 +473,26 @@ func Load() (*Config, error) {
 	}
 	if v := os.Getenv("GARRISON_EGRESS_PROXY_URL"); v != "" {
 		cfg.EgressProxyURL = v
+	}
+
+	// M9 env overrides. Tick interval floors at 1s (a hotter loop is an
+	// operator error, not a tuning choice); min interval must be strictly
+	// positive; the per-turn ceiling must allow at least one creation.
+	if err := parseDurationWithMin("GARRISON_SCHED_TICK_INTERVAL", time.Second, &cfg.SchedTickInterval); err != nil {
+		return nil, err
+	}
+	if err := parsePositiveDuration("GARRISON_SCHED_MIN_INTERVAL", &cfg.SchedMinInterval); err != nil {
+		return nil, err
+	}
+	if v := os.Getenv("GARRISON_CHAT_MAX_SCHEDULED_TASKS_PER_TURN"); v != "" {
+		var n int
+		if _, err := fmt.Sscanf(v, "%d", &n); err != nil {
+			return nil, fmt.Errorf("config: GARRISON_CHAT_MAX_SCHEDULED_TASKS_PER_TURN is not parseable as int: %w", err)
+		}
+		if n < 1 {
+			return nil, fmt.Errorf("config: GARRISON_CHAT_MAX_SCHEDULED_TASKS_PER_TURN must be >= 1; got %d", n)
+		}
+		cfg.MaxScheduledTasksPerTurn = n
 	}
 
 	dbURL := os.Getenv("GARRISON_DATABASE_URL")

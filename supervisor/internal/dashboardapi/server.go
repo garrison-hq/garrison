@@ -10,6 +10,7 @@ import (
 	"github.com/garrison-hq/garrison/supervisor/internal/config"
 	"github.com/garrison-hq/garrison/supervisor/internal/mempalace"
 	"github.com/garrison-hq/garrison/supervisor/internal/objstore"
+	"github.com/garrison-hq/garrison/supervisor/internal/store"
 )
 
 // Deps wires the dashboardapi.Server into the supervisor process.
@@ -20,6 +21,11 @@ type Deps struct {
 	Mempalace        *mempalace.QueryClient
 	SessionValidator SessionValidator
 	Logger           *slog.Logger
+	// Queries is the supervisor's sqlc query set (M9 review #4): the
+	// /schedule/validate handler needs it for the full-body
+	// schedule.ValidateTask path (role existence + name uniqueness).
+	// nil keeps expression-only validation working (older tests).
+	Queries *store.Queries
 	// CompanyID is the single-company posture's pre-resolved companies
 	// row id, captured at supervisor startup. Per plan §"Open questions
 	// remaining for /garrison-tasks": pre-resolve at boot and pass
@@ -35,6 +41,10 @@ type Server struct {
 	shutdownGrace time.Duration
 	logger        *slog.Logger
 	mux           *http.ServeMux
+	// schedMinInterval is the FR-404 minimum firing interval
+	// (cfg.SchedMinInterval), captured at construction for the M9
+	// POST /schedule/validate handler.
+	schedMinInterval time.Duration
 }
 
 // NewServer wires the auth middleware, but leaves route registration
@@ -54,9 +64,10 @@ func NewServer(cfg *config.Config, deps Deps) *Server {
 			Handler:           mux,
 			ReadHeaderTimeout: 5 * time.Second,
 		},
-		shutdownGrace: cfg.ShutdownGrace,
-		logger:        logger,
-		mux:           mux,
+		shutdownGrace:    cfg.ShutdownGrace,
+		logger:           logger,
+		mux:              mux,
+		schedMinInterval: cfg.SchedMinInterval,
 	}
 }
 
@@ -96,6 +107,14 @@ func (s *Server) RegisterDefaultRoutes(deps Deps) error {
 
 	s.mux.Handle("/api/objstore/company-md",
 		auth(newObjstoreHandler(deps.Objstore, s.logger)))
+
+	// M9 T013: expression validation single-sources in Go (plan
+	// decision 10) — the dashboard's Server Actions call this endpoint
+	// for grammar + next-fire computation; no TS date-math mirror.
+	// Review #4: deps.Queries enables the full-body ValidateTask path
+	// (role existence + duplicate-live-name, typed field errors).
+	s.mux.Handle("/schedule/validate",
+		auth(newScheduleValidateHandler(deps.Queries, s.schedMinInterval, nil, s.logger)))
 
 	if deps.Mempalace != nil {
 		s.mux.Handle("/api/mempalace/recent-writes",

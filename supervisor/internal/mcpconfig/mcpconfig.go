@@ -103,39 +103,16 @@ func BuildChatConfig(p ChatConfigParams) ([]byte, error) {
 	// session-context fields are set, all three must be set, and the
 	// entry lands. If all three are empty, the entry is omitted (M5.1 /
 	// M5.2 chat back-compat path used by older tests).
-	mutateConfigured := p.DatabaseURL != "" || p.ChatSessionID != "" || p.ChatMessageID != ""
+	mutateEntry, mutateConfigured, err := chatGarrisonMutateServer(p)
+	if err != nil {
+		return nil, err
+	}
 	if mutateConfigured {
-		if p.DatabaseURL == "" {
-			return nil, errors.New("mcpconfig: BuildChatConfig: garrison-mutate requires DatabaseURL")
-		}
-		if p.ChatSessionID == "" {
-			return nil, errors.New("mcpconfig: BuildChatConfig: garrison-mutate requires ChatSessionID")
-		}
-		if p.ChatMessageID == "" {
-			return nil, errors.New("mcpconfig: BuildChatConfig: garrison-mutate requires ChatMessageID")
-		}
-		servers[serverGarrisonMutate] = mcpServerSpec{
-			Command: p.SupervisorBin,
-			Args:    []string{"mcp", serverGarrisonMutate},
-			Env: map[string]string{
-				"GARRISON_DATABASE_URL":    p.DatabaseURL,
-				"GARRISON_CHAT_SESSION_ID": p.ChatSessionID,
-				"GARRISON_CHAT_MESSAGE_ID": p.ChatMessageID,
-			},
-		}
+		servers[serverGarrisonMutate] = mutateEntry
 	}
 
-	// Defense-in-depth: vault-pattern names are still rejected even at
-	// the chat-config level (Rule 1 + Rule 2). garrison-mutate is now an
-	// expected entry so it's removed from the legacy banned-fixed-list;
-	// other write-shaped names stay banned to catch typos and
-	// would-be parallel mutation servers.
-	for _, banned := range []string{
-		"tickets-write", "agents-write", "vault-write",
-	} {
-		if _, present := servers[banned]; present {
-			return nil, fmt.Errorf("mcpconfig: BuildChatConfig: forbidden server %q", banned)
-		}
+	if err := rejectChatBannedFixedList(servers); err != nil {
+		return nil, err
 	}
 
 	cfg := mcpConfig{MCPServers: servers}
@@ -146,6 +123,61 @@ func BuildChatConfig(p ChatConfigParams) ([]byte, error) {
 		return nil, err
 	}
 	return json.Marshal(cfg)
+}
+
+// chatGarrisonMutateServer builds the M5.3 garrison-mutate entry from
+// the all-or-nothing session-context triple. All three fields empty →
+// the entry is omitted (configured=false, the M5.1 / M5.2 back-compat
+// shape); any field set requires all three.
+func chatGarrisonMutateServer(p ChatConfigParams) (mcpServerSpec, bool, error) {
+	if p.DatabaseURL == "" && p.ChatSessionID == "" && p.ChatMessageID == "" {
+		return mcpServerSpec{}, false, nil
+	}
+	if p.DatabaseURL == "" {
+		return mcpServerSpec{}, false, errors.New("mcpconfig: BuildChatConfig: garrison-mutate requires DatabaseURL")
+	}
+	if p.ChatSessionID == "" {
+		return mcpServerSpec{}, false, errors.New("mcpconfig: BuildChatConfig: garrison-mutate requires ChatSessionID")
+	}
+	if p.ChatMessageID == "" {
+		return mcpServerSpec{}, false, errors.New("mcpconfig: BuildChatConfig: garrison-mutate requires ChatMessageID")
+	}
+	env := map[string]string{
+		"GARRISON_DATABASE_URL":    p.DatabaseURL,
+		"GARRISON_CHAT_SESSION_ID": p.ChatSessionID,
+		"GARRISON_CHAT_MESSAGE_ID": p.ChatMessageID,
+	}
+	// M9 review #3: the create_scheduled_task verb enforces the
+	// FR-404 min-interval bound inside the garrison-mutate
+	// subprocess, which reads GARRISON_SCHED_MIN_INTERVAL from its
+	// own env — the chat container's env doesn't carry the
+	// supervisor's config, so the bound must ride the MCP entry
+	// (the same way DATABASE_URL does). Empty omits the var; the
+	// verb falls back to the 15m default.
+	if p.SchedMinInterval != "" {
+		env["GARRISON_SCHED_MIN_INTERVAL"] = p.SchedMinInterval
+	}
+	return mcpServerSpec{
+		Command: p.SupervisorBin,
+		Args:    []string{"mcp", serverGarrisonMutate},
+		Env:     env,
+	}, true, nil
+}
+
+// rejectChatBannedFixedList is the defense-in-depth fixed list:
+// vault-pattern names are still rejected even at the chat-config level
+// (Rule 1 + Rule 2). garrison-mutate is now an expected entry so it's
+// removed from the legacy banned-fixed-list; other write-shaped names
+// stay banned to catch typos and would-be parallel mutation servers.
+func rejectChatBannedFixedList(servers map[string]mcpServerSpec) error {
+	for _, banned := range []string{
+		"tickets-write", "agents-write", "vault-write",
+	} {
+		if _, present := servers[banned]; present {
+			return fmt.Errorf("mcpconfig: BuildChatConfig: forbidden server %q", banned)
+		}
+	}
+	return nil
 }
 
 // ChatConfigParams wires BuildChatConfig.
@@ -167,6 +199,13 @@ type ChatConfigParams struct {
 	DatabaseURL   string
 	ChatSessionID string
 	ChatMessageID string
+	// SchedMinInterval is cfg.SchedMinInterval rendered as a Go
+	// duration string (e.g. "15m"). When non-empty it lands on the
+	// garrison-mutate entry's env as GARRISON_SCHED_MIN_INTERVAL so the
+	// create_scheduled_task verb enforces the same FR-404 bound the
+	// dashboardapi validate endpoint does (M9 review #3). Empty omits
+	// the var (the verb's documented 15m-default fallback applies).
+	SchedMinInterval string
 }
 
 func CheckExtraServers(extraServersJSON []byte) error {

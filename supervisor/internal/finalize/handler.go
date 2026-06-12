@@ -29,6 +29,14 @@ type Handler struct {
 	Logger          *slog.Logger
 	Queries         *store.Queries
 
+	// Mode (M9) routes Handle: ModeOneshot validates OneshotPayload and
+	// guards double commit by scheduled task run; the zero value behaves
+	// as ModeTicket so the M2.2.1 path is byte-for-byte unchanged
+	// (FR-302). ScheduledRunID keys the oneshot guard
+	// (SelectScheduledTaskRunFinalizedState); ignored in ticket mode.
+	Mode           string
+	ScheduledRunID pgtype.UUID
+
 	attempts int
 }
 
@@ -87,6 +95,9 @@ type ToolResult struct {
 // content[0].text (matches what MemPalace's own tools do — see M2.2
 // spike §3.6).
 func (h *Handler) Handle(ctx context.Context, rawArgs json.RawMessage) (json.RawMessage, error) {
+	if h.Mode == ModeOneshot {
+		return h.handleOneshot(ctx, rawArgs)
+	}
 	h.attempts++
 
 	// Step 1: check already-committed state before validating. A post-
@@ -138,6 +149,59 @@ func (h *Handler) Handle(ctx context.Context, rawArgs json.RawMessage) (json.Raw
 	return h.okResult(), nil
 }
 
+// handleOneshot is the M9 oneshot-mode Handle path. Same three-step
+// shape as ticket mode: already-committed check (keyed by scheduled
+// task run, FR-260 analog), schema validation (ValidateOneshot), ok
+// signal. The supervisor-side onCommit (spawn.WriteFinalizeOneshot,
+// T008) owns the atomic write — same division of labor as ticket mode.
+func (h *Handler) handleOneshot(ctx context.Context, rawArgs json.RawMessage) (json.RawMessage, error) {
+	h.attempts++
+
+	// Step 1: double-commit guard before validating — a post-commit
+	// duplicate call reports already-committed regardless of whether
+	// the repeated payload is schema-valid (mirrors ticket mode).
+	committed, err := h.checkRunAlreadyCommitted(ctx)
+	if err != nil {
+		h.Logger.Error("finalize: oneshot already-committed check failed", "err", err,
+			"agent_instance_id", uuidString(h.AgentInstanceID),
+			"scheduled_run_id", uuidString(h.ScheduledRunID))
+		verr := &ValidationError{
+			ErrorType: ErrorTypeSchema,
+			Field:     "",
+			Message:   "internal error checking finalize state",
+			Failure:   FailureState,
+			Hint:      "internal error checking finalize state; please retry",
+		}
+		return h.errorResult(verr), nil
+	}
+	if committed {
+		return h.oneshotStateRejectionResult(), nil
+	}
+
+	// Step 2: schema validation.
+	payload, verr := ValidateOneshot(rawArgs)
+	if verr != nil {
+		h.Logger.Info("finalize: oneshot schema rejection",
+			"agent_instance_id", uuidString(h.AgentInstanceID),
+			"scheduled_run_id", uuidString(h.ScheduledRunID),
+			"attempt", h.attempts,
+			"error_type", verr.ErrorType,
+			"field", verr.Field,
+			"failure", verr.Failure,
+			"constraint", verr.Constraint)
+		return h.errorResult(verr), nil
+	}
+
+	// Step 3: success. The supervisor-side observer routes ok=true to
+	// WriteFinalizeOneshot (T008); the handler does NOT write.
+	h.Logger.Info("finalize: oneshot payload accepted",
+		"agent_instance_id", uuidString(h.AgentInstanceID),
+		"scheduled_run_id", uuidString(h.ScheduledRunID),
+		"attempt", h.attempts,
+		"triple_count", len(payload.KGTriples))
+	return h.okResult(), nil
+}
+
 // checkAlreadyCommitted runs SelectAgentInstanceFinalizedState. Returns
 // true when the atomic writer has already committed (status=succeeded
 // AND a ticket_transitions row exists for this agent_instance). Any
@@ -155,6 +219,25 @@ func (h *Handler) checkAlreadyCommitted(ctx context.Context) (bool, error) {
 	return row.Status == "succeeded" && row.HasTransition, nil
 }
 
+// checkRunAlreadyCommitted is the oneshot analog (M9, FR-260 analog):
+// SelectScheduledTaskRunFinalizedState reports finalized=true once
+// the run row carries a non-NULL structured_outcome — i.e. the
+// supervisor-side WriteFinalizeOneshot already landed the payload.
+func (h *Handler) checkRunAlreadyCommitted(ctx context.Context) (bool, error) {
+	if h.Queries == nil {
+		return false, fmt.Errorf("finalize: handler has no queries binding")
+	}
+	row, err := h.Queries.SelectScheduledTaskRunFinalizedState(ctx, h.ScheduledRunID)
+	if err != nil {
+		return false, err
+	}
+	finalized, ok := row.Finalized.(bool)
+	if !ok {
+		return false, fmt.Errorf("finalize: unexpected finalized column type %T", row.Finalized)
+	}
+	return finalized, nil
+}
+
 func (h *Handler) okResult() json.RawMessage {
 	body := ToolResult{Ok: true, Attempt: h.attempts}
 	raw, _ := json.Marshal(body)
@@ -169,6 +252,24 @@ func (h *Handler) okResult() json.RawMessage {
 // the same string as `hint` for Q9 backward compat.
 func (h *Handler) stateRejectionResult() json.RawMessage {
 	const msg = "finalize_ticket already succeeded for this agent_instance"
+	body := ToolResult{
+		Ok:        false,
+		Attempt:   h.attempts,
+		ErrorType: ErrorTypeSchema,
+		Field:     "",
+		Message:   msg,
+		Failure:   FailureState,
+		Hint:      msg,
+	}
+	raw, _ := json.Marshal(body)
+	return mcpContentEnvelope(raw)
+}
+
+// oneshotStateRejectionResult is the oneshot-mode already-committed
+// response: same Q3 wire shape as stateRejectionResult, with the
+// lifecycle objection phrased for the scheduled-run guard.
+func (h *Handler) oneshotStateRejectionResult() json.RawMessage {
+	const msg = "finalize_oneshot already committed for this scheduled task run"
 	body := ToolResult{
 		Ok:        false,
 		Attempt:   h.attempts,

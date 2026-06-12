@@ -13,6 +13,12 @@
 // (Failure/Line/Column/Excerpt/Constraint/Expected/Actual/Hint per
 // FR-301) so agents can diagnose + retry schema rejections. The
 // schema itself is unchanged (FR-321).
+//
+// M9 adds a mode switch (Deps.Mode): in oneshot mode the server
+// exposes the sibling tool `finalize_oneshot` instead — same payload
+// shape minus the ticket identifier (M9 FR-301/FR-304). Ticket-mode
+// behavior is byte-for-byte unchanged (M9 FR-302); the sealed-surface
+// amendment is invoked in m9-context.md §Scope extensions.
 package finalize
 
 import (
@@ -28,6 +34,11 @@ const (
 	// SchemaVersion appears in the ToolDescriptor's description. The
 	// server refuses non-v1 calls (future revisions bump the version).
 	SchemaVersion = "garrison.finalize_ticket.v1"
+
+	// OneshotSchemaVersion appears in the OneshotToolDescriptor's
+	// description (M9 FR-301). Same caps and validation as v1 ticket
+	// schema, minus ticket_id.
+	OneshotSchemaVersion = "garrison.finalize_oneshot.v1"
 
 	OutcomeMin       = 10
 	OutcomeMax       = 500
@@ -90,6 +101,10 @@ const (
 	ConstraintMaxItems     Constraint = "max_items"
 	ConstraintTypeMismatch Constraint = "type_mismatch"
 	ConstraintFormat       Constraint = "format"
+	// ConstraintUnknownField rejects fields that are not part of the
+	// tool's schema. M9: finalize_oneshot refuses ticket_id (FR-301's
+	// "MUST NOT accept a ticket identifier").
+	ConstraintUnknownField Constraint = "unknown_field"
 )
 
 // ValidationError is the structured reason a payload was rejected.
@@ -169,19 +184,97 @@ type rawPayload struct {
 	KGTriples  []rawKGTriple `json:"kg_triples"`
 }
 
+// OneshotPayload is the validated form of a finalize_oneshot call:
+// FinalizePayload minus TicketID (M9 FR-301). Outcome/DiaryEntry/
+// KGTriples carry identical validation and the same "now" substitution
+// — every KGTriple has a concrete time.Time ValidFrom.
+type OneshotPayload struct {
+	Outcome    string
+	DiaryEntry DiaryEntry
+	KGTriples  []KGTriple
+}
+
+// rawOneshotPayload mirrors the finalize_oneshot wire shape. TicketID
+// is decoded only so ValidateOneshot can reject its presence — the
+// oneshot schema has no ticket identifier (M9 FR-301).
+type rawOneshotPayload struct {
+	TicketID   *string       `json:"ticket_id"`
+	Outcome    string        `json:"outcome"`
+	DiaryEntry DiaryEntry    `json:"diary_entry"`
+	KGTriples  []rawKGTriple `json:"kg_triples"`
+}
+
 // uuidRe matches 8-4-4-4-12 hex with optional hyphens; case-insensitive.
 var uuidRe = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+// schemaStringMin / schemaStringRange are the shared JSON-Schema
+// string-shape builders used by both tool descriptors. Extracted from
+// ToolDescriptor's closures at M9 so finalize_ticket and
+// finalize_oneshot cannot drift; output is identical to the M2.2.1
+// shapes (FR-302).
+func schemaStringMin(min int) map[string]any {
+	return map[string]any{"type": "string", "minLength": min}
+}
+
+func schemaStringRange(min, max int) map[string]any {
+	return map[string]any{"type": "string", "minLength": min, "maxLength": max}
+}
+
+// diaryEntrySchema is the shared diary_entry JSON-Schema object —
+// identical for finalize_ticket and finalize_oneshot (M9 FR-301's
+// "structured-outcome payload shape of finalize_ticket minus the
+// ticket identifier").
+func diaryEntrySchema() map[string]any {
+	return map[string]any{
+		"type":                 "object",
+		"additionalProperties": false,
+		"required":             []string{"rationale", "artifacts", "blockers", "discoveries"},
+		"properties": map[string]any{
+			"rationale": schemaStringRange(RationaleMin, RationaleMax),
+			"artifacts": map[string]any{
+				"type":     "array",
+				"maxItems": ArtifactArrayMax,
+				"items":    map[string]any{"type": "string", "maxLength": ArtifactItemMax},
+			},
+			"blockers": map[string]any{
+				"type":     "array",
+				"maxItems": ArtifactArrayMax,
+				"items":    map[string]any{"type": "string", "maxLength": ArtifactItemMax},
+			},
+			"discoveries": map[string]any{
+				"type":     "array",
+				"maxItems": ArtifactArrayMax,
+				"items":    map[string]any{"type": "string", "maxLength": ArtifactItemMax},
+			},
+		},
+	}
+}
+
+// kgTriplesSchema is the shared kg_triples JSON-Schema array — same
+// sharing rationale as diaryEntrySchema.
+func kgTriplesSchema() map[string]any {
+	return map[string]any{
+		"type":     "array",
+		"minItems": KGTripleArrayMin,
+		"maxItems": KGTripleArrayMax,
+		"items": map[string]any{
+			"type":                 "object",
+			"additionalProperties": false,
+			"required":             []string{"subject", "predicate", "object", "valid_from"},
+			"properties": map[string]any{
+				"subject":    schemaStringMin(TripleFieldMin),
+				"predicate":  schemaStringMin(TripleFieldMin),
+				"object":     schemaStringMin(TripleFieldMin),
+				"valid_from": map[string]any{"type": "string", "description": "ISO-8601 timestamp or literal \"now\"."},
+			},
+		},
+	}
+}
 
 // ToolDescriptor returns the MCP tool-schema JSON for finalize_ticket.
 // The shape mirrors MCP's conventions (inputSchema as a JSON-Schema
 // object). Callers marshal this into the `tools/list` response.
 func ToolDescriptor() map[string]any {
-	stringMin := func(min int) map[string]any {
-		return map[string]any{"type": "string", "minLength": min}
-	}
-	stringRange := func(min, max int) map[string]any {
-		return map[string]any{"type": "string", "minLength": min, "maxLength": max}
-	}
 	return map[string]any{
 		"name": "finalize_ticket",
 		"description": "Commit the ticket's structured completion. Schema: " + SchemaVersion +
@@ -193,47 +286,36 @@ func ToolDescriptor() map[string]any {
 			"additionalProperties": false,
 			"required":             []string{"ticket_id", "outcome", "diary_entry", "kg_triples"},
 			"properties": map[string]any{
-				"ticket_id": map[string]any{"type": "string", "description": "UUID of the ticket being finalized."},
-				"outcome":   stringRange(OutcomeMin, OutcomeMax),
-				"diary_entry": map[string]any{
-					"type":                 "object",
-					"additionalProperties": false,
-					"required":             []string{"rationale", "artifacts", "blockers", "discoveries"},
-					"properties": map[string]any{
-						"rationale": stringRange(RationaleMin, RationaleMax),
-						"artifacts": map[string]any{
-							"type":     "array",
-							"maxItems": ArtifactArrayMax,
-							"items":    map[string]any{"type": "string", "maxLength": ArtifactItemMax},
-						},
-						"blockers": map[string]any{
-							"type":     "array",
-							"maxItems": ArtifactArrayMax,
-							"items":    map[string]any{"type": "string", "maxLength": ArtifactItemMax},
-						},
-						"discoveries": map[string]any{
-							"type":     "array",
-							"maxItems": ArtifactArrayMax,
-							"items":    map[string]any{"type": "string", "maxLength": ArtifactItemMax},
-						},
-					},
-				},
-				"kg_triples": map[string]any{
-					"type":     "array",
-					"minItems": KGTripleArrayMin,
-					"maxItems": KGTripleArrayMax,
-					"items": map[string]any{
-						"type":                 "object",
-						"additionalProperties": false,
-						"required":             []string{"subject", "predicate", "object", "valid_from"},
-						"properties": map[string]any{
-							"subject":    stringMin(TripleFieldMin),
-							"predicate":  stringMin(TripleFieldMin),
-							"object":     stringMin(TripleFieldMin),
-							"valid_from": map[string]any{"type": "string", "description": "ISO-8601 timestamp or literal \"now\"."},
-						},
-					},
-				},
+				"ticket_id":   map[string]any{"type": "string", "description": "UUID of the ticket being finalized."},
+				"outcome":     schemaStringRange(OutcomeMin, OutcomeMax),
+				"diary_entry": diaryEntrySchema(),
+				"kg_triples":  kgTriplesSchema(),
+			},
+		},
+	}
+}
+
+// OneshotToolDescriptor returns the MCP tool-schema JSON for
+// finalize_oneshot (M9 FR-301): FinalizePayload's schema minus
+// ticket_id, identical Outcome/DiaryEntry/KGTriples constraints. The
+// oneshot agent's supervisor-side onCommit records the outcome on the
+// scheduled task run instead of transitioning a ticket.
+func OneshotToolDescriptor() map[string]any {
+	return map[string]any{
+		"name": "finalize_oneshot",
+		"description": "Commit the scheduled firing's structured completion. Schema: " + OneshotSchemaVersion +
+			". The supervisor atomically writes the diary + KG triples to MemPalace " +
+			"and records the outcome on the scheduled task run when this call " +
+			"succeeds. This is the only way to complete an oneshot spawn. No " +
+			"ticket is involved; do not send a ticket_id.",
+		"inputSchema": map[string]any{
+			"type":                 "object",
+			"additionalProperties": false,
+			"required":             []string{"outcome", "diary_entry", "kg_triples"},
+			"properties": map[string]any{
+				"outcome":     schemaStringRange(OutcomeMin, OutcomeMax),
+				"diary_entry": diaryEntrySchema(),
+				"kg_triples":  kgTriplesSchema(),
 			},
 		},
 	}
@@ -274,6 +356,42 @@ func Validate(raw json.RawMessage) (*FinalizePayload, *ValidationError) {
 	}
 	return &FinalizePayload{
 		TicketID:   p.TicketID,
+		Outcome:    p.Outcome,
+		DiaryEntry: p.DiaryEntry,
+		KGTriples:  triples,
+	}, nil
+}
+
+// ValidateOneshot is Validate's finalize_oneshot sibling (M9 FR-301):
+// identical Outcome/DiaryEntry/KGTriples validation (same helpers, same
+// bounds, same "now" substitution), no ticket identifier — a present
+// ticket_id field is rejected outright as an unknown field.
+func ValidateOneshot(raw json.RawMessage) (*OneshotPayload, *ValidationError) {
+	var p rawOneshotPayload
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return nil, newDecodeOrTypeError(raw, err)
+	}
+	if p.TicketID != nil {
+		return nil, newValidationError(
+			"ticket_id", ConstraintUnknownField,
+			"ticket_id is not part of the finalize_oneshot schema",
+			"no ticket_id field", *p.TicketID,
+		)
+	}
+	if err := validateOutcome(p.Outcome); err != nil {
+		return nil, err
+	}
+	if err := validateDiaryEntry(p.DiaryEntry); err != nil {
+		return nil, err
+	}
+	if err := validateKGTripleCount(len(p.KGTriples)); err != nil {
+		return nil, err
+	}
+	triples, err := validateKGTriples(p.KGTriples)
+	if err != nil {
+		return nil, err
+	}
+	return &OneshotPayload{
 		Outcome:    p.Outcome,
 		DiaryEntry: p.DiaryEntry,
 		KGTriples:  triples,
@@ -486,6 +604,8 @@ func renderValidationHint(verr *ValidationError) string {
 		return fmt.Sprintf("the `%s` field has the wrong type; expected %s", field, verr.Expected)
 	case ConstraintFormat:
 		return fmt.Sprintf("the `%s` field has an invalid format; expected %s", field, verr.Expected)
+	case ConstraintUnknownField:
+		return fmt.Sprintf("the `%s` field is not part of this tool's schema; remove it", field)
 	}
 	return verr.Message
 }

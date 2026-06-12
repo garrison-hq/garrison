@@ -113,6 +113,13 @@ type Deps struct {
 	// Default 10 if unset; tuned via GARRISON_CHAT_MAX_TICKETS_PER_TURN.
 	MaxTicketsPerTurn int
 
+	// MaxScheduledTasksPerTurn caps the per-turn invocations of
+	// mcp__garrison-mutate__create_scheduled_task (M9 T012, FR-603).
+	// Same posture as MaxTicketsPerTurn: independent of the other
+	// ceilings, default 3 if unset, tuned via
+	// GARRISON_CHAT_MAX_SCHEDULED_TASKS_PER_TURN.
+	MaxScheduledTasksPerTurn int
+
 	// ShutdownSignalGrace bounds the SIGTERM-to-SIGKILL escalation
 	// window for the chat docker subprocess. AGENTS.md concurrency
 	// rule 7. Reused from spawn.ShutdownSignalGrace.
@@ -141,4 +148,12 @@ type Deps struct {
 	// via GARRISON_CHAT_INTERNAL_DATABASE_URL at the cmd/supervisor
 	// wiring layer.
 	ChatInternalDatabaseURL string
+
+	// SchedMinInterval is cfg.SchedMinInterval (GARRISON_SCHED_MIN_
+	// INTERVAL, default 15m) threaded onto the garrison-mutate MCP
+	// entry's env so the create_scheduled_task verb enforces the same
+	// FR-404 bound the dashboardapi validate endpoint reads from config
+	// (M9 review #3). Zero omits the env var and the verb falls back to
+	// its 15m default.
+	SchedMinInterval time.Duration
 }

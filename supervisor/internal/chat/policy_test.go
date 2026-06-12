@@ -451,3 +451,187 @@ func TestNewChatPolicyWiresDepsThrough(t *testing.T) {
 		t.Errorf("GraceWrite=%v; want 7s", p.GraceWrite)
 	}
 }
+
+// --- M9 T012: per-turn scheduled-task-creation ceiling -------------------
+//
+// Mirrors the M6 ticket-ceiling tests in policy_m6_test.go. Helpers
+// (fakeToolUseRaw, nullWriter) live in policy_m5_3_test.go.
+
+// newM9CeilingTestPolicy returns a ChatPolicy wired with the M9
+// scheduled-task ceiling. ToolCallCeiling stays at 50 (M5.3 default)
+// and MaxTicketsPerTurn at 10 (M6 default) so the sibling ceilings
+// don't trip first.
+func newM9CeilingTestPolicy(t *testing.T, maxSched int) *ChatPolicy {
+	t.Helper()
+	return &ChatPolicy{
+		Logger:                   slog.New(slog.NewTextHandler(nullWriter{}, nil)),
+		SessionID:                pgtype.UUID{Valid: true, Bytes: [16]byte{1}},
+		MessageID:                pgtype.UUID{Valid: true, Bytes: [16]byte{2}},
+		ToolCallCeiling:          50,
+		MaxTicketsPerTurn:        10,
+		MaxScheduledTasksPerTurn: maxSched,
+	}
+}
+
+// TestScheduledTaskCeilingFiresOnFourth — with the FR-603 default
+// ceiling (3, pinned via NewChatPolicy), the first 3
+// create_scheduled_task calls do NOT fire; the 4th does. Bail reason
+// is ChatErrorScheduledTaskCreationCeilingReached.
+func TestScheduledTaskCeilingFiresOnFourth(t *testing.T) {
+	deps := Deps{Logger: slog.New(slog.NewTextHandler(nullWriter{}, nil))}
+	p := NewChatPolicy(deps,
+		pgtype.UUID{Valid: true, Bytes: [16]byte{1}},
+		pgtype.UUID{Valid: true, Bytes: [16]byte{2}})
+	if p.MaxScheduledTasksPerTurn != 3 {
+		t.Fatalf("default MaxScheduledTasksPerTurn = %d; want 3 (FR-603)", p.MaxScheduledTasksPerTurn)
+	}
+	raw := fakeToolUseRaw("tu_sched", "mcp__garrison-mutate__create_scheduled_task")
+	for i := 0; i < 3; i++ {
+		p.OnStreamEvent(context.Background(), claudeproto.StreamEvent{
+			InnerType: "content_block_start",
+			Raw:       raw,
+		})
+	}
+	if p.scheduledTaskCeilingFired {
+		t.Fatal("ceiling fired before 4th call")
+	}
+	if p.bailReason != "" {
+		t.Errorf("bailReason = %q; want empty after 3 calls", p.bailReason)
+	}
+
+	// 4th call: fires.
+	p.OnStreamEvent(context.Background(), claudeproto.StreamEvent{
+		InnerType: "content_block_start",
+		Raw:       raw,
+	})
+	if !p.scheduledTaskCeilingFired {
+		t.Error("expected scheduledTaskCeilingFired=true after 4th call")
+	}
+	if p.bailReason != ChatErrorScheduledTaskCreationCeilingReached {
+		t.Errorf("bailReason = %q; want %q", p.bailReason, ChatErrorScheduledTaskCreationCeilingReached)
+	}
+	if p.scheduledTaskCreationCount != 4 {
+		t.Errorf("scheduledTaskCreationCount = %d; want 4", p.scheduledTaskCreationCount)
+	}
+}
+
+// TestScheduledTaskCeilingIgnoresOtherTools — read tools AND the
+// sibling create_ticket verb must NOT increment the scheduled-task
+// counter or trip its ceiling.
+func TestScheduledTaskCeilingIgnoresOtherTools(t *testing.T) {
+	p := newM9CeilingTestPolicy(t, 3)
+	search := fakeToolUseRaw("tu_search", "mcp__mempalace__mempalace_search")
+	for i := 0; i < 30; i++ {
+		p.OnStreamEvent(context.Background(), claudeproto.StreamEvent{
+			InnerType: "content_block_start",
+			Raw:       search,
+		})
+	}
+	ticket := fakeToolUseRaw("tu_create", "mcp__garrison-mutate__create_ticket")
+	for i := 0; i < 5; i++ {
+		p.OnStreamEvent(context.Background(), claudeproto.StreamEvent{
+			InnerType: "content_block_start",
+			Raw:       ticket,
+		})
+	}
+	if p.scheduledTaskCeilingFired {
+		t.Error("scheduled-task ceiling fired on non-create_scheduled_task tool calls")
+	}
+	if p.scheduledTaskCreationCount != 0 {
+		t.Errorf("scheduledTaskCreationCount = %d; want 0 (only create_scheduled_task increments)", p.scheduledTaskCreationCount)
+	}
+	if p.bailReason != "" {
+		t.Errorf("bailReason = %q; want empty", p.bailReason)
+	}
+}
+
+// TestScheduledTaskCeilingEnvOverride — MaxScheduledTasksPerTurn is
+// runtime-tunable through the same chain as the M6 ticket ceiling:
+// GARRISON_CHAT_MAX_SCHEDULED_TASKS_PER_TURN → config.
+// MaxScheduledTasksPerTurn (T002) → Deps.MaxScheduledTasksPerTurn
+// (cmd/supervisor chatDeps wiring) → NewChatPolicy. This test drives
+// the Deps→constructor leg: an override of 5 keeps the 4th–5th calls
+// alive and fires on the 6th; a zero-valued Deps field falls back to
+// the FR-603 default (3).
+func TestScheduledTaskCeilingEnvOverride(t *testing.T) {
+	deps := Deps{
+		Logger:                   slog.New(slog.NewTextHandler(nullWriter{}, nil)),
+		MaxScheduledTasksPerTurn: 5,
+	}
+	p := NewChatPolicy(deps,
+		pgtype.UUID{Valid: true, Bytes: [16]byte{1}},
+		pgtype.UUID{Valid: true, Bytes: [16]byte{2}})
+	if p.MaxScheduledTasksPerTurn != 5 {
+		t.Fatalf("MaxScheduledTasksPerTurn = %d; want 5 (Deps override must flow through NewChatPolicy)", p.MaxScheduledTasksPerTurn)
+	}
+	raw := fakeToolUseRaw("tu_sched", "mcp__garrison-mutate__create_scheduled_task")
+	for i := 0; i < 5; i++ {
+		p.OnStreamEvent(context.Background(), claudeproto.StreamEvent{
+			InnerType: "content_block_start",
+			Raw:       raw,
+		})
+	}
+	if p.scheduledTaskCeilingFired {
+		t.Fatal("ceiling fired before 6th call with MaxScheduledTasksPerTurn=5")
+	}
+	p.OnStreamEvent(context.Background(), claudeproto.StreamEvent{
+		InnerType: "content_block_start",
+		Raw:       raw,
+	})
+	if !p.scheduledTaskCeilingFired {
+		t.Error("expected ceiling on 6th call with MaxScheduledTasksPerTurn=5")
+	}
+
+	// Unset (zero) Deps field falls back to the FR-603 default.
+	fallback := NewChatPolicy(Deps{Logger: deps.Logger},
+		pgtype.UUID{Valid: true, Bytes: [16]byte{1}},
+		pgtype.UUID{Valid: true, Bytes: [16]byte{2}})
+	if fallback.MaxScheduledTasksPerTurn != 3 {
+		t.Errorf("MaxScheduledTasksPerTurn fallback = %d; want 3 (FR-603 default)", fallback.MaxScheduledTasksPerTurn)
+	}
+}
+
+// TestScheduledTaskCeilingIndependentOfTicketCeiling — the two
+// per-verb ceilings track separate counters; tripping one neither
+// advances nor suppresses the other. bailReason is first-set-wins
+// (here the ticket ceiling fires first and keeps it).
+func TestScheduledTaskCeilingIndependentOfTicketCeiling(t *testing.T) {
+	p := newM9CeilingTestPolicy(t, 2)
+	p.MaxTicketsPerTurn = 2
+
+	ticket := fakeToolUseRaw("tu_create", "mcp__garrison-mutate__create_ticket")
+	for i := 0; i < 3; i++ {
+		p.OnStreamEvent(context.Background(), claudeproto.StreamEvent{
+			InnerType: "content_block_start",
+			Raw:       ticket,
+		})
+	}
+	if !p.ticketCreationCeilingFired {
+		t.Fatal("ticket ceiling did not fire on 3rd create_ticket with MaxTicketsPerTurn=2")
+	}
+	if p.scheduledTaskCreationCount != 0 || p.scheduledTaskCeilingFired {
+		t.Errorf("create_ticket calls leaked into scheduled-task ceiling: count=%d fired=%v",
+			p.scheduledTaskCreationCount, p.scheduledTaskCeilingFired)
+	}
+
+	sched := fakeToolUseRaw("tu_sched", "mcp__garrison-mutate__create_scheduled_task")
+	for i := 0; i < 3; i++ {
+		p.OnStreamEvent(context.Background(), claudeproto.StreamEvent{
+			InnerType: "content_block_start",
+			Raw:       sched,
+		})
+	}
+	if !p.scheduledTaskCeilingFired {
+		t.Error("scheduled-task ceiling suppressed by prior ticket ceiling; want independent fire")
+	}
+	if p.scheduledTaskCreationCount != 3 {
+		t.Errorf("scheduledTaskCreationCount = %d; want 3", p.scheduledTaskCreationCount)
+	}
+	if p.ticketCreationCount != 3 {
+		t.Errorf("ticketCreationCount = %d; want 3 (scheduled calls must not increment it)", p.ticketCreationCount)
+	}
+	// First-set wins: the ticket ceiling claimed bailReason first.
+	if p.bailReason != ChatErrorTicketCreationCeilingReached {
+		t.Errorf("bailReason = %q; want %q (first-set wins)", p.bailReason, ChatErrorTicketCreationCeilingReached)
+	}
+}

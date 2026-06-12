@@ -69,6 +69,7 @@ type AgentInstance struct {
 	PreambleHash       string
 	ClaudeMdHash       *string
 	OriginatingAuditID pgtype.UUID
+	ScheduledTaskRunID pgtype.UUID
 }
 
 type AgentRoleSecret struct {
@@ -190,6 +191,35 @@ type McpServer struct {
 	RegisteredAt    pgtype.Timestamptz
 	CreatedAt       pgtype.Timestamptz
 	UpdatedAt       pgtype.Timestamptz
+}
+
+type ScheduledTask struct {
+	ID                         pgtype.UUID
+	Name                       string
+	DepartmentID               pgtype.UUID
+	RoleSlug                   string
+	Mode                       string
+	ScheduleExpr               string
+	NextFireAt                 pgtype.Timestamptz
+	ObjectiveTemplate          string
+	AcceptanceCriteriaTemplate string
+	Paused                     bool
+	DeletedAt                  pgtype.Timestamptz
+	LastFiredAt                pgtype.Timestamptz
+	CreatedAt                  pgtype.Timestamptz
+	UpdatedAt                  pgtype.Timestamptz
+}
+
+type ScheduledTaskRun struct {
+	ID                pgtype.UUID
+	ScheduledTaskID   pgtype.UUID
+	SlotAt            pgtype.Timestamptz
+	FiredAt           pgtype.Timestamptz
+	Outcome           string
+	Detail            *string
+	TicketID          pgtype.UUID
+	AgentInstanceID   pgtype.UUID
+	StructuredOutcome []byte
 }
 
 type SecretMetadatum struct {

@@ -147,6 +147,13 @@ func writeChatMCPConfig(deps Deps, sessionID, messageID pgtype.UUID, supervisorB
 		chatSession = sessionIDText
 		chatMessage = idText
 	}
+	// M9 review #3: thread the configured min-interval bound onto the
+	// garrison-mutate entry so create_scheduled_task sees the same
+	// FR-404 value the dashboardapi validate endpoint enforces.
+	schedMinInterval := ""
+	if deps.SchedMinInterval > 0 {
+		schedMinInterval = deps.SchedMinInterval.String()
+	}
 	body, err := mcpconfig.BuildChatConfig(mcpconfig.ChatConfigParams{
 		SupervisorBin: supervisorBin,
 		AgentRoDSN:    agentRoDSN,
@@ -156,9 +163,10 @@ func writeChatMCPConfig(deps Deps, sessionID, messageID pgtype.UUID, supervisorB
 			PalacePath:         wiring.PalacePath,
 			DockerHost:         wiring.DockerHost,
 		},
-		DatabaseURL:   chatDB,
-		ChatSessionID: chatSession,
-		ChatMessageID: chatMessage,
+		DatabaseURL:      chatDB,
+		ChatSessionID:    chatSession,
+		ChatMessageID:    chatMessage,
+		SchedMinInterval: schedMinInterval,
 	})
 	if err != nil {
 		return "", err

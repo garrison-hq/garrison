@@ -151,7 +151,7 @@ Standing out-of-scope for any non-named milestone:
 - ~~**Workspace sandboxing / Docker-per-agent**~~ — **shipped in M7 (2026-05-03)**. Sealed; per-agent runtime + image-digest pin + cgroup caps + egress allow-list are binding.
 - ~~**MCP-server registry**~~ — **shipped in M8 (2026-05-11)** via MCPJungle sidecar. Sealed; per-agent McpClient names follow `<customer_slug>.<role>.<short-id>`; bearer tokens land at vault `mcpjungle/agents/<agent-id>`.
 - **Cost-telemetry blind-spot fix** — see `docs/issues/cost-telemetry-blind-spot.md`. Successful finalize runs read `$0.00` for `total_cost_usd`; surface the caveat in any cost UI but do not fix the supervisor signal-handling here.
-- **Mutating sealed M2/M2.3/M7/M8 surfaces** — supervisor spawn semantics, finalize tool schema, vault rules, `garrison_agent_*` Postgres roles, MemPalace MCP wiring, per-agent container model, MCPJungle naming convention. These are sealed unless the active milestone's context file explicitly amends them.
+- **Mutating sealed M2/M2.3/M7/M8 surfaces** — supervisor spawn semantics, finalize tool schema (the finalize surface is extended by the M9 context — `specs/_context/m9-context.md` §Scope extensions — with the sibling tool `finalize_oneshot` for scheduled oneshot runs; `finalize_ticket`'s own schema and semantics are unchanged), vault rules, `garrison_agent_*` Postgres roles, MemPalace MCP wiring, per-agent container model, MCPJungle naming convention. These are sealed unless the active milestone's context file explicitly amends them.
 - Future-milestone surfaces — M9 sessions don't carry M10+ work; etc.
 
 When tempted to broaden scope because "we'll need it later," stop. Note it as an open question in the spec or the retro. Do not implement it.

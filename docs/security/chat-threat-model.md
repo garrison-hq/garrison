@@ -4,7 +4,7 @@
 
 **Status**: Threat model and architectural rules. Lands as a binding input for M5.3 (chat-driven mutations under autonomous-execution posture) per the M2.3 vault-threat-model-first pattern. M5.3 spec FR-400 binds: this document MUST land before any `garrison-mutate` verb code commits to the M5.3 branch.
 
-**Last updated**: 2026-04-29 (initial — M5.3 amendment establishes the chat mutation surface).
+**Last updated**: 2026-06-11 (M9 amendment — `create_scheduled_task` verb + Server-Action registry note, pre-implementation per Rule 1 / M9 spec FR-601). Initial: 2026-04-29 (M5.3 amendment establishes the chat mutation surface).
 
 **Precedence**: this document lives below `RATIONALE.md` and the active milestone context (`specs/_context/m5-3-context.md`) in the document hierarchy (see `AGENTS.md`). It supplies the threat model and architectural principles that context files cannot re-derive cheaply. The vault threat model (`docs/security/vault-threat-model.md`) is a sibling document covering a different attack surface; both are binding for milestones that touch their respective surfaces.
 
@@ -33,6 +33,8 @@ Vault is **out of scope** for this document. The vault threat model (`docs/secur
 
 **M5.3** — initial amendment. Establishes the autonomous-execution posture, the eight-verb mutation surface, the sealed MCP allow-list extension, and the per-verb reversibility tier table.
 
+**M9** — second amendment (this update, landed before any M9 verb code per Rule 1 and M9 spec FR-601; scope per `specs/_context/m9-context.md` §Scope extensions). Adds `create_scheduled_task` as the **eleventh** chat verb (Tier 3 — see §5) and records the four M9 dashboard-only scheduled-task verbs in the Server-Action registry note (§5, "Server-Action verb registry"). The chat verb count moves **10 → 11**: the ninth and tenth verbs (`propose_skill_change`, `bump_skill_version`) landed in M7 with their threat treatment in the sibling `docs/security/hiring-threat-model.md`; this amendment backfills their tier entries into §5 so the table enumerates the full sealed registry.
+
 Future milestones extending the chat mutation surface — adding verbs, broadening tool surfaces, supporting multi-operator, introducing palace writes from chat — must update this document **before** any code lands. The "Architectural rules" section below is the binding constraint set; new milestones either honor it or amend it explicitly.
 
 ---
@@ -44,6 +46,7 @@ Future milestones extending the chat mutation surface — adding verbs, broadeni
 - **Ticket state**: `tickets` rows (creation, edit, transition between Kanban columns) and the corresponding `ticket_transitions` audit trail.
 - **Agent state**: `agents` rows (config edits — model, system prompt, MCP config, concurrency cap), `agent_instances` rows (manual spawning), the `agents.is_paused` flag.
 - **Hiring proposal state**: `hiring_proposals` rows (creation only — the M5.3 stopgap surface is read-only; M7 extends with review/approve/spawn).
+- **Scheduled-task state** (M9): `scheduled_tasks` rows — creation via the `create_scheduled_task` chat verb; edit/pause/resume/delete are dashboard-only Server Actions (see §5, Server-Action verb registry), never chat. The supervisor-written `scheduled_task_runs` firing history is downstream state every live task accrues.
 
 **Multi-tenancy posture**: single-tenant single-operator at M5.3 ship. The chat mutation surface assumes one operator with full authority over all chat-mutation verbs. Multi-operator changes the threat model materially; the autonomous-execution posture's justifications (operator watches the chat live; observability replaces approval) depend on single-operator. Multi-operator requires re-amendment of this document before code lands.
 
@@ -77,12 +80,13 @@ Ranked by realistic probability of affecting the deployed Garrison instance oper
 
 ### Threats the chat mutation surface explicitly addresses
 
-1. **Mutation tools the assistant should not have access to.** Mitigated by the sealed MCP allow-list (`BuildChatConfig` + `CheckExtraServers`) and the sealed verb registry (`Verbs` slice in `internal/garrisonmutate/verbs.go`). The chat container's MCP config contains exactly `{postgres, mempalace, garrison-mutate}` at runtime; any fourth entry is rejected at config-build time. The `garrison-mutate` server registers exactly the eight enumerated verbs; any unregistered verb name returns JSON-RPC error -32601.
+1. **Mutation tools the assistant should not have access to.** Mitigated by the sealed MCP allow-list (`BuildChatConfig` + `CheckExtraServers`) and the sealed verb registry (`Verbs` slice in `internal/garrisonmutate/verbs.go`). The chat container's MCP config contains exactly `{postgres, mempalace, garrison-mutate}` at runtime; any fourth entry is rejected at config-build time. The `garrison-mutate` server registers exactly the eleven enumerated verbs (see §5); any unregistered verb name returns JSON-RPC error -32601.
 2. **Vault access from chat.** Mitigated by Rule 2 below (M2.3 Rule 3 carryover). The `garrison-mutate` verb registry contains zero `vault_*` verb names. `BuildChatConfig` explicitly rejects any vault-named MCP server entry with a typed error citing the carryover.
 3. **Untraced mutations.** Mitigated by Rule 3 below. Every chat-driven mutation writes a `chat_mutation_audit` row in the same transaction as the data write, then emits a chat-namespaced `pg_notify` post-commit. The activity feed surfaces the event; the audit table holds the full args including any operator-typed text. Forensic reconstruction of every successful and failed verb call is queryable from a single table.
 4. **Runaway tool-result feedback loops.** Mitigated by Rule 4 below. The per-session cost cap (M5.1 FR-061) terminates a session before unbounded cost burn. The per-turn tool-call ceiling (default 50, configurable via `GARRISON_CHAT_MAX_TOOL_CALLS_PER_TURN`) terminates a turn before unbounded mutation depth. Both bounds fire deterministically; chaos tests pin the behavior.
 5. **Out-of-band data exfiltration via the chat container.** Mitigated by Rule 5 below. The chat container's network is bounded by the existing M2.2 docker-proxy + supervisor compose-network isolation (see vault threat model M2.2 deployment assumptions). The chat container cannot reach arbitrary external hosts.
 6. **Operator confusion about which mutations a chat session caused.** Mitigated by Rule 6 below. Per-verb reversibility classification distinguishes Tier 1 (reversible — easy to undo), Tier 2 (semi-irreversible — diff captured in audit for manual undo), and Tier 3 (effectively-irreversible — pre-state snapshot for forensic reconstruction). Future undo / replay tooling has the metadata it needs.
+7. **Runaway scheduled-work creation (M9).** A single injected or misinterpreted turn could mint many recurring tasks, each one a standing source of future agent spend that keeps firing after the turn ends. Two runtime mitigations bound the blast radius of the `create_scheduled_task` verb: the **per-turn creation ceiling** — at most `GARRISON_CHAT_MAX_SCHEDULED_TASKS_PER_TURN` (default **3**) `create_scheduled_task` calls per assistant turn, after which the supervisor terminates the turn with `error_kind='scheduled_task_creation_ceiling_reached'` (the established M6 per-turn-ceiling terminal-error shape) — and the **minimum firing interval** (`GARRISON_SCHED_MIN_INTERVAL`, default **15m**), which bounds how fast any task that does land can burn. Validation additionally rejects malformed expressions, sub-minimum intervals, unknown departments/roles, duplicate names, and empty templates before any row lands, and `AgentInstanceID` callers are rejected outright with `validation_failed` ("agents cannot schedule work") — the verb is chat-only.
 
 ### Threats explicitly accepted
 
@@ -106,7 +110,7 @@ The `garrison-mutate` MCP server registers verbs from a single source of truth: 
 
 The chat container's MCP config (`BuildChatConfig` output) contains exactly three entries: `postgres`, `mempalace`, `garrison-mutate`. Any fourth entry is rejected at config-build time with a typed error. CI-pinned tests (`TestBuildChatConfigSealsThreeEntries`, `TestBuildChatConfigRejectsFourthEntry`, `TestVerbsRegistryMatchesEnumeration`, `TestVerbsRegistryHasNoVaultEntries`) enforce both seals.
 
-**Consequence**: a future milestone that wants a ninth verb requires a code change to `verbs.go`, an update to this document's §5 reversibility table, a per-verb implementation, a per-verb test, and a registry-test update. There is no shortcut.
+**Consequence**: a future milestone that wants an additional verb requires a code change to `verbs.go`, an update to this document's §5 reversibility table, a per-verb implementation, a per-verb test, and a registry-test update. There is no shortcut. (Exercised by M7 — verbs nine and ten, threat-modeled in `docs/security/hiring-threat-model.md` — and by M9, whose eleventh verb lands via this amendment before its code.)
 
 **Consequence**: a runtime attack that tries to inject an unregistered verb (e.g., `tool_use.name='garrison-mutate.delete_user'`) returns JSON-RPC error -32601 ("Method not found") and never reaches the supervisor's database layer.
 
@@ -160,7 +164,7 @@ Every verb in the `Verbs` registry carries a `ReversibilityClass` (1, 2, or 3) f
 
 ## 5. Per-verb reversibility tier table
 
-The eight M5.3 verbs are classified as follows. The classification is binding.
+The eleven chat verbs (eight from M5.3, two from M7, one from M9) are classified as follows. The classification is binding. The two M7 verbs' full threat treatment lives in the sibling `docs/security/hiring-threat-model.md`; they are enumerated here so this table matches the sealed `Verbs` registry one-for-one.
 
 ### Tier 1 — Reversible
 
@@ -184,6 +188,20 @@ These verbs create new state or trigger costly downstream effects. Full reversal
 - **`create_ticket(title, description, department, priority?, labels?, parent_ticket_id?)`**: inserts a new `tickets` row with `origin='ceo_chat'`. Reversal: the row can be deleted, but downstream transitions, agent spawns, and audit references survive. Audit `args_jsonb` captures the full input args for forensic reconstruction.
 - **`spawn_agent(agent_role_slug, ticket_id?)`**: writes an `agent_instances` row; the supervisor's spawn loop picks up the notify and runs the M2.x spawn flow. Reversal: not possible — the agent runs, costs money, may write palace. The verb respects the per-department concurrency cap (constitution Principle X). Audit `args_jsonb` captures inputs + the resulting `agent_instance_id` post-commit.
 - **`propose_hire(role_title, department, justification_md, skills_summary_md?)`**: writes a `hiring_proposals` row with `proposed_via='ceo_chat'`. Reversal: M7's review flow can mark the proposal `rejected` or `superseded`, but the row persists for forensic value. Audit `args_jsonb` captures the full input args.
+- **`propose_skill_change`** (M7): writes a `hiring_proposals` row proposing a skill add/remove on an existing role; the operator approves or rejects via the dashboard. Same write-only posture as `propose_hire`; threat-modeled in `docs/security/hiring-threat-model.md` (Rules 1 and 5). Audit `args_jsonb` captures the full input args.
+- **`bump_skill_version`** (M7): proposes a version bump for a skill already attached to a role, through the same propose → approve cycle. Threat-modeled in `docs/security/hiring-threat-model.md`. Audit `args_jsonb` captures the full input args.
+- **`create_scheduled_task(name, department_slug, role_slug, mode, schedule_expr, objective_template, acceptance_criteria_template)`** (M9): inserts a `scheduled_tasks` row that the supervisor's tick loop fires on schedule, as either a ticket insert or an oneshot direct spawn. Tier 3 rationale: **creates recurring cost-incurring state; accrued firings/spend do not reverse**. A soft delete (dashboard-side `delete_scheduled_task`) stops future firings, but every firing that already happened spawned work, cost money, and may have written palace — none of that unwinds. Runaway mitigations (see §3 threat 7): the per-turn creation ceiling (default 3, `GARRISON_CHAT_MAX_SCHEDULED_TASKS_PER_TURN`) and the minimum firing interval (default 15m, `GARRISON_SCHED_MIN_INTERVAL`). Chat-only: `AgentInstanceID` callers are rejected with `validation_failed` ("agents cannot schedule work"). Audit `args_jsonb` captures the full input args, anchored on `chat_session_id` per the M5.3 audit shape.
+
+### Server-Action verb registry (M8-established; not chat-callable)
+
+M8 established a second sealed slice, `ServerActionVerbs` (`supervisor/internal/garrisonmutate/server_action_verbs.go`), for verbs callable ONLY by the dashboard's Server Actions — never registered on the chat-side `garrison-mutate` tool list. `TestVerbsSlicesDisjoint` pins that no entry appears in both slices; a chat call naming any registry entry returns JSON-RPC error -32601. M8 entry: `register_mcp_server` (class 2). M9 adds four scheduled-task entries; their audit rows are written dashboard-side in the same drizzle transaction as the row change, with both chat anchors NULL and `affected_resource_type='scheduled_task'`:
+
+- **`edit_scheduled_task`** — class 2 (diff captured in `args_jsonb` for manual undo).
+- **`pause_scheduled_task`** — class 1 (reversal: `resume_scheduled_task`).
+- **`resume_scheduled_task`** — class 1 (reversal: `pause_scheduled_task`; `next_fire_at` is recomputed advance-only — no catch-up firing).
+- **`delete_scheduled_task`** — class 3 (soft delete via `deleted_at`; pre-state snapshot captured into `args_jsonb`; run history and audit rows survive the delete).
+
+These four verbs are part of the registry/tier table and the `chat_mutation_audit` verb CHECK, not of the eleven-verb chat surface.
 
 ---
 

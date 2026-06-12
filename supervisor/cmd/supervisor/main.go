@@ -25,6 +25,7 @@ import (
 	"github.com/garrison-hq/garrison/supervisor/internal/migrate7"
 	"github.com/garrison-hq/garrison/supervisor/internal/objstore"
 	"github.com/garrison-hq/garrison/supervisor/internal/pgdb"
+	"github.com/garrison-hq/garrison/supervisor/internal/schedule"
 	"github.com/garrison-hq/garrison/supervisor/internal/spawn"
 	"github.com/garrison-hq/garrison/supervisor/internal/store"
 	"github.com/garrison-hq/garrison/supervisor/internal/throttle"
@@ -281,6 +282,9 @@ func runDaemon() int {
 		// M6 T014 — result-grace + throttle gate.
 		FinalizeResultGrace: cfg.FinalizeResultGrace,
 		Throttle:            throttleDeps,
+		// M9 review #5 — oneshot inline thin-diary bound tracks the
+		// hygiene checker's operator tuning (zero falls back to 200).
+		ThinDiaryThreshold: cfg.ThinDiaryThreshold,
 		// M7/M7.1 — container runtime threading. As of T012 the
 		// config default routes spawns through the container exec
 		// pipeline; buildAgentContainerRuntime forces direct-exec
@@ -333,6 +337,25 @@ func runDaemon() int {
 	dispatcher.SetDynamicRoutes(buildRosterRoutes(agentsCache, spawnDeps, logger))
 
 	g, gctx := errgroup.WithContext(ctx)
+
+	// M9 T009 — the scheduled-wake-up tick loop (plan §7). Composed
+	// from config + pool + queries + the shared M6/M8 throttle deps so
+	// ticket-mode firings reuse the dept-weekly gate machinery.
+	// ClaimLimit stays zero → schedule's default of 20. RunLoop is
+	// ticker + ctx.Done() select (concurrency rule 1/VIII): shutdown
+	// exits the loop on gctx cancellation, and an in-flight tickOnce
+	// finishes its short transaction (sub-second).
+	schedDeps := schedule.Deps{
+		Pool:         pool,
+		Queries:      queries,
+		Logger:       logger,
+		TickInterval: cfg.SchedTickInterval,
+		Throttle:     throttleDeps,
+		Now:          time.Now,
+	}
+	g.Go(func() error {
+		return schedule.RunLoop(gctx, schedDeps)
+	})
 
 	g.Go(func() error {
 		return events.Run(gctx, events.Deps{
@@ -461,6 +484,11 @@ func runDaemon() int {
 		ChatInternalDatabaseURL: chatInternalDatabaseURL(cfg),
 		// M6 T014 — per-turn ticket-creation ceiling.
 		MaxTicketsPerTurn: cfg.MaxTicketsPerTurn,
+		// M9 T012 — per-turn scheduled-task-creation ceiling.
+		MaxScheduledTasksPerTurn: cfg.MaxScheduledTasksPerTurn,
+		// M9 review #3 — FR-404 min-interval bound for the chat verb's
+		// garrison-mutate subprocess env.
+		SchedMinInterval: cfg.SchedMinInterval,
 	}
 	if err := chat.RunRestartSweep(ctx, chatDeps); err != nil {
 		logger.Warn("chat: restart sweep failed; continuing", "err", err)
@@ -694,11 +722,22 @@ func buildDispatcherWithExtras(spawnDeps spawn.Deps, extras map[string]events.Ha
 	qaEngineerHandler := func(ctx context.Context, eventID pgtype.UUID) error {
 		return spawn.Spawn(ctx, spawnDeps, eventID, "qa-engineer")
 	}
+	// M9 T009 — work.scheduled.oneshot_due is a BASE channel (frozen at
+	// construction, never shadowable by roster routes): oneshot firings
+	// written by schedule.fireOneshotMode dispatch to spawn.SpawnOneshot.
+	// The dotted channel name is double-quoted by events.listen's LISTEN
+	// statement (M6 retro gotcha 3), and the poll fallback picks the
+	// outbox rows up with no extra code — they are ordinary unprocessed
+	// event_outbox rows routed through this same table.
+	oneshotHandler := func(ctx context.Context, eventID pgtype.UUID) error {
+		return spawn.SpawnOneshot(ctx, spawnDeps, eventID)
+	}
 	handlers := map[string]events.Handler{
 		EngineeringInDevChannel:     engineerHandler,
 		EngineeringTodoInDevChannel: engineerHandler,
 		EngineeringQABounceChannel:  engineerHandler,
 		EngineeringQAReviewChannel:  qaEngineerHandler,
+		schedule.ChannelOneshotDue:  oneshotHandler,
 	}
 	if os.Getenv("GARRISON_M21_BACKCOMPAT_DISPATCH") == "1" {
 		handlers[EngineeringTicketChannel] = engineerHandler
@@ -1000,6 +1039,9 @@ func buildDashboardAPIServer(
 		SessionValidator: validator,
 		Logger:           logger,
 		CompanyID:        uuidString(cfg.CustomerID()),
+		// M9 review #4: real query set for the full-body
+		// /schedule/validate path (role existence + name uniqueness).
+		Queries: store.New(pool),
 	}
 	srv := dashboardapi.NewServer(cfg, deps)
 	if err := srv.RegisterDefaultRoutes(deps); err != nil {
