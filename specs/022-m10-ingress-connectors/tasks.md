@@ -91,7 +91,7 @@ T009–T012 are the unit test suites covering signature, render, GitHub connecto
 
 ## Phase 3 — Unit test suites
 
-- [ ] **T009** Unit tests — `internal/ingress/signature_test.go` + `internal/ingress/render_test.go`
+- [x] **T009** Unit tests — `internal/ingress/signature_test.go` + `internal/ingress/render_test.go`
   - **Depends on**: T004, T005.
   - **Files**: `supervisor/internal/ingress/signature_test.go` (new); `supervisor/internal/ingress/render_test.go` (new).
   - **Completion condition**: the following tests pass:
