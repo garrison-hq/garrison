@@ -49,7 +49,7 @@ T008–T009 are the unit test suites covering the verb handler and the dispatche
 
 ## Phase 1 — Framework foundations
 
-- [ ] **T003** `internal/config/` — action-broker env vars
+- [x] **T003** `internal/config/` — action-broker env vars
   - **Depends on**: T002.
   - **Files**: `supervisor/internal/config/config.go` (extend — `ActionGitHubPATPath`, `ActionPollInterval`); `supervisor/internal/config/config_test.go` (extend).
   - **Completion condition**: `GARRISON_ACTION_GITHUB_PAT_PATH` (string, default `"actions/GITHUB_PAT"`, reject empty) and `GARRISON_ACTION_POLL_INTERVAL` (duration, default `30s`, reject `< 1s`) parse per the existing env-var patterns. Tests pass: `TestConfigActionDefaults`, `TestConfigActionOverrides`, `TestConfigActionRejectsEmptyPATPath`, `TestConfigActionRejectsTooShortPollInterval`. `gofmt -l` + `go vet` clean.

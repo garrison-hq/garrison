@@ -205,6 +205,14 @@ type Config struct {
 	IngressGitHubDepartment  string // GARRISON_INGRESS_GITHUB_DEPARTMENT, required when enabled, reject empty
 	IngressGitHubRatePerMin  int    // GARRISON_INGRESS_GITHUB_RATE_PER_MIN, default 60, reject < 1
 	IngressGitHubBurst       int    // GARRISON_INGRESS_GITHUB_BURST, default 30, reject < 1
+
+	// M11 fields. Action broker: the Infisical vault path where the GitHub PAT
+	// is stored and the poll interval for the dispatcher's fallback ticker.
+	// The dispatcher vault-fetches the PAT per-dispatch; it is never stored in
+	// any field here. The path is required (reject empty); the poll interval
+	// must be >= 1s (the same floor as GARRISON_POLL_INTERVAL).
+	ActionGitHubPATPath string        // GARRISON_ACTION_GITHUB_PAT_PATH, default "actions/GITHUB_PAT", reject empty
+	ActionPollInterval  time.Duration // GARRISON_ACTION_POLL_INTERVAL, default 30s, reject < 1s
 }
 
 // DefaultMinIOBucket per M5.4 spec FR-620.
@@ -214,6 +222,19 @@ const DefaultMinIOBucket = "garrison-company"
 // GARRISON_HEALTH_PORT (8080) so the auth-required /api/* endpoints
 // are isolated from the auth-free /health endpoint.
 const DefaultDashboardAPIPort uint16 = 8081
+
+// M11 action-broker defaults (tasks.md T003).
+const (
+	// DefaultActionGitHubPATPath is the Infisical secret path for the GitHub
+	// PAT the action-broker dispatcher uses to post comments. Override via
+	// GARRISON_ACTION_GITHUB_PAT_PATH. The path must not be empty; an empty
+	// value means no credential is configured and the dispatcher fails closed.
+	DefaultActionGitHubPATPath = "actions/GITHUB_PAT"
+	// DefaultActionPollInterval is the fallback poll cadence for the
+	// dispatcher's ticker (used when no LISTEN event fires). Override via
+	// GARRISON_ACTION_POLL_INTERVAL. Must be >= 1s.
+	DefaultActionPollInterval = 30 * time.Second
+)
 
 // M10 ingress connector defaults (plan.md §Configuration + vault, decision 6/9).
 const (
@@ -354,6 +375,10 @@ func Load() (*Config, error) {
 		IngressGitHubDepartment:  "",
 		IngressGitHubRatePerMin:  DefaultIngressGitHubRatePerMin,
 		IngressGitHubBurst:       DefaultIngressGitHubBurst,
+
+		// M11 defaults.
+		ActionGitHubPATPath: DefaultActionGitHubPATPath,
+		ActionPollInterval:  DefaultActionPollInterval,
 	}
 
 	// M5.1 env overrides — all optional; defaults above are used
@@ -586,6 +611,21 @@ func Load() (*Config, error) {
 	// starts with an incomplete ingress configuration, FR-302 posture).
 	if cfg.IngressGitHubEnabled && cfg.IngressGitHubDepartment == "" {
 		return nil, fmt.Errorf("config: GARRISON_INGRESS_GITHUB_DEPARTMENT is required when GARRISON_INGRESS_GITHUB_ENABLED is true")
+	}
+
+	// M11 env overrides — action broker (tasks.md T003).
+	// PAT path must be non-empty (reject empty and whitespace-only): an empty
+	// path means no credential is configured; we surface the misconfiguration
+	// at startup rather than letting every dispatch fail-closed silently.
+	if v := os.Getenv("GARRISON_ACTION_GITHUB_PAT_PATH"); v != "" {
+		cfg.ActionGitHubPATPath = strings.TrimSpace(v)
+	}
+	if cfg.ActionGitHubPATPath == "" {
+		return nil, fmt.Errorf("config: GARRISON_ACTION_GITHUB_PAT_PATH must not be empty")
+	}
+	// Poll interval must be >= 1s (same floor as GARRISON_POLL_INTERVAL).
+	if err := parseDurationWithMin("GARRISON_ACTION_POLL_INTERVAL", time.Second, &cfg.ActionPollInterval); err != nil {
+		return nil, err
 	}
 
 	dbURL := os.Getenv("GARRISON_DATABASE_URL")
