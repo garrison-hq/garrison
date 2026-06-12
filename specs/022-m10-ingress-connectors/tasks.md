@@ -201,7 +201,7 @@ T009–T012 are the unit test suites covering signature, render, GitHub connecto
   - **Completion condition**: amendment pin test passes; ops-checklist section names every new env var, the webhook registration URL, the vault secret path, and the `/admin/connectors` URL. No code changes.
   - **Out of scope for this task**: retro (T018).
 
-- [ ] **T017** Scripted acceptance — `scripts/m10-acceptance.sh` walking SC-001..SC-009 + coverage + Sonar pre-clearance
+- [x] **T017** Scripted acceptance — `scripts/m10-acceptance.sh` walking SC-001..SC-009 + coverage + Sonar pre-clearance
   - **Depends on**: T001–T016 all complete.
   - **Files**: `scripts/m10-acceptance.sh` (new); patches against earlier tasks' files only if a step fails.
   - **Completion condition**: the script maps each spec success criterion to its verifying suite/step and exits 0 with all steps green:
