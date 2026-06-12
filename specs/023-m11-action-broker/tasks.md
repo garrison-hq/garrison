@@ -117,7 +117,7 @@ T008–T009 are the unit test suites covering the verb handler and the dispatche
 
 ## Phase 3 — Chaos + integration suites
 
-- [ ] **T010** Chaos test suite — `internal/actionbroker/chaos_test.go`
+- [x] **T010** Chaos test suite — `internal/actionbroker/chaos_test.go`
   - **Depends on**: T007.
   - **Files**: `supervisor/internal/actionbroker/chaos_test.go` (new, `-tags=chaos`, testcontainers-go Postgres).
   - **Completion condition**: the following tests pass:
