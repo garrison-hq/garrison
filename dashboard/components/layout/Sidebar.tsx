@@ -108,6 +108,8 @@ export async function Sidebar() {
           <NavSubLink href="/admin/recurring-jobs" label="Recurring jobs" />
           {/* M10 — inbound connector status. */}
           <NavSubLink href="/admin/connectors" label="Connectors" />
+          {/* M11 — outbound action Outbox (approve / reject / mark-done). */}
+          <NavSubLink href="/admin/outbox" label="Outbox" />
         </NavGroup>
       </nav>
 

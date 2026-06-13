@@ -6,13 +6,14 @@ import (
 	"fmt"
 )
 
-// agentVerbNames is the M8 agent-caller surface: spec FR-005 grants
-// spawned ticket agents create_ticket only. The full chat verb set
-// (pause_agent, approve_hire, ...) stays operator-anchored; widening
-// this list is a threat-model amendment, same as adding a verb to
-// Verbs (chat-threat-model.md Rule 1).
+// agentVerbNames is the M8/M11 agent-caller surface. The list started
+// with create_ticket (M8 FR-005; spawned ticket agents). M11 adds
+// request_external_action: the 12th sealed verb, agent-callers only
+// (Q-D resolution, chat-threat-model.md §5 Rule-1 amendment for the
+// agentVerbNames widening, plan D7). Widening this list is a
+// threat-model amendment (Rule 1).
 func agentVerbNames() []string {
-	return []string{"create_ticket"}
+	return []string{"create_ticket", "request_external_action"}
 }
 
 func verbAllowedForCaller(deps Deps, name string) bool {

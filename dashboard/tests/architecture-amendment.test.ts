@@ -217,3 +217,47 @@ describe('ARCHITECTURE.md M10 amendment', () => {
     expect(source).toContain('external_url');
   });
 });
+
+describe('ARCHITECTURE.md M11 amendment', () => {
+  // Pins the M11 substrings per T013 (M10 T016 pattern). The M11 entry is
+  // annotated with shipped status + retro link, references the
+  // action-broker-threat-model, names the implementation packages, and
+  // carries the migration version.
+  it('M11 paragraph annotated with shipped status', () => {
+    const path = resolve(import.meta.dirname, '..', '..', 'ARCHITECTURE.md');
+    const source = readFileSync(path, 'utf-8');
+    expect(source).toContain('**M11 — Action Broker');
+    expect(source).toContain('Shipped 2026-06-12');
+    expect(source).toContain('docs/retros/m11.md');
+  });
+
+  it('M11 entry references the action-broker threat model', () => {
+    const path = resolve(import.meta.dirname, '..', '..', 'ARCHITECTURE.md');
+    const source = readFileSync(path, 'utf-8');
+    expect(source).toContain('docs/security/action-broker-threat-model.md');
+  });
+
+  it('M11 entry names the key implementation packages and migration', () => {
+    const path = resolve(import.meta.dirname, '..', '..', 'ARCHITECTURE.md');
+    const source = readFileSync(path, 'utf-8');
+    expect(source).toContain('garrisonmutate/verbs_actions.go');
+    expect(source).toContain('supervisor/internal/actionbroker/policy.go');
+    expect(source).toContain('supervisor/internal/actionbroker/dispatcher.go');
+    expect(source).toContain('supervisor/internal/actionbroker/github.go');
+    expect(source).toContain('20260612000001_m11_action_broker.sql');
+  });
+
+  it('M11 entry names the Outbox dashboard surface and route', () => {
+    const path = resolve(import.meta.dirname, '..', '..', 'ARCHITECTURE.md');
+    const source = readFileSync(path, 'utf-8');
+    expect(source).toContain('dashboard/app/[locale]/(app)/admin/outbox/');
+    expect(source).toContain('/admin/outbox');
+  });
+
+  it('M11 entry documents the permanent-Approve floor and four tiers', () => {
+    const path = resolve(import.meta.dirname, '..', '..', 'ARCHITECTURE.md');
+    const source = readFileSync(path, 'utf-8');
+    expect(source).toContain('permanent-Approve floor');
+    expect(source).toContain('pending_actions_floor_is_approve');
+  });
+});

@@ -201,6 +201,31 @@ type McpServer struct {
 	UpdatedAt       pgtype.Timestamptz
 }
 
+type PendingAction struct {
+	ID              pgtype.UUID
+	ActionType      string
+	Target          []byte
+	RenderedPayload string
+	AgentInstanceID pgtype.UUID
+	TicketID        pgtype.UUID
+	Tier            string
+	TierReason      string
+	Status          string
+	ApprovedBy      *string
+	DispatchedAt    pgtype.Timestamptz
+	CreatedAt       pgtype.Timestamptz
+}
+
+type PendingActionOutcome struct {
+	ID                pgtype.UUID
+	PendingActionID   pgtype.UUID
+	AgentInstanceID   pgtype.UUID
+	Outcome           string
+	Detail            *string
+	StructuredOutcome []byte
+	CreatedAt         pgtype.Timestamptz
+}
+
 type ScheduledTask struct {
 	ID                         pgtype.UUID
 	Name                       string

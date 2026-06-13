@@ -68,6 +68,34 @@ var ServerActionVerbs = []Verb{
 		AffectedResourceType: "scheduled_task",
 		Description:          "Soft-delete a scheduled task; run history and audit rows survive (dashboard Server Action only; pre-state snapshot in args_jsonb).",
 	},
+	// M11 FR-026/FR-027: three Server-Action verbs for the Outbox approval
+	// surface. Execution is dashboard-side (drizzle-direct, same as the
+	// M9 scheduled-task CRUD decision-11 shape). The entries here provide
+	// the registry/tier-table + audit-CHECK alignment required by Rule 1.
+	// All three are ReversibilityClass 1: they mutate the pending_actions
+	// status (reject/approve/done) — the pending row itself is immutable
+	// in its audit anchor; only the status advances.
+	{
+		Name:                 "approve_action",
+		Handler:              serverActionRegistryOnlyHandler("approve_action"),
+		ReversibilityClass:   1,
+		AffectedResourceType: "pending_action",
+		Description:          "Approve a pending external action; transitions status to 'approved' and emits the dispatch notify (dashboard Server Action only).",
+	},
+	{
+		Name:                 "reject_action",
+		Handler:              serverActionRegistryOnlyHandler("reject_action"),
+		ReversibilityClass:   1,
+		AffectedResourceType: "pending_action",
+		Description:          "Reject a pending external action; transitions status to 'rejected' with an immutable trail; dispatcher never executes it (dashboard Server Action only).",
+	},
+	{
+		Name:                 "mark_action_done",
+		Handler:              serverActionRegistryOnlyHandler("mark_action_done"),
+		ReversibilityClass:   1,
+		AffectedResourceType: "pending_action",
+		Description:          "Mark a human_only pending action as done; records a 'done' outcome with an optional operator note; dispatcher never executes human_only rows (dashboard Server Action only).",
+	},
 }
 
 // serverActionRegistryOnlyHandler backs registry entries whose

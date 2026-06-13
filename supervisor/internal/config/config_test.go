@@ -69,6 +69,9 @@ var allEnvVars = []string{
 	"GARRISON_INGRESS_GITHUB_DEPARTMENT",
 	"GARRISON_INGRESS_GITHUB_RATE_PER_MIN",
 	"GARRISON_INGRESS_GITHUB_BURST",
+	// M11 additions
+	"GARRISON_ACTION_GITHUB_PAT_PATH",
+	"GARRISON_ACTION_POLL_INTERVAL",
 }
 
 // clearAll unsets every GARRISON_* env var the config package reads, so a test
@@ -1241,4 +1244,92 @@ func TestConfigSchedRejectsZeroCeiling(t *testing.T) {
 			t.Error("expected error for min interval 0s")
 		}
 	})
+}
+
+// -------- M11 T003 action-broker env-var tests --------------------------------
+
+// TestConfigActionDefaults — with no M11 action-broker env vars set, the
+// config carries the documented defaults: PAT path "actions/GITHUB_PAT",
+// poll interval 30s (tasks.md T003 completion condition).
+func TestConfigActionDefaults(t *testing.T) {
+	clearAll(t)
+	t.Setenv("GARRISON_DATABASE_URL", validDBURL)
+	t.Setenv("GARRISON_FAKE_AGENT_CMD", validFakeCmd)
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.ActionGitHubPATPath != config.DefaultActionGitHubPATPath {
+		t.Errorf("ActionGitHubPATPath = %q; want %q", cfg.ActionGitHubPATPath, config.DefaultActionGitHubPATPath)
+	}
+	if cfg.ActionPollInterval != config.DefaultActionPollInterval {
+		t.Errorf("ActionPollInterval = %v; want %v", cfg.ActionPollInterval, config.DefaultActionPollInterval)
+	}
+}
+
+// TestConfigActionOverrides — env-var overrides land in the config struct
+// verbatim (tasks.md T003 completion condition).
+func TestConfigActionOverrides(t *testing.T) {
+	clearAll(t)
+	t.Setenv("GARRISON_DATABASE_URL", validDBURL)
+	t.Setenv("GARRISON_FAKE_AGENT_CMD", validFakeCmd)
+	t.Setenv("GARRISON_ACTION_GITHUB_PAT_PATH", "ops/github/PAT")
+	t.Setenv("GARRISON_ACTION_POLL_INTERVAL", "15s")
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.ActionGitHubPATPath != "ops/github/PAT" {
+		t.Errorf("ActionGitHubPATPath = %q; want ops/github/PAT", cfg.ActionGitHubPATPath)
+	}
+	if cfg.ActionPollInterval != 15*time.Second {
+		t.Errorf("ActionPollInterval = %v; want 15s", cfg.ActionPollInterval)
+	}
+}
+
+// TestConfigActionRejectsEmptyPATPath — setting GARRISON_ACTION_GITHUB_PAT_PATH
+// to a whitespace-only string is rejected at startup (tasks.md T003 completion
+// condition; fail-closed posture — an empty path means no credential is
+// configured). The implementation trims the value and rejects the empty result.
+// A whitespace-only value passes the `v != ""` env-override guard but becomes
+// empty after TrimSpace, triggering the reject-empty validation.
+func TestConfigActionRejectsEmptyPATPath(t *testing.T) {
+	clearAll(t)
+	t.Setenv("GARRISON_DATABASE_URL", validDBURL)
+	t.Setenv("GARRISON_FAKE_AGENT_CMD", validFakeCmd)
+	// A whitespace-only string passes the `v != ""` env-override guard but is
+	// trimmed to "" and then rejected by the non-empty guard.
+	t.Setenv("GARRISON_ACTION_GITHUB_PAT_PATH", "   ")
+
+	_, err := config.Load()
+	if err == nil {
+		t.Fatal("Load(): want error for whitespace-only GARRISON_ACTION_GITHUB_PAT_PATH, got nil")
+	}
+	if !strings.Contains(err.Error(), "GARRISON_ACTION_GITHUB_PAT_PATH") {
+		t.Errorf("error = %v; want it to name GARRISON_ACTION_GITHUB_PAT_PATH", err)
+	}
+}
+
+// TestConfigActionRejectsTooShortPollInterval — GARRISON_ACTION_POLL_INTERVAL
+// values below 1s are rejected at startup (tasks.md T003 completion condition;
+// mirrors the GARRISON_POLL_INTERVAL 1s floor in parseDurationWithMin).
+func TestConfigActionRejectsTooShortPollInterval(t *testing.T) {
+	for _, v := range []string{"0s", "500ms", "-5s"} {
+		t.Run("interval="+v, func(t *testing.T) {
+			clearAll(t)
+			t.Setenv("GARRISON_DATABASE_URL", validDBURL)
+			t.Setenv("GARRISON_FAKE_AGENT_CMD", validFakeCmd)
+			t.Setenv("GARRISON_ACTION_POLL_INTERVAL", v)
+
+			_, err := config.Load()
+			if err == nil {
+				t.Fatalf("Load(%q): want error for too-short poll interval, got nil", v)
+			}
+			if !strings.Contains(err.Error(), "GARRISON_ACTION_POLL_INTERVAL") {
+				t.Errorf("error = %v; want it to name GARRISON_ACTION_POLL_INTERVAL", err)
+			}
+		})
+	}
 }

@@ -6,10 +6,12 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"sync/atomic"
 	"time"
 
+	"github.com/garrison-hq/garrison/supervisor/internal/actionbroker"
 	"github.com/garrison-hq/garrison/supervisor/internal/agentcontainer"
 	"github.com/garrison-hq/garrison/supervisor/internal/agents"
 	"github.com/garrison-hq/garrison/supervisor/internal/chat"
@@ -349,6 +351,23 @@ func runDaemon() int {
 		workerExtras = map[string]events.Handler{mcpserverwork.Channel: mcpWorker.Handle}
 	}
 	_ = mcpjungleClient
+
+	// M11 T007 — action broker dispatcher + poll-fallback loop. Built after
+	// vault + pool are ready (the mcpserverwork build-site precedent). The
+	// dispatcher is supervisor-side; its HTTP client and PAT path are never
+	// threaded into any agent container env (FR-007/D20, SC-004). Skipped
+	// when vault is unavailable (fake-agent mode or no Infisical address) —
+	// the same degrade-with-info posture as MCPJungle. The channel is only
+	// registered when the worker is constructed so the M2.x chaos suites
+	// (no vault) continue to boot cleanly.
+	abDeps, abWorker := buildActionBrokerSubsystem(cfg, pool, queries, vaultClient, logger)
+	if abWorker != nil {
+		if workerExtras == nil {
+			workerExtras = make(map[string]events.Handler)
+		}
+		workerExtras[actionbroker.Channel] = abWorker.Handle
+	}
+
 	dispatcher := buildDispatcherWithExtras(spawnDeps, workerExtras)
 
 	// Roster-derived routes live in the dispatcher's DYNAMIC overlay:
@@ -380,6 +399,18 @@ func runDaemon() int {
 	g.Go(func() error {
 		return schedule.RunLoop(gctx, schedDeps)
 	})
+
+	// M11 T007 — action broker poll-fallback loop. Mirrors the
+	// schedule.RunLoop pattern: ticker + ctx.Done() select, returns nil
+	// on graceful shutdown so sibling subsystems are not poisoned. Only
+	// started when the worker was constructed (vault is available); in
+	// fake-agent mode / no Infisical the subsystem is skipped entirely
+	// and the errgroup has one fewer goroutine (degrade-with-info posture).
+	if abWorker != nil {
+		g.Go(func() error {
+			return actionbroker.RunLoop(gctx, abDeps)
+		})
+	}
 
 	g.Go(func() error {
 		return events.Run(gctx, events.Deps{
@@ -1173,6 +1204,59 @@ func buildVaultClient(ctx context.Context, cfg *config.Config, logger *slog.Logg
 		return nil, ExitFailure
 	}
 	return vc, ExitOK
+}
+
+// buildActionBrokerSubsystem constructs the M11 action-broker dispatcher
+// worker and returns the Deps needed by actionbroker.RunLoop alongside the
+// *actionbroker.Worker whose Handle is registered on the dispatcher.
+//
+// Returns (zero Deps, nil) when vault is unavailable (fake-agent mode or
+// no Infisical address) — the same degrade-with-info posture as the
+// MCPJungle subsystem. The errgroup skips the RunLoop goroutine and the
+// dispatcher channel registration is omitted; the M2.x integration + chaos
+// suites boot cleanly without vault.
+//
+// The HTTP client is constructed supervisor-side and never passed to any
+// agent container env (FR-007/D20, SC-004). The PAT path comes from
+// cfg.ActionGitHubPATPath; the PAT itself is vault-fetched per-dispatch
+// inside Handle (fail-closed if vault unavailable at dispatch time).
+func buildActionBrokerSubsystem(
+	cfg *config.Config,
+	pool *pgxpool.Pool,
+	queries *store.Queries,
+	vaultClient vault.Fetcher,
+	logger *slog.Logger,
+) (actionbroker.Deps, *actionbroker.Worker) {
+	if vaultClient == nil {
+		logger.Info("actionbroker: vault unavailable; subsystem disabled (fake-agent or no Infisical address)")
+		return actionbroker.Deps{}, nil
+	}
+
+	poster := &actionbroker.PostCommentClient{
+		HTTPClient: &http.Client{Timeout: 15 * time.Second},
+	}
+	deps := actionbroker.Deps{
+		Pool:         pool,
+		Queries:      queries,
+		Vault:        vaultClient,
+		GitHub:       poster,
+		Logger:       logger,
+		PATPath:      cfg.ActionGitHubPATPath,
+		PollInterval: cfg.ActionPollInterval,
+		Now:          time.Now,
+	}
+	worker, err := actionbroker.New(deps)
+	if err != nil {
+		// New only fails on missing required fields (Pool/Queries/Vault/GitHub);
+		// all are provided above — log.Error + skip rather than crashing.
+		logger.Error("actionbroker: worker construction failed; subsystem disabled", "err", err)
+		return actionbroker.Deps{}, nil
+	}
+	logger.Info("actionbroker: dispatcher worker constructed",
+		"pat_path", cfg.ActionGitHubPATPath,
+		"poll_interval", cfg.ActionPollInterval,
+	)
+	return deps, worker
 }
 
 // buildAgentContainerRuntime wires the M7 per-agent container runtime

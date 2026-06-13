@@ -156,6 +156,21 @@ var Verbs = []Verb{
 		AffectedResourceType: "scheduled_task",
 		Description:          "Create a named recurring scheduled task the supervisor fires on schedule, as either a ticket insert or an oneshot direct spawn.",
 	},
+	{
+		// M11 FR-001/FR-002: the twelfth sealed verb. Tier 3 per the
+		// chat-threat-model.md §5 amendment ("queues an attacker-
+		// influenceable effect on the outside world; an executed external
+		// action does not reverse"). Agent-callers only (Q-D resolution);
+		// see agentVerbNames() in tool.go. The verb writes a pending_actions
+		// row and acts on nothing — the dispatcher is the only door.
+		Name: "request_external_action",
+		Handler: func(ctx context.Context, deps Deps, args json.RawMessage) (Result, error) {
+			return handleRequestExternalAction(ctx, deps, args)
+		},
+		ReversibilityClass:   3,
+		AffectedResourceType: "pending_action",
+		Description:          "Request an external action (e.g. a GitHub issue comment). Writes a pending-action row gated by the tier policy; does NOT act. Public-facing actions are Approve-tier and require operator approval.",
+	},
 }
 
 // FindVerb returns the Verb entry for name, or nil if not registered.
@@ -209,4 +224,6 @@ var (
 	handleBumpSkillVersion   HandlerFunc = stubHandler
 	// M9: replaced by verbs_scheduled.go's init.
 	handleCreateScheduledTask HandlerFunc = stubHandler
+	// M11: replaced by verbs_actions.go's init.
+	handleRequestExternalAction HandlerFunc = stubHandler
 )

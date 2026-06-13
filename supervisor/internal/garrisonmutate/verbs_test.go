@@ -9,13 +9,17 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/garrison-hq/garrison/supervisor/internal/actionbroker"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 // TestVerbsRegistryMatchesEnumeration is the sealed-allow-list test
 // per chat-threat-model.md Rule 1 + spec FR-411 + plan §1.1 (M5.3) +
-// FR-103 (M7) + FR-600 (M9). The Verbs slice MUST contain exactly the
-// enumerated chat-side verb set (11 as of M9). Adding a verb without
-// updating the threat-model amendment + this test fails CI.
+// FR-103 (M7) + FR-600 (M9) + FR-001 (M11). The Verbs slice MUST
+// contain exactly the enumerated chat-side verb set (12 as of M11).
+// Adding a verb without updating the threat-model amendment + this
+// test fails CI.
 func TestVerbsRegistryMatchesEnumeration(t *testing.T) {
 	want := []string{
 		"create_ticket",
@@ -31,6 +35,8 @@ func TestVerbsRegistryMatchesEnumeration(t *testing.T) {
 		"bump_skill_version",
 		// M9 FR-600 addition (eleventh verb, Tier 3):
 		"create_scheduled_task",
+		// M11 FR-001 addition (twelfth verb, Tier 3, agent-callers only):
+		"request_external_action",
 	}
 	got := VerbNames()
 	sort.Strings(got)
@@ -74,11 +80,15 @@ func TestVerbsRegistryReversibilityClassesValid(t *testing.T) {
 
 // TestVerbsRegistryAffectedResourceTypes verifies every verb declares a
 // supported affected_resource_type matching the audit table's CHECK.
+// M11 adds "pending_action" for request_external_action (FR-001).
 func TestVerbsRegistryAffectedResourceTypes(t *testing.T) {
-	allowed := map[string]struct{}{"ticket": {}, "agent_role": {}, "hiring_proposal": {}, "scheduled_task": {}}
+	allowed := map[string]struct{}{
+		"ticket": {}, "agent_role": {}, "hiring_proposal": {},
+		"scheduled_task": {}, "pending_action": {},
+	}
 	for _, v := range Verbs {
 		if _, ok := allowed[v.AffectedResourceType]; !ok {
-			t.Errorf("verb %q has affected_resource_type=%q; want one of {ticket, agent_role, hiring_proposal, scheduled_task}",
+			t.Errorf("verb %q has affected_resource_type=%q; want one of {ticket, agent_role, hiring_proposal, scheduled_task, pending_action}",
 				v.Name, v.AffectedResourceType)
 		}
 	}
@@ -130,10 +140,11 @@ func TestVerbsSlicesDisjoint(t *testing.T) {
 
 // TestServerActionVerbsTierTable pins the ServerActionVerbs registry to
 // the tier table in chat-threat-model.md §5 (Server-Action verb
-// registry): the M8 entry plus the four M9 scheduled-task entries, each
-// with its amended reversibility class and resource type. Adding or
-// re-tiering an entry without amending the threat model + this test
-// fails CI (Rule 1 applies to the Server-Action slice too).
+// registry): the M8 entry plus the four M9 scheduled-task entries plus
+// the three M11 outbox-action entries, each with its amended
+// reversibility class and resource type. Adding or re-tiering an entry
+// without amending the threat model + this test fails CI (Rule 1 applies
+// to the Server-Action slice too).
 func TestServerActionVerbsTierTable(t *testing.T) {
 	want := map[string]struct {
 		class        int
@@ -145,6 +156,10 @@ func TestServerActionVerbsTierTable(t *testing.T) {
 		"pause_scheduled_task":  {1, "scheduled_task"},
 		"resume_scheduled_task": {1, "scheduled_task"},
 		"delete_scheduled_task": {3, "scheduled_task"},
+		// M11 FR-026/FR-027 additions (Outbox approval surface):
+		"approve_action":   {1, "pending_action"},
+		"reject_action":    {1, "pending_action"},
+		"mark_action_done": {1, "pending_action"},
 	}
 	if len(ServerActionVerbs) != len(want) {
 		t.Fatalf("ServerActionVerbs has %d entries; want %d (%v)", len(ServerActionVerbs), len(want), want)
@@ -248,6 +263,170 @@ func TestParseCreateScheduledTaskArgsTrimsFields(t *testing.T) {
 		args.RoleSlug != "engineering.engineer" || args.Mode != "ticket" ||
 		args.ScheduleExpr != "daily@09:00" {
 		t.Errorf("fields not trimmed: %+v", args)
+	}
+}
+
+// ----------------------------------------------------------------------------
+// request_external_action parse + dispatchTierMessage coverage (T014 top-up).
+// No DB required: the parse path short-circuits before any pool call.
+// ----------------------------------------------------------------------------
+
+// TestParseRequestExternalActionArgsRejectsInvalidJSON verifies that
+// parseRequestExternalActionArgs returns a validation-failed Result when
+// the raw JSON cannot be unmarshalled (covers verbs_actions.go:186-188).
+func TestParseRequestExternalActionArgsRejectsInvalidJSON(t *testing.T) {
+	_, res := parseRequestExternalActionArgs(json.RawMessage(`{not valid json`))
+	if res == nil {
+		t.Fatal("expected a non-nil Result for invalid JSON; got nil")
+	}
+	if res.Success {
+		t.Error("expected Success=false for invalid JSON")
+	}
+	if res.ErrorKind != string(ErrValidationFailed) {
+		t.Errorf("ErrorKind = %q; want %q", res.ErrorKind, ErrValidationFailed)
+	}
+	if !strings.Contains(res.Message, "parse args") {
+		t.Errorf("Message = %q; want it to mention 'parse args'", res.Message)
+	}
+}
+
+// TestParseRequestExternalActionArgsRequiresFields verifies each required
+// field rejection path in parseRequestExternalActionArgs (covers
+// verbs_actions.go:193-204 — action_type, target, payload validations).
+func TestParseRequestExternalActionArgsRequiresFields(t *testing.T) {
+	cases := []struct {
+		name       string
+		raw        string
+		wantSubstr string
+	}{
+		{
+			name:       "missing action_type",
+			raw:        `{"action_type":"  ","target":{"k":"v"},"payload":"p"}`,
+			wantSubstr: "action_type is required",
+		},
+		{
+			name:       "null target",
+			raw:        `{"action_type":"github_issue_comment","target":null,"payload":"p"}`,
+			wantSubstr: "target is required",
+		},
+		{
+			name:       "empty target bytes",
+			raw:        `{"action_type":"github_issue_comment","payload":"p"}`,
+			wantSubstr: "target is required",
+		},
+		{
+			name:       "missing payload",
+			raw:        `{"action_type":"github_issue_comment","target":{"k":"v"},"payload":"  "}`,
+			wantSubstr: "payload is required",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, res := parseRequestExternalActionArgs(json.RawMessage(tc.raw))
+			if res == nil {
+				t.Fatalf("expected a non-nil Result for %q", tc.name)
+			}
+			if res.Success {
+				t.Errorf("expected Success=false for %q", tc.name)
+			}
+			if !strings.Contains(res.Message, tc.wantSubstr) {
+				t.Errorf("Message = %q; want it to contain %q", res.Message, tc.wantSubstr)
+			}
+		})
+	}
+}
+
+// TestDispatchTierMessageCoversAllTiers exercises dispatchTierMessage for
+// every Tier constant plus the default/unknown branch (verbs_actions.go
+// lines 232-244). This ensures the switch is fully covered by the default suite.
+func TestDispatchTierMessageCoversAllTiers(t *testing.T) {
+	cases := []struct {
+		tier       actionbroker.Tier
+		wantSubstr string
+	}{
+		{actionbroker.TierAuto, "no operator gate required"},
+		{actionbroker.TierNotify, "operator will be notified post-hoc"},
+		{actionbroker.TierApprove, "pending operator approval"},
+		{actionbroker.TierHumanOnly, "pending manual completion"},
+		{actionbroker.Tier("unknown_tier_value"), "pending operator review"},
+	}
+	for _, tc := range cases {
+		t.Run(string(tc.tier), func(t *testing.T) {
+			got := dispatchTierMessage(tc.tier)
+			if !strings.Contains(got, tc.wantSubstr) {
+				t.Errorf("dispatchTierMessage(%q) = %q; want substring %q", tc.tier, got, tc.wantSubstr)
+			}
+		})
+	}
+}
+
+// TestRequestExternalActionHandlerRejectsUnparsableArgs verifies that the
+// handler returns a validation_failed Result for unparsable JSON args
+// (covers verbs_actions.go:85-88 — the vRes != nil path). No DB is needed
+// because the parse rejection fires before any pool call.
+// The Deps must carry a valid AgentInstanceID so the agent-caller guard
+// passes and the parse check is reached.
+func TestRequestExternalActionHandlerRejectsUnparsableArgs(t *testing.T) {
+	// Minimal deps: valid AgentInstanceID so the agent guard passes; no
+	// pool because the parse rejection fires before any DB call.
+	deps := Deps{
+		AgentInstanceID: pgtype.UUID{Valid: true, Bytes: [16]byte{1}},
+	}
+	r, err := realRequestExternalActionHandler(
+		context.Background(), deps, json.RawMessage(`{bad json`),
+	)
+	if err != nil {
+		t.Fatalf("handler returned error; want nil error + typed Result: %v", err)
+	}
+	if r.Success {
+		t.Fatal("expected Success=false for unparsable args")
+	}
+	if r.ErrorKind != string(ErrValidationFailed) {
+		t.Errorf("ErrorKind = %q; want %q", r.ErrorKind, ErrValidationFailed)
+	}
+	if !strings.Contains(r.Message, "parse args") {
+		t.Errorf("Message = %q; want it to mention 'parse args'", r.Message)
+	}
+}
+
+// TestVerbsHandlerClosureCallsReal verifies that the Verbs[11] entry's
+// Handler closure properly forwards to handleRequestExternalAction (covers
+// the anonymous func at verbs.go:167-169). The closure is called via
+// FindVerb so the test exercises the actual runtime wiring rather than
+// the function directly. A chat-mode call (no AgentInstanceID) produces
+// a validation_failed result — the same guard as TestRequestExternalActionRejectsChatCaller.
+func TestVerbsHandlerClosureCallsReal(t *testing.T) {
+	v := FindVerb("request_external_action")
+	if v == nil {
+		t.Fatal("FindVerb('request_external_action') returned nil")
+	}
+	// Chat-mode deps: no AgentInstanceID set → verb must reject.
+	r, err := v.Handler(context.Background(), validationDeps(), json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+	if r.Success {
+		t.Fatal("expected Success=false — chat caller should be rejected")
+	}
+	if r.ErrorKind != string(ErrValidationFailed) {
+		t.Errorf("ErrorKind = %q; want %q", r.ErrorKind, ErrValidationFailed)
+	}
+}
+
+// TestStubHandlerReturnsValidationFailed exercises the stubHandler function
+// (verbs.go:202-208) which is the placeholder used by verbs whose real
+// handler hasn't been injected yet. Currently all verbs have real handlers,
+// but the stubHandler is still in the production file and we must cover it.
+func TestStubHandlerReturnsValidationFailed(t *testing.T) {
+	r, err := stubHandler(context.Background(), Deps{}, json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("stubHandler returned error: %v", err)
+	}
+	if r.Success {
+		t.Fatal("expected Success=false from stubHandler")
+	}
+	if r.ErrorKind != string(ErrValidationFailed) {
+		t.Errorf("ErrorKind = %q; want %q", r.ErrorKind, ErrValidationFailed)
 	}
 }
 

@@ -20,6 +20,7 @@ sql:
       - ../migrations/20260510000000_m8_zero_human_loop.sql
       - ../migrations/20260610000002_m9_scheduled_wakeups.sql
       - ../migrations/20260612000000_m10_ingress_connectors.sql
+      - ../migrations/20260612000001_m11_action_broker.sql
     gen:
       go:
         package: store
