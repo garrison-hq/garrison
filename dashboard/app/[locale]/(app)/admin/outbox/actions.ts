@@ -137,6 +137,72 @@ async function insertAudit(
   });
 }
 
+/** The shared pending → terminal transition all three operator actions
+ *  run: read + assert status='pending' inside a tx, UPDATE with the
+ *  status re-check in the WHERE clause (the exactly-once guard), append
+ *  the outcome row (FR-024), write the audit row (FR-026), and
+ *  optionally emit pg_notify so the dispatcher claims the row
+ *  reactively (D18). */
+async function transitionPendingAction(
+  id: string,
+  operatorEmail: string,
+  spec: {
+    verb: 'approve_action' | 'reject_action' | 'mark_action_done';
+    set: Partial<typeof pendingActions.$inferInsert>;
+    outcome: string;
+    outcomeDetail: string;
+    extraAuditArgs?: Record<string, unknown>;
+    notifyDispatcher?: boolean;
+  },
+): Promise<OutboxActionResult> {
+  try {
+    return await appDb.transaction(async (tx) => {
+      const read = await readPendingAction(tx, id);
+      if (!read.ok) return read.result;
+      const { row } = read;
+
+      await tx
+        .update(pendingActions)
+        .set(spec.set)
+        .where(
+          and(eq(pendingActions.id, id), eq(pendingActions.status, 'pending')),
+        );
+
+      await insertOutcome(tx, {
+        pendingActionId: id,
+        agentInstanceId: row.agentInstanceId,
+        outcome: spec.outcome,
+        detail: spec.outcomeDetail,
+      });
+
+      await insertAudit(tx, {
+        verb: spec.verb,
+        pendingActionId: id,
+        argsJsonb: {
+          pending_action_id: id,
+          action_type: row.actionType,
+          tier: row.tier,
+          operator: operatorEmail,
+          ...(spec.extraAuditArgs ?? {}),
+        },
+      });
+
+      if (spec.notifyDispatcher) {
+        // Payload = the pending_actions.id UUID string (D18 /
+        // actionbroker.Channel = 'work.action.dispatch_requested').
+        await tx.execute(
+          sql`SELECT pg_notify('work.action.dispatch_requested', ${id})`,
+        );
+      }
+
+      return { ok: true as const, id };
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { ok: false, errorKind: 'internal_error', message };
+  }
+}
+
 // ---------------------------------------------------------------------------
 // approveAction
 // ---------------------------------------------------------------------------
@@ -156,53 +222,13 @@ export async function approveAction(id: string): Promise<OutboxActionResult> {
     return { ok: false, errorKind: 'unauthorized', message: 'must be authenticated to approve actions' };
   }
 
-  try {
-    return await appDb.transaction(async (tx) => {
-      const read = await readPendingAction(tx, id);
-      if (!read.ok) return read.result;
-      const { row } = read;
-
-      // Transition status → approved, recording the approving operator.
-      await tx
-        .update(pendingActions)
-        .set({ status: 'approved', approvedBy: operator.operatorEmail })
-        .where(
-          and(eq(pendingActions.id, id), eq(pendingActions.status, 'pending')),
-        );
-
-      // Append 'approved' outcome (FR-024).
-      await insertOutcome(tx, {
-        pendingActionId: id,
-        agentInstanceId: row.agentInstanceId,
-        outcome: 'approved',
-        detail: `approved by ${operator.operatorEmail}`,
-      });
-
-      // Write audit row (Server-Action-only anchors, FR-026).
-      await insertAudit(tx, {
-        verb: 'approve_action',
-        pendingActionId: id,
-        argsJsonb: {
-          pending_action_id: id,
-          action_type: row.actionType,
-          tier: row.tier,
-          operator: operator.operatorEmail,
-        },
-      });
-
-      // Emit pg_notify so the dispatcher's Handle(ctx, eventID) picks
-      // up this row reactively. Payload = the pending_actions.id UUID
-      // string (D18 / actionbroker.Channel = 'work.action.dispatch_requested').
-      await tx.execute(
-        sql`SELECT pg_notify('work.action.dispatch_requested', ${id})`,
-      );
-
-      return { ok: true as const, id };
-    });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    return { ok: false, errorKind: 'internal_error', message };
-  }
+  return transitionPendingAction(id, operator.operatorEmail, {
+    verb: 'approve_action',
+    set: { status: 'approved', approvedBy: operator.operatorEmail },
+    outcome: 'approved',
+    outcomeDetail: `approved by ${operator.operatorEmail}`,
+    notifyDispatcher: true,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -221,43 +247,12 @@ export async function rejectAction(id: string): Promise<OutboxActionResult> {
     return { ok: false, errorKind: 'unauthorized', message: 'must be authenticated to reject actions' };
   }
 
-  try {
-    return await appDb.transaction(async (tx) => {
-      const read = await readPendingAction(tx, id);
-      if (!read.ok) return read.result;
-      const { row } = read;
-
-      await tx
-        .update(pendingActions)
-        .set({ status: 'rejected' })
-        .where(
-          and(eq(pendingActions.id, id), eq(pendingActions.status, 'pending')),
-        );
-
-      await insertOutcome(tx, {
-        pendingActionId: id,
-        agentInstanceId: row.agentInstanceId,
-        outcome: 'rejected',
-        detail: `rejected by ${operator.operatorEmail}`,
-      });
-
-      await insertAudit(tx, {
-        verb: 'reject_action',
-        pendingActionId: id,
-        argsJsonb: {
-          pending_action_id: id,
-          action_type: row.actionType,
-          tier: row.tier,
-          operator: operator.operatorEmail,
-        },
-      });
-
-      return { ok: true as const, id };
-    });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    return { ok: false, errorKind: 'internal_error', message };
-  }
+  return transitionPendingAction(id, operator.operatorEmail, {
+    verb: 'reject_action',
+    set: { status: 'rejected' },
+    outcome: 'rejected',
+    outcomeDetail: `rejected by ${operator.operatorEmail}`,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -284,44 +279,13 @@ export async function markActionDone(
 
   const detail = note?.trim() ?? null;
 
-  try {
-    return await appDb.transaction(async (tx) => {
-      const read = await readPendingAction(tx, id);
-      if (!read.ok) return read.result;
-      const { row } = read;
-
-      await tx
-        .update(pendingActions)
-        .set({ status: 'done' })
-        .where(
-          and(eq(pendingActions.id, id), eq(pendingActions.status, 'pending')),
-        );
-
-      await insertOutcome(tx, {
-        pendingActionId: id,
-        agentInstanceId: row.agentInstanceId,
-        outcome: 'done',
-        detail: detail
-          ? `done by ${operator.operatorEmail}: ${detail}`
-          : `done by ${operator.operatorEmail}`,
-      });
-
-      await insertAudit(tx, {
-        verb: 'mark_action_done',
-        pendingActionId: id,
-        argsJsonb: {
-          pending_action_id: id,
-          action_type: row.actionType,
-          tier: row.tier,
-          operator: operator.operatorEmail,
-          note: detail ?? null,
-        },
-      });
-
-      return { ok: true as const, id };
-    });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    return { ok: false, errorKind: 'internal_error', message };
-  }
+  return transitionPendingAction(id, operator.operatorEmail, {
+    verb: 'mark_action_done',
+    set: { status: 'done' },
+    outcome: 'done',
+    outcomeDetail: detail
+      ? `done by ${operator.operatorEmail}: ${detail}`
+      : `done by ${operator.operatorEmail}`,
+    extraAuditArgs: { note: detail ?? null },
+  });
 }

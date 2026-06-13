@@ -205,45 +205,13 @@ func (w *Worker) Handle(ctx context.Context, eventID pgtype.UUID) error {
 	)
 
 	// Tier-specific dispatchability gate (plan §"Thread 3", step 2).
-	switch Tier(row.Tier) {
-	case TierHumanOnly:
-		// human_only rows are structurally excluded by the claim query
-		// (ClaimDispatchablePendingAction filters tier <> 'human_only').
-		// This branch is defence-in-depth; in normal operation it is
-		// never reached through the LISTEN path (FR-017/US4#4).
-		logger.Info("actionbroker: skipping human_only action")
-		if err := q.InsertPendingActionOutcome(ctx, store.InsertPendingActionOutcomeParams{
-			PendingActionID:   row.ID,
-			AgentInstanceID:   row.AgentInstanceID,
-			Outcome:           "skipped_human_only",
-			Detail:            "human_only actions are never dispatched by the supervisor",
-			StructuredOutcome: nil,
-		}); err != nil {
-			return fmt.Errorf("actionbroker: insert skipped_human_only outcome: %w", err)
-		}
-		return tx.Commit(ctx)
-
-	case TierApprove:
-		// approve-tier rows are dispatchable only when status='approved'
-		// (the operator's approve Server Action has already fired). A row
-		// still at status='pending' is not yet approved — skip it (US4#3).
-		if row.Status != "approved" {
-			logger.Debug("actionbroker: approve-tier row not yet approved, skipping",
-				"status", row.Status)
-			// Roll back to release the FOR UPDATE lock cleanly.
-			_ = tx.Rollback(ctx)
-			return nil
-		}
-
-	case TierAuto, TierNotify:
-		// auto/notify rows are dispatched from status='pending'.
-		// ClaimDispatchablePendingAction already checks status IN
-		// ('pending','approved'), so a row at 'pending' is fine.
-
-	default:
-		// Unknown tier — log and skip without crashing the loop.
-		logger.Error("actionbroker: unknown tier; skipping row", "tier", row.Tier)
-		_ = tx.Rollback(ctx)
+	// The gate settles the tx itself (commit or rollback) when the row
+	// must not be dispatched.
+	dispatch, err := w.applyTierGate(ctx, q, tx, row, logger)
+	if err != nil {
+		return err
+	}
+	if !dispatch {
 		return nil
 	}
 
@@ -292,7 +260,78 @@ func (w *Worker) Handle(ctx context.Context, eventID pgtype.UUID) error {
 		return w.failRow(ctx, q, tx, row, postErr.Error())
 	}
 
-	// Success path — build the structured outcome JSON.
+	return w.markExecuted(ctx, q, tx, row, commentURL, logger)
+}
+
+// applyTierGate enforces the tier-specific dispatchability rules (plan
+// §"Thread 3", step 2). When the row must not be dispatched it settles
+// the tx itself — commit for the human_only defence-in-depth outcome,
+// rollback for not-yet-approved and unknown-tier rows — and returns
+// dispatch=false.
+func (w *Worker) applyTierGate(
+	ctx context.Context,
+	q *store.Queries,
+	tx pgx.Tx,
+	row store.PendingAction,
+	logger *slog.Logger,
+) (dispatch bool, err error) {
+	switch Tier(row.Tier) {
+	case TierHumanOnly:
+		// human_only rows are structurally excluded by the claim query
+		// (ClaimDispatchablePendingAction filters tier <> 'human_only').
+		// This branch is defence-in-depth; in normal operation it is
+		// never reached through the LISTEN path (FR-017/US4#4).
+		logger.Info("actionbroker: skipping human_only action")
+		if err := q.InsertPendingActionOutcome(ctx, store.InsertPendingActionOutcomeParams{
+			PendingActionID:   row.ID,
+			AgentInstanceID:   row.AgentInstanceID,
+			Outcome:           "skipped_human_only",
+			Detail:            "human_only actions are never dispatched by the supervisor",
+			StructuredOutcome: nil,
+		}); err != nil {
+			return false, fmt.Errorf("actionbroker: insert skipped_human_only outcome: %w", err)
+		}
+		return false, tx.Commit(ctx)
+
+	case TierApprove:
+		// approve-tier rows are dispatchable only when status='approved'
+		// (the operator's approve Server Action has already fired). A row
+		// still at status='pending' is not yet approved — skip it (US4#3).
+		if row.Status != "approved" {
+			logger.Debug("actionbroker: approve-tier row not yet approved, skipping",
+				"status", row.Status)
+			// Roll back to release the FOR UPDATE lock cleanly.
+			_ = tx.Rollback(ctx)
+			return false, nil
+		}
+		return true, nil
+
+	case TierAuto, TierNotify:
+		// auto/notify rows are dispatched from status='pending'.
+		// ClaimDispatchablePendingAction already checks status IN
+		// ('pending','approved'), so a row at 'pending' is fine.
+		return true, nil
+
+	default:
+		// Unknown tier — log and skip without crashing the loop.
+		logger.Error("actionbroker: unknown tier; skipping row", "tier", row.Tier)
+		_ = tx.Rollback(ctx)
+		return false, nil
+	}
+}
+
+// markExecuted records the success path for a dispatched row (plan D10
+// steps 5-6): dispatched_at + 'executed' outcome, the additional
+// 'notified' outcome for notify-tier rows (D17, US4#2, FR-028), then
+// commits.
+func (w *Worker) markExecuted(
+	ctx context.Context,
+	q *store.Queries,
+	tx pgx.Tx,
+	row store.PendingAction,
+	commentURL string,
+	logger *slog.Logger,
+) error {
 	structuredJSON, _ := json.Marshal(map[string]string{
 		"comment_url": commentURL,
 	})
@@ -320,9 +359,6 @@ func (w *Worker) Handle(ctx context.Context, eventID pgtype.UUID) error {
 		return fmt.Errorf("actionbroker: insert executed outcome: %w", err)
 	}
 
-	// notify-tier additionally gets a 'notified' outcome row so the
-	// Outbox can distinguish post-hoc feed items from pending approvals
-	// (plan D17, US4#2, FR-028).
 	if Tier(row.Tier) == TierNotify {
 		if err := q.InsertPendingActionOutcome(ctx, store.InsertPendingActionOutcomeParams{
 			PendingActionID:   row.ID,

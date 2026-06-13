@@ -216,7 +216,7 @@ export interface TicketSummary {
 export async function getTicketSummariesForActions(
   ticketIds: string[],
 ): Promise<Map<string, TicketSummary>> {
-  const validIds = ticketIds.filter(Boolean) as string[];
+  const validIds = ticketIds.filter(Boolean);
   if (validIds.length === 0) return new Map();
   const rows = await appDb
     .select({ id: tickets.id, objective: tickets.objective })

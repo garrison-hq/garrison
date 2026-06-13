@@ -71,12 +71,8 @@ function statusTone(status: string): 'accent' | 'ok' | 'warn' | 'err' | 'neutral
 }
 
 function actionTypeLabel(actionType: string): string {
-  switch (actionType) {
-    case 'github_issue_comment':
-      return 'GitHub issue comment';
-    default:
-      return actionType;
-  }
+  if (actionType === 'github_issue_comment') return 'GitHub issue comment';
+  return actionType;
 }
 
 function renderTarget(row: PendingActionRow): string {
@@ -166,9 +162,10 @@ export default async function OutboxPage() {
         ) : (
           <div className="space-y-4">
             {approveRows.map((row) => (
-              <ApproveCard
+              <ActionCard
                 key={row.id}
                 row={row}
+                mode="approve"
                 agentLabel={agentLabel(row.agentInstanceId)}
                 ticketLabel={ticketLabel(row.ticketId)}
               />
@@ -194,9 +191,10 @@ export default async function OutboxPage() {
         ) : (
           <div className="space-y-4">
             {humanOnlyRows.map((row) => (
-              <HumanOnlyCard
+              <ActionCard
                 key={row.id}
                 row={row}
+                mode="human_only"
                 agentLabel={agentLabel(row.agentInstanceId)}
                 ticketLabel={ticketLabel(row.ticketId)}
               />
@@ -256,22 +254,27 @@ export default async function OutboxPage() {
 }
 
 // ---------------------------------------------------------------------------
-// ApproveCard — one approve-tier pending action with approve + reject.
+// ActionCard — one pending action. mode='approve' renders the approve +
+// reject controls (FR-025/US1#3); mode='human_only' renders the
+// mark-as-done form over the agent's prepared payload (FR-027/US5#2).
 // ---------------------------------------------------------------------------
 
-function ApproveCard({
+function ActionCard({
   row,
+  mode,
   agentLabel,
   ticketLabel,
 }: Readonly<{
   row: PendingActionRow;
+  mode: 'approve' | 'human_only';
   agentLabel: string;
   ticketLabel: string | null;
 }>) {
+  const isApprove = mode === 'approve';
   return (
     <div
       className="border border-border-1 rounded bg-surface-1 p-4 space-y-3"
-      data-testid="outbox-approve-card"
+      data-testid={isApprove ? 'outbox-approve-card' : 'outbox-human-only-card'}
     >
       {/* Header row */}
       <div className="flex items-start justify-between gap-4">
@@ -306,92 +309,23 @@ function ApproveCard({
         ) : null}
       </dl>
 
-      {/* Full rendered payload */}
+      {/* Rendered payload (for human_only: the agent's prepared action text) */}
       <section className="space-y-1">
-        <h3 className="text-text-3 text-[11px] uppercase tracking-[0.06em]">Payload</h3>
+        <h3 className="text-text-3 text-[11px] uppercase tracking-[0.06em]">
+          {isApprove ? 'Payload' : 'Prepared payload'}
+        </h3>
         <pre
           className="whitespace-pre-wrap text-[13px] text-text-1 bg-surface-2 rounded p-3 max-h-48 overflow-auto"
-          data-testid="outbox-approve-payload"
+          data-testid={isApprove ? 'outbox-approve-payload' : 'outbox-human-only-payload'}
         >
           {row.renderedPayload}
         </pre>
       </section>
 
-      {/* Action controls */}
+      {/* Tier-appropriate controls */}
       <OutboxControls
         id={row.id}
-        mode="approve"
-      />
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// HumanOnlyCard — one human_only action with mark-as-done form.
-// ---------------------------------------------------------------------------
-
-function HumanOnlyCard({
-  row,
-  agentLabel,
-  ticketLabel,
-}: Readonly<{
-  row: PendingActionRow;
-  agentLabel: string;
-  ticketLabel: string | null;
-}>) {
-  return (
-    <div
-      className="border border-border-1 rounded bg-surface-1 p-4 space-y-3"
-      data-testid="outbox-human-only-card"
-    >
-      {/* Header row */}
-      <div className="flex items-start justify-between gap-4">
-        <div className="space-y-1">
-          <div className="flex items-center gap-2 flex-wrap">
-            <span className="text-text-1 text-sm font-medium">
-              {actionTypeLabel(row.actionType)}
-            </span>
-            <Chip tone={tierTone(row.tier)}>{row.tier}</Chip>
-            <Chip tone={statusTone(row.status)}>{row.status}</Chip>
-          </div>
-          <p className="text-text-3 text-[11px] font-mono">{row.tierReason}</p>
-        </div>
-        <span className="text-text-3 text-[11px] font-mono shrink-0">
-          {formatTimestamp(row.createdAt)}
-        </span>
-      </div>
-
-      {/* Target + origin */}
-      <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-[13px]">
-        <dt className="text-text-3">Target</dt>
-        <dd className="text-text-1 font-mono text-[12px]">{renderTarget(row)}</dd>
-
-        <dt className="text-text-3">Agent</dt>
-        <dd className="text-text-3 font-mono text-[12px]">{agentLabel}</dd>
-
-        {ticketLabel ? (
-          <>
-            <dt className="text-text-3">Ticket</dt>
-            <dd className="text-text-3 text-[12px]">{ticketLabel}</dd>
-          </>
-        ) : null}
-      </dl>
-
-      {/* Prepared payload (the agent's prepared action text) */}
-      <section className="space-y-1">
-        <h3 className="text-text-3 text-[11px] uppercase tracking-[0.06em]">Prepared payload</h3>
-        <pre
-          className="whitespace-pre-wrap text-[13px] text-text-1 bg-surface-2 rounded p-3 max-h-48 overflow-auto"
-          data-testid="outbox-human-only-payload"
-        >
-          {row.renderedPayload}
-        </pre>
-      </section>
-
-      {/* Mark-as-done controls */}
-      <OutboxControls
-        id={row.id}
-        mode="human_only"
+        mode={mode}
       />
     </div>
   );
