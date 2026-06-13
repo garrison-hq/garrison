@@ -183,7 +183,7 @@ async function transitionPendingAction(
           action_type: row.actionType,
           tier: row.tier,
           operator: operatorEmail,
-          ...(spec.extraAuditArgs ?? {}),
+          ...spec.extraAuditArgs,
         },
       });
 
