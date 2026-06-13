@@ -607,3 +607,241 @@ func TestHandleRecoverableFailureMarksFailedNoRetry(t *testing.T) {
 		t.Errorf("outcome count = %d; want 1 (no retry produces no second outcome)", n)
 	}
 }
+
+// TestNewRejectsNilDeps verifies that New returns an error for each missing
+// required Dep (Pool, Queries, Vault, GitHub). These are the four nil-guard
+// branches inside New() (dispatcher.go lines 106–117).
+func TestNewRejectsNilDeps(t *testing.T) {
+	fx := setupDispatcher(t)
+
+	// Pool nil.
+	_, err := New(Deps{Pool: nil, Queries: fx.queries, Vault: fx.vault, GitHub: fx.github})
+	if err == nil {
+		t.Error("New(nil Pool) should return error")
+	}
+
+	// Queries nil.
+	_, err = New(Deps{Pool: fx.pool, Queries: nil, Vault: fx.vault, GitHub: fx.github})
+	if err == nil {
+		t.Error("New(nil Queries) should return error")
+	}
+
+	// Vault nil.
+	_, err = New(Deps{Pool: fx.pool, Queries: fx.queries, Vault: nil, GitHub: fx.github})
+	if err == nil {
+		t.Error("New(nil Vault) should return error")
+	}
+
+	// GitHub nil.
+	_, err = New(Deps{Pool: fx.pool, Queries: fx.queries, Vault: fx.vault, GitHub: nil})
+	if err == nil {
+		t.Error("New(nil GitHub) should return error")
+	}
+}
+
+// TestNewDefaultsLogger verifies that when Logger is nil, New substitutes
+// slog.Default() so the worker never dereferences a nil logger. The
+// returned worker must be non-nil (covers dispatcher.go line 119).
+func TestNewDefaultsLogger(t *testing.T) {
+	fx := setupDispatcher(t)
+	w, err := New(Deps{
+		Pool:    fx.pool,
+		Queries: fx.queries,
+		Vault:   fx.vault,
+		GitHub:  fx.github,
+		Logger:  nil, // explicitly nil → must be defaulted
+	})
+	if err != nil {
+		t.Fatalf("New with nil Logger returned error: %v", err)
+	}
+	if w == nil {
+		t.Fatal("New with nil Logger returned nil worker")
+	}
+}
+
+// TestRunLoopCancelExits verifies that RunLoop returns nil immediately when
+// the context is cancelled. This covers the <-ctx.Done() branch in RunLoop
+// (dispatcher.go lines 128–156) — specifically the interval fallback path
+// and the graceful exit.
+func TestRunLoopCancelExits(t *testing.T) {
+	fx := setupDispatcher(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel before RunLoop even starts
+
+	deps := Deps{
+		Pool:         fx.pool,
+		Queries:      fx.queries,
+		Vault:        fx.vault,
+		GitHub:       fx.github,
+		PollInterval: 1, // 1ns so the ticker fires fast if ctx isn't done yet
+	}
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- RunLoop(ctx, deps)
+	}()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Errorf("RunLoop returned non-nil error on cancel: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("RunLoop did not exit within 5s after context cancellation")
+	}
+}
+
+// TestRunLoopDefaultsIntervalWhenZero verifies that RunLoop substitutes 30s
+// when PollInterval is zero or negative (dispatcher.go lines 132–135).
+// We cancel the context immediately so the test doesn't block 30s; the
+// important thing is that the Ticker construction doesn't panic with ≤0.
+func TestRunLoopDefaultsIntervalWhenZero(t *testing.T) {
+	fx := setupDispatcher(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	deps := Deps{
+		Pool:         fx.pool,
+		Queries:      fx.queries,
+		Vault:        fx.vault,
+		GitHub:       fx.github,
+		PollInterval: 0, // zero → must default to 30s internally
+	}
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- RunLoop(ctx, deps)
+	}()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Errorf("RunLoop with zero interval returned error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("RunLoop did not exit within 5s after context cancellation")
+	}
+}
+
+// TestHandleUnknownTierSkipsRow verifies the defence-in-depth path in
+// Handle's switch that handles an unknown tier value (dispatcher.go
+// lines 243–247). When a ClaimFn injects a row with an unrecognised tier
+// string, Handle must skip it without calling PostComment and return nil
+// so the dispatcher loop continues.
+func TestHandleUnknownTierSkipsRow(t *testing.T) {
+	fx := setupDispatcher(t)
+
+	// Inject a row with a fabricated tier value via ClaimFn.
+	// We cannot insert it into the DB (the tier CHECK would reject it),
+	// so we construct the struct directly.
+	unknownRow := store.PendingAction{
+		ID:              pgtype.UUID{Valid: true, Bytes: [16]byte{0xAA, 0xBB, 0xCC, 0xDD}},
+		ActionType:      "test_unknown_tier_action",
+		Target:          []byte(`{}`),
+		RenderedPayload: "test payload",
+		AgentInstanceID: fx.agentInstanceID,
+		Tier:            "totally_made_up_tier",
+		TierReason:      "test",
+		Status:          "pending",
+	}
+
+	w, err := New(Deps{
+		Pool:    fx.pool,
+		Queries: fx.queries,
+		Vault:   fx.vault,
+		GitHub:  fx.github,
+		PATPath: "actions/GITHUB_PAT",
+		ClaimFn: func(_ context.Context, _ *store.Queries) (store.PendingAction, error) {
+			return unknownRow, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if err := w.Handle(context.Background(), pgtype.UUID{}); err != nil {
+		t.Fatalf("Handle with unknown tier returned error: %v", err)
+	}
+
+	// PostComment must NOT have been called.
+	if fx.github.calls != 0 {
+		t.Errorf("PostComment calls = %d; want 0 — unknown tier must be skipped", fx.github.calls)
+	}
+}
+
+// TestHandleUnmarshalTargetError verifies the target-JSONB unmarshal error
+// path (dispatcher.go lines 266–269): when the pending_actions.target is
+// not valid JSON that can be decoded into Target, Handle marks the row
+// 'failed' and writes a 'failed' outcome without calling PostComment.
+func TestHandleUnmarshalTargetError(t *testing.T) {
+	fx := setupDispatcher(t)
+
+	// Insert an approve-tier row with a JSON target that is valid JSONB but
+	// cannot unmarshal into Target (it is a JSON string, not an object).
+	// Use the same schema-unqualified table name the fixture helpers use.
+	var actionID pgtype.UUID
+	if err := fx.pool.QueryRow(context.Background(), `
+		INSERT INTO pending_actions
+		    (action_type, target, rendered_payload, agent_instance_id, tier, tier_reason, status)
+		VALUES ('github_issue_comment', '"not-an-object"'::jsonb, 'test payload', $1, 'approve', 'test-reason', 'approved')
+		RETURNING id`, fx.agentInstanceID,
+	).Scan(&actionID); err != nil {
+		t.Fatalf("insert malformed-target row: %v", err)
+	}
+
+	w, err := fx.newWorker()
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if err := w.Handle(context.Background(), pgtype.UUID{}); err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+
+	// PostComment must NOT have been called.
+	if fx.github.calls != 0 {
+		t.Errorf("PostComment calls = %d; want 0 — malformed target must not reach provider", fx.github.calls)
+	}
+
+	// Row must be marked 'failed'.
+	if got := fx.readStatus(t, actionID); got != "failed" {
+		t.Errorf("status = %q; want 'failed' on target unmarshal error", got)
+	}
+
+	// A 'failed' outcome must exist.
+	if !fx.hasOutcome(t, actionID, "failed") {
+		t.Error("no 'failed' outcome row found for target unmarshal error")
+	}
+}
+
+// TestHandleTerminalProviderFailureMarksFailed verifies the terminal-
+// failure path (dispatcher.go lines 290–292): when PostComment returns
+// a non-ErrRecoverable error (e.g. 404/422), the dispatcher marks the row
+// 'failed' and does not retry.
+func TestHandleTerminalProviderFailureMarksFailed(t *testing.T) {
+	fx := setupDispatcher(t)
+	fx.github.errToReturn = errors.New("actionbroker: terminal provider error: HTTP 404")
+
+	actionID := fx.insertPendingAction(t, "github_issue_comment", "approve", "approved", githubTarget)
+
+	w, err := fx.newWorker()
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if err := w.Handle(context.Background(), pgtype.UUID{}); err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+
+	if fx.github.calls != 1 {
+		t.Errorf("PostComment calls = %d; want exactly 1 (no retry on terminal error)", fx.github.calls)
+	}
+
+	if got := fx.readStatus(t, actionID); got != "failed" {
+		t.Errorf("status = %q; want 'failed'", got)
+	}
+
+	if !fx.hasOutcome(t, actionID, "failed") {
+		t.Error("no 'failed' outcome row found")
+	}
+}

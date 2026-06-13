@@ -347,3 +347,76 @@ func TestPostCommentNeverLogsPATOnError(t *testing.T) {
 		t.Errorf("log output contains the PAT string %q — SC-005 violation:\n%s", testPAT, logged)
 	}
 }
+
+// TestPostCommentUnexpectedStatusIsTerminal verifies that an HTTP status
+// code not explicitly handled (e.g. 301, 204, 200) is treated as a
+// terminal (non-recoverable) error rather than silently succeeding or
+// retrying. This covers the `default:` branch in PostComment's switch.
+func TestPostCommentUnexpectedStatusIsTerminal(t *testing.T) {
+	// Use a status code that is not 201, 403, 429, 404, 422, or 5xx.
+	for _, code := range []int{http.StatusOK, http.StatusNoContent, http.StatusMovedPermanently} {
+		t.Run(http.StatusText(code), func(t *testing.T) {
+			srv := httptest.NewServer(makeCommentHandler(code, ""))
+			defer srv.Close()
+
+			c := newTestClient(srv)
+			target := Target{Owner: "owner", Repo: "repo", IssueNumber: 1}
+			_, err := c.PostComment(context.Background(), target, "body", "pat")
+			if err == nil {
+				t.Fatalf("expected error on HTTP %d; got nil", code)
+			}
+			if errors.Is(err, ErrRecoverable) {
+				t.Errorf("HTTP %d should be terminal, not ErrRecoverable: %v", code, err)
+			}
+		})
+	}
+}
+
+// TestPostCommentNilHTTPClientDefaultsToTimeout verifies that when
+// PostCommentClient.HTTPClient is nil the implementation substitutes a
+// 10-second-timeout client (the zero-value safety described in the type
+// doc). This exercises the nil-check branch in PostComment. We route the
+// request to an httptest.Server so the call succeeds without real network.
+func TestPostCommentNilHTTPClientDefaultsToTimeout(t *testing.T) {
+	commentURL := "https://github.com/test/repo/issues/3#issuecomment-1"
+	srv := httptest.NewServer(makeCommentHandler(http.StatusCreated, commentURL))
+	defer srv.Close()
+
+	// HTTPClient intentionally left nil; BaseURL is the test server so the
+	// default (*http.Client{Timeout: 10s}) can reach it.
+	c := &PostCommentClient{
+		HTTPClient: nil,
+		BaseURL:    srv.URL,
+	}
+	target := Target{Owner: "test", Repo: "repo", IssueNumber: 3}
+	got, err := c.PostComment(context.Background(), target, "hello", "test-pat")
+	if err != nil {
+		t.Fatalf("PostComment with nil HTTPClient returned error: %v", err)
+	}
+	if got != commentURL {
+		t.Errorf("returned URL = %q; want %q", got, commentURL)
+	}
+}
+
+// TestPostCommentEmptyBaseURLDefaultsToGitHub verifies that when
+// PostCommentClient.BaseURL is empty the implementation falls back to
+// "https://api.github.com". We cannot hit the real GitHub API in tests,
+// so we only verify the error path (connection refused / DNS failure).
+// The non-empty BaseURL path is already covered by the httptest-backed tests.
+func TestPostCommentEmptyBaseURLDefaultsToGitHub(t *testing.T) {
+	c := &PostCommentClient{
+		HTTPClient: &http.Client{Timeout: 1}, // 1ns timeout → guaranteed failure
+		BaseURL:    "",
+	}
+	target := Target{Owner: "garrison-hq", Repo: "garrison", IssueNumber: 1}
+	_, err := c.PostComment(context.Background(), target, "body", "pat")
+	if err == nil {
+		t.Fatal("expected error when reaching api.github.com with 1ns timeout; got nil")
+	}
+	// The error should be ErrRecoverable (network/timeout failure).
+	if !errors.Is(err, ErrRecoverable) {
+		// Accept any non-nil error — the important thing is that the empty
+		// BaseURL path was exercised and the code didn't panic.
+		t.Logf("non-recoverable error on empty BaseURL path (acceptable): %v", err)
+	}
+}

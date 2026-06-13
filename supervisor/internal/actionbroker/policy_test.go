@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 // TestClassifyFloorIsApprove verifies that a floor action type returns
@@ -165,4 +167,36 @@ func migrationFilePath(t *testing.T) string {
 		"..", "..", "cmd", "supervisor", "migrations",
 		"20260612000001_m11_action_broker.sql",
 	)
+}
+
+// TestUUIDStrInvalidReturnsEmpty verifies that uuidStr returns an empty
+// string when the UUID is not valid (dispatcher.go line 381). The helper
+// is used only for logging; a zero UUID (from the poll-fallback path)
+// must produce "" not a garbled hex string.
+func TestUUIDStrInvalidReturnsEmpty(t *testing.T) {
+	var u pgtype.UUID // zero value: Valid = false
+	if got := uuidStr(u); got != "" {
+		t.Errorf("uuidStr(invalid UUID) = %q; want empty string", got)
+	}
+}
+
+// TestUUIDStrValidFormatsCorrectly verifies that uuidStr formats a known
+// UUID to the canonical 36-char dash-delimited hex string (dispatcher.go
+// lines 382-392).
+func TestUUIDStrValidFormatsCorrectly(t *testing.T) {
+	u := pgtype.UUID{
+		Bytes: [16]byte{
+			0x01, 0x23, 0x45, 0x67,
+			0x89, 0xAB,
+			0xCD, 0xEF,
+			0x01, 0x23,
+			0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF,
+		},
+		Valid: true,
+	}
+	got := uuidStr(u)
+	want := "01234567-89ab-cdef-0123-456789abcdef"
+	if got != want {
+		t.Errorf("uuidStr = %q; want %q", got, want)
+	}
 }

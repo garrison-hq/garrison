@@ -159,7 +159,7 @@ T008–T009 are the unit test suites covering the verb handler and the dispatche
   - **Completion condition**: architecture amendment pin test passes; ops-checklist section names both new env vars, the Infisical vault path convention for action credentials, the Outbox URL, and the permanent-Approve floor note. No code changes.
   - **Out of scope for this task**: retro (T015).
 
-- [ ] **T014** Scripted acceptance — `scripts/m11-acceptance.sh` walking SC-001..SC-009 + coverage + Sonar pre-clearance
+- [x] **T014** Scripted acceptance — `scripts/m11-acceptance.sh` walking SC-001..SC-009 + coverage + Sonar pre-clearance
   - **Depends on**: T001–T013 all complete.
   - **Files**: `scripts/m11-acceptance.sh` (new); patches against earlier tasks' files only if a step fails.
   - **Completion condition**: the script maps each spec success criterion to its verifying suite/step and exits 0 with all steps green:
